@@ -2,6 +2,25 @@
 
 Self-hosted remote podcast recording studio. Each participant records locally in the browser — separate audio and video tracks, no quality loss.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="screenshots/dashboard.png" alt="Home — create a session"/><br/><sub>Home — create a session</sub></td>
+    <td><img src="screenshots/lobby.png" alt="Pre-join — device check"/><br/><sub>Pre-join — device check</sub></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/main.png" alt="Studio"/><br/><sub>Studio</sub></td>
+    <td><img src="screenshots/chat.png" alt="Studio — chat panel"/><br/><sub>Studio — chat panel</sub></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/clocktimer.png" alt="Studio — topic timer"/><br/><sub>Studio — topic timer</sub></td>
+    <td><img src="screenshots/sessions.png" alt="Sessions dashboard"/><br/><sub>Sessions dashboard</sub></td>
+  </tr>
+</table>
+
+---
+
 ## Stack
 
 - **FastAPI** — session management, token generation, chunked upload, file assembly
