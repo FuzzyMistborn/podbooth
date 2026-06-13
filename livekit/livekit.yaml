@@ -12,8 +12,6 @@ rtc:
       credential: turnpassword
 
 keys:
-  # These are overridden by environment variables in production
-  # LIVEKIT_API_KEY and LIVEKIT_API_SECRET
   devkey: devsecret
 
 logging:

@@ -66,23 +66,47 @@ Comment out the `env_file` line in `compose.yml` and fill in the `environment` b
 
 ### 3. Configure LiveKit
 
-Edit `livekit/livekit.yaml` and update the `keys` block to match your `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`:
+The LiveKit API key and secret are arbitrary strings you generate yourself — there's no external service to register with. The key and secret must match between `livekit/livekit.yaml` and your environment variables.
+
+Generate them with:
+
+```bash
+# API key — short, readable identifier
+openssl rand -hex 12
+
+# API secret — longer random value
+openssl rand -base64 32
+```
+
+Edit `livekit/livekit.yaml` and put the generated values in the `keys` block:
 
 ```yaml
 keys:
   your_api_key: your_api_secret
 ```
 
-If you're using coturn for TURN, also update the TURN credentials in `livekit/livekit.yaml` to match `TURN_USER`, `TURN_PASSWORD`, and `TURN_EXTERNAL_IP`:
+Set the same values for `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in your `.env` file (or compose `environment:` block).
+
+If you're using coturn for TURN, you also need to update the TURN credentials in `livekit/livekit.yaml`. Like the LiveKit key/secret, the TURN username and password are arbitrary strings you choose — there's no external account. They just need to match in two places: `livekit/livekit.yaml` and your `.env` file. The `compose.yml` automatically passes the env var values to coturn, so no changes are needed there.
+
+```bash
+# TURN username — any short string
+TURN_USER=turnuser
+
+# TURN password — generate a random one
+openssl rand -base64 24
+```
+
+Update `livekit/livekit.yaml` with the same values and your server's IP:
 
 ```yaml
 rtc:
   turn_servers:
-    - host: 192.168.1.10   # TURN_EXTERNAL_IP
+    - host: 192.168.1.10   # your server's LAN or public IP (TURN_EXTERNAL_IP)
       port: 3478
       protocol: udp
-      username: turnuser   # TURN_USER
-      credential: change-me  # TURN_PASSWORD
+      username: turnuser   # must match TURN_USER in .env
+      credential: change-me  # must match TURN_PASSWORD in .env
 ```
 
 ### 4. Start

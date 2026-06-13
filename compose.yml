@@ -64,4 +64,5 @@ services:
       - "50000-50200:50000-50200/udp"  # RTC UDP range
     volumes:
       - ./livekit/livekit.yaml:/livekit.yaml
-    command: --config /livekit.yaml
+    entrypoint: ["/livekit-server"]
+    command: ["--config", "/livekit.yaml"]
