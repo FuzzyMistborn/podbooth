@@ -6,7 +6,7 @@ services:
     container_name: podbooth-app
     restart: unless-stopped
     ports:
-      - "8100:8000"
+      - "8000:8000"
     volumes:
       - ./recordings:/recordings
     depends_on:

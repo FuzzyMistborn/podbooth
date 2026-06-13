@@ -40,6 +40,7 @@
           <span class="file-participant">{{ f.participant }}</span>
           <span class="file-type {{ f.type }}">{{ f.type }}</span>
           <span class="file-size">{{ f.size_mb }} MB</span>
+          <button class="btn-play" onclick="openPreview('/download/{{ f.path }}', '{{ f.type }}', '{{ f.participant }}', '{{ f.filename }}')">▶ Play</button>
           <a class="btn-download" href="/download/{{ f.path }}">↓ Download</a>
         </div>
         {% endfor %}
@@ -68,7 +69,57 @@
   {% endif %}
 </div>
 
+<!-- Preview modal -->
+<div class="preview-modal" id="preview-modal" onclick="closePreview(event)">
+  <div class="preview-modal-inner">
+    <div class="preview-modal-header">
+      <div>
+        <span class="preview-modal-participant" id="preview-participant"></span>
+        <span class="preview-modal-filename" id="preview-filename"></span>
+      </div>
+      <button class="preview-modal-close" onclick="closePreview()">&times;</button>
+    </div>
+    <div class="preview-modal-body" id="preview-body"></div>
+  </div>
+</div>
+
 <script>
+function openPreview(path, type, participant, filename) {
+  const body = document.getElementById('preview-body');
+  document.getElementById('preview-participant').textContent = participant;
+  document.getElementById('preview-filename').textContent = filename;
+
+  body.innerHTML = '';
+  if (type === 'audio') {
+    const el = document.createElement('audio');
+    el.controls = true;
+    el.src = path;
+    el.autoplay = true;
+    body.appendChild(el);
+  } else {
+    const el = document.createElement('video');
+    el.controls = true;
+    el.src = path;
+    el.autoplay = true;
+    body.appendChild(el);
+  }
+
+  document.getElementById('preview-modal').classList.add('open');
+  document.addEventListener('keydown', _previewEsc);
+}
+
+function closePreview(e) {
+  if (e && e.target !== document.getElementById('preview-modal')) return;
+  const modal = document.getElementById('preview-modal');
+  modal.classList.remove('open');
+  document.getElementById('preview-body').innerHTML = '';
+  document.removeEventListener('keydown', _previewEsc);
+}
+
+function _previewEsc(e) {
+  if (e.key === 'Escape') closePreview();
+}
+
 async function deleteSession(sessionId, hostToken, title) {
   if (!confirm(`Delete "${title}"?\n\nThis will permanently remove the session and all its recordings.`)) return;
   const r = await fetch(`/api/session/${sessionId}/delete`, {

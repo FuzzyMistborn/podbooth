@@ -89,10 +89,8 @@ const btnView      = document.getElementById('btn-view');
 const btnMic       = document.getElementById('btn-mic');
 const btnCam       = document.getElementById('btn-cam');
 const btnScreen    = document.getElementById('btn-screen');
-const btnSettings  = document.getElementById('btn-settings');
-const settingsPanel = document.getElementById('settings-panel');
-const studioMicSel = document.getElementById('studio-mic-select');
-const studioCamSel = document.getElementById('studio-cam-select');
+let activeMicDeviceId = '';
+let activeCamDeviceId = '';
 const btnRaiseHand = document.getElementById('btn-raise-hand');
 const btnRecord    = document.getElementById('btn-record');
 const recIndicator = document.getElementById('rec-indicator');
@@ -198,7 +196,7 @@ async function init() {
   try {
     await room.connect(LIVEKIT_URL, token);
     await room.localParticipant.enableCameraAndMicrophone();
-    setupDevicePanel(micDeviceId, camDeviceId);
+    setupDeviceButtons(micDeviceId, camDeviceId);
 
     renderLocalParticipant();
     for (const p of room.remoteParticipants.values()) {
@@ -636,53 +634,95 @@ function setViewMode(mode) {
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 
-async function setupDevicePanel(activeMicId, activeCamId) {
+function closeAllDeviceDropdowns() {
+  document.getElementById('mic-dropdown')?.classList.remove('open');
+  document.getElementById('cam-dropdown')?.classList.remove('open');
+  document.getElementById('btn-mic-caret')?.classList.remove('open');
+  document.getElementById('btn-cam-caret')?.classList.remove('open');
+}
+
+async function openDeviceDropdown(kind) {
+  const dropdownId = kind === 'audioinput' ? 'mic-dropdown' : 'cam-dropdown';
+  const caretId    = kind === 'audioinput' ? 'btn-mic-caret' : 'btn-cam-caret';
+  const dropdown   = document.getElementById(dropdownId);
+  if (!dropdown) return;
+
+  dropdown.innerHTML = '';
+  const label = document.createElement('div');
+  label.className = 'device-dropdown-label';
+  label.textContent = kind === 'audioinput' ? 'Microphone' : 'Camera';
+  dropdown.appendChild(label);
+
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    studioMicSel.innerHTML = '';
-    studioCamSel.innerHTML = '';
-
-    devices.filter(d => d.kind === 'audioinput').forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.deviceId;
-      opt.textContent = d.label || `Microphone ${studioMicSel.options.length + 1}`;
-      if (d.deviceId === activeMicId) opt.selected = true;
-      studioMicSel.appendChild(opt);
+    const activeId = kind === 'audioinput' ? activeMicDeviceId : activeCamDeviceId;
+    let idx = 0;
+    devices.filter(d => d.kind === kind).forEach(d => {
+      const btn = document.createElement('button');
+      btn.className = 'device-dropdown-item' + (d.deviceId === activeId ? ' active' : '');
+      const check = document.createElement('span');
+      check.className = 'check';
+      check.textContent = d.deviceId === activeId ? '✓' : '';
+      btn.appendChild(check);
+      const name = document.createTextNode(d.label || `${kind === 'audioinput' ? 'Microphone' : 'Camera'} ${++idx}`);
+      btn.appendChild(name);
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        closeAllDeviceDropdowns();
+        if (kind === 'audioinput') {
+          activeMicDeviceId = d.deviceId;
+          await room.switchActiveDevice('audioinput', d.deviceId);
+          if (isRecording && pcmNode) await restartPcmCapture();
+        } else {
+          activeCamDeviceId = d.deviceId;
+          await room.switchActiveDevice('videoinput', d.deviceId);
+        }
+      });
+      dropdown.appendChild(btn);
     });
-
-    devices.filter(d => d.kind === 'videoinput').forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.deviceId;
-      opt.textContent = d.label || `Camera ${studioCamSel.options.length + 1}`;
-      if (d.deviceId === activeCamId) opt.selected = true;
-      studioCamSel.appendChild(opt);
-    });
-
-    studioMicSel.addEventListener('change', () =>
-      room.switchActiveDevice('audioinput', studioMicSel.value)
-    );
-    studioCamSel.addEventListener('change', () =>
-      room.switchActiveDevice('videoinput', studioCamSel.value)
-    );
   } catch (e) {
-    console.warn('Could not enumerate devices for settings panel:', e);
+    console.warn('Could not enumerate devices:', e);
+  }
+
+  dropdown.classList.add('open');
+  document.getElementById(caretId)?.classList.add('open');
+}
+
+function setupDeviceButtons(micDeviceId, camDeviceId) {
+  activeMicDeviceId = micDeviceId;
+  activeCamDeviceId = camDeviceId;
+
+  document.getElementById('btn-mic-caret')?.addEventListener('click', async e => {
+    e.stopPropagation();
+    const isOpen = document.getElementById('mic-dropdown')?.classList.contains('open');
+    closeAllDeviceDropdowns();
+    if (!isOpen) await openDeviceDropdown('audioinput');
+  });
+  document.getElementById('btn-cam-caret')?.addEventListener('click', async e => {
+    e.stopPropagation();
+    const isOpen = document.getElementById('cam-dropdown')?.classList.contains('open');
+    closeAllDeviceDropdowns();
+    if (!isOpen) await openDeviceDropdown('videoinput');
+  });
+}
+
+async function restartPcmCapture() {
+  pcmNode.port.onmessage = null;
+  try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
+  if (pcmFrames > 0) flushPcm(false); // upload buffered audio without finalizing
+  pcmCtx?.close();
+  pcmStream?.getTracks().forEach(t => t.stop());
+  pcmCtx = pcmNode = pcmSource = pcmStream = null;
+  try {
+    await startPcmCapture();
+  } catch (e) {
+    console.warn('Could not restart PCM after mic switch:', e);
+    startOpusFallback();
   }
 }
 
 function setupControls() {
-  btnSettings?.addEventListener('click', e => {
-    e.stopPropagation();
-    const open = settingsPanel.style.display !== 'none';
-    settingsPanel.style.display = open ? 'none' : 'flex';
-    btnSettings.classList.toggle('active', !open);
-  });
-  settingsPanel?.addEventListener('click', e => e.stopPropagation());
-  document.addEventListener('click', () => {
-    if (settingsPanel && settingsPanel.style.display !== 'none') {
-      settingsPanel.style.display = 'none';
-      btnSettings?.classList.remove('active');
-    }
-  });
+  document.addEventListener('click', closeAllDeviceDropdowns);
 
   btnRaiseHand?.addEventListener('click', toggleHand);
 
