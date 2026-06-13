@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Python dependencies
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Dockerfile base image
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
