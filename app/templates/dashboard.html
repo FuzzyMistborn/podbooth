@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Sessions — PodBooth{% endblock %}
+{% block content %}
+<div class="dashboard-layout">
+  <div class="dash-header">
+    <h2>Sessions</h2>
+    <a href="/" class="btn-primary">New Session</a>
+  </div>
+
+  {% if not sessions %}
+  <div class="empty-state">
+    <p>No sessions yet.</p>
+    <a href="/" class="btn-primary">Start your first session</a>
+  </div>
+  {% else %}
+  <div class="session-list">
+    {% for session in sessions %}
+    <div class="session-card {% if session.ended %}ended{% endif %}" data-session-id="{{ session.id }}" data-has-files="{{ 'true' if session_files[session.id] else 'false' }}">
+      <div class="session-card-header">
+        <div>
+          <span class="session-card-title">{{ session.title }}</span>
+          <span class="session-card-date">{{ session.created_at.strftime("%b %d, %Y %H:%M") }}</span>
+        </div>
+        <div class="session-card-meta">
+          {% if session.ended %}
+          <span class="badge badge-ended">Ended</span>
+          {% elif session.recording %}
+          <span class="badge badge-recording">● Recording</span>
+          {% else %}
+          <span class="badge badge-live">Live</span>
+          {% endif %}
+        </div>
+      </div>
+
+      {% set files = session_files[session.id] %}
+      {% if files %}
+      <div class="file-list" id="files-{{ session.id }}">
+        {% for f in files %}
+        <div class="file-row">
+          <span class="file-participant">{{ f.participant }}</span>
+          <span class="file-type {{ f.type }}">{{ f.type }}</span>
+          <span class="file-size">{{ f.size_mb }} MB</span>
+          <a class="btn-download" href="/download/{{ f.path }}">↓ Download</a>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="file-list" id="files-{{ session.id }}">
+        <p class="no-files">No recordings yet.</p>
+        {% if session.ended %}
+        <p class="assembly-status" id="asm-{{ session.id }}" style="display:none"></p>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <div class="session-card-actions">
+        {% if files %}
+        <a href="/download-zip/{{ session.id }}" class="btn-secondary">↓ Download All</a>
+        {% endif %}
+        {% if not session.ended %}
+        <a href="/studio/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Rejoin as Host →</a>
+        {% endif %}
+        <button class="btn-danger" onclick="deleteSession('{{ session.id }}', '{{ session.host_token }}', '{{ session.title }}')">Delete</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<script>
+async function deleteSession(sessionId, hostToken, title) {
+  if (!confirm(`Delete "${title}"?\n\nThis will permanently remove the session and all its recordings.`)) return;
+  const r = await fetch(`/api/session/${sessionId}/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host_token: hostToken }),
+  });
+  if (r.ok) {
+    window.location.reload();
+  } else {
+    alert('Delete failed.');
+  }
+}
+
+// Poll assembly status for ended sessions that have no files yet.
+// When assembly finishes, reload to show the assembled files.
+document.querySelectorAll('.session-card.ended[data-has-files="false"]').forEach(card => {
+  const sessionId = card.dataset.sessionId;
+  const statusEl = document.getElementById(`asm-${sessionId}`);
+  let wasAssembling = false;
+  let polls = 0;
+
+  async function check() {
+    if (polls++ > 60) return; // give up after ~3 minutes
+    try {
+      const r = await fetch(`/api/session/${sessionId}/assembly-status`);
+      if (!r.ok) return;
+      const { assembling } = await r.json();
+
+      if (assembling) {
+        wasAssembling = true;
+        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Processing recordings…'; }
+        setTimeout(check, 3000);
+      } else if (wasAssembling) {
+        window.location.reload();
+      }
+    } catch (e) {}
+  }
+
+  check();
+});
+</script>
+{% endblock %}

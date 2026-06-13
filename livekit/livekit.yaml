@@ -1,0 +1,20 @@
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  port_range_start: 50000
+  port_range_end: 50200
+  turn_servers:
+    - host: 192.168.50.25
+      port: 3478
+      protocol: udp
+      username: turnuser
+      credential: turnpassword
+
+keys:
+  # These are overridden by environment variables in production
+  # LIVEKIT_API_KEY and LIVEKIT_API_SECRET
+  devkey: devsecret
+
+logging:
+  level: info

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Error — PodBooth{% endblock %}
+{% block content %}
+<div class="center-page">
+  <div class="error-card">
+    <span class="error-code">!</span>
+    <h2>{{ message }}</h2>
+    <a href="/" class="btn-primary">Back to Home</a>
+  </div>
+</div>
+{% endblock %}

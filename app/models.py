@@ -1,0 +1,130 @@
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+import json
+import shutil
+import threading
+import uuid
+
+from app.config import settings
+
+
+def _safe_name(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
+
+
+@dataclass
+class Session:
+    id: str
+    title: str
+    host_token: str          # secret token that grants host privileges
+    created_at: datetime
+    dir_name: str            # filesystem directory for this session's recordings
+    recording: bool = False
+    ended: bool = False
+    participants: dict = field(default_factory=dict)   # display name -> joined_at iso
+    pending_guests: dict = field(default_factory=dict) # identity -> {display_name, requested_at}
+    admitted_guests: dict = field(default_factory=dict) # identity -> True
+
+    @property
+    def guest_link_path(self) -> str:
+        return f"/join/{self.id}"
+
+
+_sessions: dict[str, Session] = {}
+_lock = threading.Lock()
+
+
+def _store_path() -> Path:
+    return Path(settings.recordings_dir) / ".sessions.json"
+
+
+def _save():
+    """Persist sessions to disk so they survive restarts."""
+    try:
+        _store_path().parent.mkdir(parents=True, exist_ok=True)
+        data = []
+        for s in _sessions.values():
+            d = asdict(s)
+            d["created_at"] = s.created_at.isoformat()
+            data.append(d)
+        tmp = _store_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(_store_path())
+    except Exception as e:
+        print(f"Session persistence failed: {e}")
+
+
+def load():
+    """Load persisted sessions on startup."""
+    path = _store_path()
+    if not path.exists():
+        return
+    try:
+        for d in json.loads(path.read_text()):
+            d["created_at"] = datetime.fromisoformat(d["created_at"])
+            d.setdefault("pending_guests", {})
+            d.setdefault("admitted_guests", {})
+            session = Session(**d)
+            # Anything that was live when we went down is no longer live
+            session.recording = False
+            _sessions[session.id] = session
+    except Exception as e:
+        print(f"Failed to load sessions: {e}")
+
+
+def title_in_use(title: str) -> bool:
+    """True if any active (non-ended) session has this title."""
+    return any(s.title == title and not s.ended for s in _sessions.values())
+
+
+def create_session(title: str) -> Session:
+    session_id = uuid.uuid4().hex[:12]
+    host_token = uuid.uuid4().hex
+    created_at = datetime.now()
+    dir_name = f"{created_at.strftime('%Y-%m-%d')}-{_safe_name(title)}-{session_id[:6]}"
+    session = Session(
+        id=session_id,
+        title=title,
+        host_token=host_token,
+        created_at=created_at,
+        dir_name=dir_name,
+    )
+    with _lock:
+        _sessions[session_id] = session
+        _save()
+    return session
+
+
+def get_session(session_id: str) -> Optional[Session]:
+    return _sessions.get(session_id)
+
+
+def list_sessions() -> list[Session]:
+    return sorted(_sessions.values(), key=lambda s: s.created_at, reverse=True)
+
+
+def touch(session_id: str):
+    """Persist after external mutation of a session object."""
+    with _lock:
+        _save()
+
+
+def end_session(session_id: str):
+    session = _sessions.get(session_id)
+    if session:
+        session.ended = True
+        session.recording = False
+        with _lock:
+            _save()
+
+
+def delete_session(session_id: str):
+    with _lock:
+        session = _sessions.pop(session_id, None)
+        _save()
+    if session:
+        recordings_dir = Path(settings.recordings_dir) / session.dir_name
+        if recordings_dir.is_dir():
+            shutil.rmtree(recordings_dir, ignore_errors=True)

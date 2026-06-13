@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Waiting — {{ session.title }}{% endblock %}
+{% block content %}
+<div class="center-page">
+  <div class="prejoin-card">
+    <span class="session-badge">{{ session.title }}</span>
+    <h2>Waiting to join</h2>
+    <p class="sub" id="lobby-status">Waiting for the host to let you in…</p>
+    <div class="lobby-spinner">
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+</div>
+
+<script>
+  const SESSION_ID   = "{{ session.id }}";
+  const IDENTITY     = "{{ identity }}";
+  const DISPLAY_NAME = "{{ display_name }}";
+  const MIC_DEVICE_ID = "{{ mic_device_id }}";
+  const CAM_DEVICE_ID = "{{ cam_device_id }}";
+</script>
+<script src="/static/js/lobby.js?v={{ asset_v }}"></script>
+{% endblock %}

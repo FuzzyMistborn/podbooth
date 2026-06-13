@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %}{{ session.title }} — Studio{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+<div class="studio-layout">
+
+  <!-- Video grid: tiles live on the #stage (large) or #filmstrip (thumbnails),
+       placed by the layout engine in studio.js based on view mode / pins. -->
+  <div class="video-grid view-grid" id="video-grid">
+
+    <!-- Timer bar — visible to all participants when a timer is active -->
+    <div class="timer-bar hidden" id="timer-bar">
+      <div class="timer-bar-main">
+        <span class="timer-topic-name" id="timer-topic-name"></span>
+        <div class="timer-bar-end">
+          <span class="timer-countdown" id="timer-countdown"></span>
+          <button class="timer-eye-btn" id="btn-timer-eye" title="Hide time">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="timer-notes-row" id="timer-notes-row" style="display:none"></div>
+      <div class="timer-progress-track">
+        <div class="timer-progress-fill" id="timer-progress-fill"></div>
+      </div>
+    </div>
+
+    <div class="stage s1" id="stage">
+      <div class="empty-grid-msg" id="empty-msg">Waiting for participants…</div>
+    </div>
+    <div class="filmstrip hidden" id="filmstrip"></div>
+  </div>
+
+  <!-- Device settings panel (floats above controls bar) -->
+  <div class="settings-panel" id="settings-panel" style="display:none">
+    <div class="settings-row">
+      <label>Microphone</label>
+      <select id="studio-mic-select"></select>
+    </div>
+    <div class="settings-row">
+      <label>Camera</label>
+      <select id="studio-cam-select"></select>
+    </div>
+  </div>
+
+  <!-- Recordings panel (host) -->
+  {% if is_host %}
+  <div class="files-panel" id="files-panel" style="display:none">
+    <div class="files-panel-header">Recordings</div>
+    <div id="files-list"><span class="files-empty">No recordings yet.</span></div>
+  </div>
+  {% endif %}
+
+  <!-- Timer panel (host only) -->
+  {% if is_host %}
+  <div class="timer-panel" id="timer-panel" style="display:none">
+    <div class="timer-panel-header">Timer Queue</div>
+
+    <div class="timer-thresholds">
+      <div class="timer-threshold-row">
+        <span class="timer-threshold-swatch swatch-yellow"></span>
+        <span class="timer-threshold-label">Yellow at</span>
+        <input type="number" id="timer-yellow" value="120" min="1" max="3600" step="1">
+        <span class="timer-threshold-unit">s</span>
+      </div>
+      <div class="timer-threshold-row">
+        <span class="timer-threshold-swatch swatch-red"></span>
+        <span class="timer-threshold-label">Red at</span>
+        <input type="number" id="timer-red" value="60" min="1" max="3600" step="1">
+        <span class="timer-threshold-unit">s</span>
+      </div>
+    </div>
+
+    <div class="timer-queue-list" id="timer-queue-list">
+      <div class="timer-queue-empty">No topics yet</div>
+    </div>
+
+    <div class="timer-add-form">
+      <input type="text" id="timer-add-name" placeholder="Topic name" maxlength="60">
+      <input type="number" id="timer-add-dur" placeholder="Duration (min)" min="0.5" step="0.5">
+      <textarea id="timer-add-notes" placeholder="Show notes (optional)" rows="2" maxlength="500"></textarea>
+      <div class="timer-add-actions">
+        <button class="btn-timer-cancel-btn" id="btn-timer-cancel" style="display:none">Cancel</button>
+        <button class="btn-timer-add-btn" id="btn-timer-add">+ Add Topic</button>
+      </div>
+    </div>
+
+    <div class="timer-controls-row">
+      <button class="timer-ctrl-btn" id="btn-timer-startstop">Start</button>
+      <button class="timer-ctrl-btn timer-plus30" id="btn-timer-plus30">+30s</button>
+      <button class="timer-ctrl-btn" id="btn-timer-skip" disabled>Skip →</button>
+      <button class="timer-ctrl-btn timer-stop-btn" id="btn-timer-stop" disabled>Stop</button>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Waiting room — guests who have requested to join (host only) -->
+  {% if is_host %}
+  <div class="waitroom-panel" id="waitroom-panel" style="display:none">
+    <div class="waitroom-header">Waiting to Join</div>
+    <ul class="waitroom-list" id="waitroom-list"></ul>
+  </div>
+  {% endif %}
+
+  <!-- Raised hands queue -->
+  <div class="hand-queue-panel" id="hand-queue-panel" style="display:none">
+    <div class="hand-queue-header">✋ Queue</div>
+    <ol class="hand-queue-list" id="hand-queue-list"></ol>
+  </div>
+
+  <!-- Controls bar -->
+  <div class="controls-bar">
+    <div class="controls-left">
+      <span class="session-title-label">{{ session.title }}</span>
+      {% if is_host %}
+      <span class="host-badge">HOST</span>
+      {% endif %}
+    </div>
+
+    <div class="controls-center">
+      <button class="ctrl-btn" id="btn-mic" title="Toggle mic">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-cam" title="Toggle camera">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-screen" title="Share screen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-raise-hand" title="Raise hand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-chat" title="Chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-view" title="Switch layout: Grid / Active speaker">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-settings" title="Audio/video settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+
+      {% if is_host %}
+      <button class="ctrl-btn" id="btn-timer" title="Timer queue">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+      </button>
+      {% endif %}
+
+      {% if is_host %}
+      <button class="ctrl-btn record-btn" id="btn-record" title="Start recording">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
+        <span id="record-label">REC</span>
+      </button>
+      {% endif %}
+    </div>
+
+    <div class="controls-right">
+      <div class="rec-indicator" id="rec-indicator">
+        <span class="rec-dot"></span>
+        <span id="rec-time">00:00</span>
+      </div>
+
+      <div class="share-wrap" id="share-wrap" style="display:none">
+        <input type="text" id="share-link" readonly />
+        <button class="btn-copy" id="btn-copy">Copy</button>
+      </div>
+
+      {% if is_host %}
+      <button class="btn-share" id="btn-files">Files</button>
+      <button class="btn-share" id="btn-show-share">Share Link</button>
+      <button class="btn-danger" id="btn-end">End Session</button>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- Chat panel (outside studio-layout so it doesn't affect flex geometry) -->
+<div class="chat-panel" id="chat-panel">
+  <div class="chat-header">Chat</div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-input-row">
+    <input type="text" id="chat-input" placeholder="Message…" maxlength="500" autocomplete="off" />
+    <button id="btn-chat-send">Send</button>
+  </div>
+</div>
+
+<div class="countdown-overlay hidden" id="countdown-overlay">
+  <div class="countdown-number" id="countdown-number"></div>
+  <div class="countdown-label">Recording starts in…</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SESSION_ID   = "{{ session.id }}";
+  const IS_HOST      = {{ "true" if is_host else "false" }};
+  const HOST_TOKEN   = "{{ host_token }}";
+  const LIVEKIT_URL  = "{{ livekit_url }}";
+  const BASE_URL     = "{{ base_url }}";
+  const JOIN_LINK    = BASE_URL + "/join/" + SESSION_ID;
+</script>
+<script src="/static/js/studio.js?v={{ asset_v }}"></script>
+{% endblock %}

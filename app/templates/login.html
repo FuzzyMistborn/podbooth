@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}PodBooth — Host Login{% endblock %}
+{% block content %}
+<div class="center-page">
+  <div class="hero">
+    <span class="hero-label">Host Access</span>
+    <h1>Log in.</h1>
+    <p class="hero-sub">Enter the host password to create sessions and manage recordings.</p>
+  </div>
+
+  <form class="session-form" method="POST" action="/login">
+    <input type="hidden" name="next" value="{{ next }}" />
+    <label for="password">Host password</label>
+    <input
+      type="password"
+      id="password"
+      name="password"
+      required
+      autofocus
+      autocomplete="current-password"
+    />
+    {% if error %}
+    <p class="form-error">{{ error }}</p>
+    {% endif %}
+    <button type="submit" class="btn-primary">Log In →</button>
+  </form>
+</div>
+{% endblock %}

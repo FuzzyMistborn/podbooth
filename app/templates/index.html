@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}PodBooth — New Session{% endblock %}
+{% block content %}
+<div class="center-page">
+  <div class="splash-layout">
+    <div class="splash-logo-wrap">
+      <img src="/static/images/logo.png" alt="PodBooth" class="splash-logo" />
+    </div>
+    <div class="splash-content">
+      <div class="hero">
+        <span class="hero-label">Remote Recording Studio</span>
+        <h1>Start a session.<br>Record locally.<br>Sound great.</h1>
+        <p class="hero-sub">Each participant records their own track directly in the browser. No compression. No quality loss.</p>
+      </div>
+
+      <form class="session-form" method="POST" action="/session/new">
+        <label for="title">Session title</label>
+        <input
+          type="text"
+          id="title"
+          name="title"
+          placeholder="Episode 42"
+          value="{{ prefill_title }}"
+          required
+          autocomplete="off"
+        />
+        {% if error == "duplicate" %}
+        <p class="form-error">A session named "{{ prefill_title }}" is already active. End it first or choose a different title.</p>
+        {% endif %}
+        <button type="submit" class="btn-primary">Create Session →</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Joining {{ session.title }}{% endblock %}
+{% block content %}
+<div class="center-page">
+  <div class="prejoin-card">
+    <span class="session-badge">{{ session.title }}</span>
+    <h2>Check your setup</h2>
+    <p class="sub">Make sure your mic and camera are working before you join.</p>
+
+    <div class="preview-wrap">
+      <video id="preview" autoplay muted playsinline></video>
+      <div class="preview-overlay" id="preview-overlay">
+        <span>Starting camera…</span>
+      </div>
+    </div>
+
+    <div class="device-selects">
+      <div class="select-group">
+        <label>Microphone</label>
+        <select id="mic-select"></select>
+      </div>
+      <div class="select-group">
+        <label>Camera</label>
+        <select id="cam-select"></select>
+      </div>
+    </div>
+
+    <div class="level-wrap">
+      <label>Mic level</label>
+      <div class="level-bar"><div class="level-fill" id="level-fill"></div></div>
+    </div>
+
+    <div class="name-form">
+      <label for="participant-name">Your name</label>
+      <input type="text" id="participant-name" placeholder="John" autocomplete="off" />
+      <button class="btn-primary" id="join-btn" disabled>Join Session →</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const SESSION_ID = "{{ session.id }}";
+  const HOST_TOKEN = "{{ host_token }}";
+</script>
+
+<script src="/static/js/prejoin.js?v={{ asset_v }}"></script>
+{% endblock %}
