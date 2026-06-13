@@ -765,12 +765,14 @@ function setupControls() {
     const enabled = room.localParticipant.isMicrophoneEnabled;
     await room.localParticipant.setMicrophoneEnabled(!enabled);
     btnMic.classList.toggle('muted', enabled);
+    btnMic.closest('.device-btn-group')?.classList.toggle('muted', enabled);
   });
 
   btnCam?.addEventListener('click', async () => {
     const enabled = room.localParticipant.isCameraEnabled;
     await room.localParticipant.setCameraEnabled(!enabled);
     btnCam.classList.toggle('muted', enabled);
+    btnCam.closest('.device-btn-group')?.classList.toggle('muted', enabled);
   });
 
   btnScreen?.addEventListener('click', async () => {

@@ -373,16 +373,18 @@ input::placeholder { color: var(--text-3); }
   position: relative;
   display: flex;
   align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s;
 }
 .device-btn-group .ctrl-btn {
+  border: none;
   border-radius: var(--radius) 0 0 var(--radius);
-  border-right: none;
   width: 40px;
 }
 .device-caret {
   background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-left: none;
+  border: none;
   border-radius: 0 var(--radius) var(--radius) 0;
   color: var(--text-3);
   width: 16px;
@@ -391,18 +393,21 @@ input::placeholder { color: var(--text-3); }
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: color 0.15s, background 0.15s;
 }
 .device-caret svg { width: 8px; height: 5px; }
-.device-caret.open { color: var(--text); background: var(--bg-2); border-color: var(--text-2); }
-.device-btn-group:has(.device-caret.open) .ctrl-btn { border-color: var(--text-2); color: var(--text); }
+.device-caret.open { color: var(--text); background: var(--bg-2); }
+.device-btn-group:has(.device-caret.open) { border-color: var(--text-2); }
+.device-btn-group:hover { border-color: var(--text-2); }
 .device-btn-group:hover .ctrl-btn,
-.device-btn-group:hover .device-caret { border-color: var(--text-2); color: var(--text); }
-.device-btn-group:has(.ctrl-btn.muted) .device-caret,
-.device-btn-group:has(.ctrl-btn.muted):hover .device-caret {
-  border-color: var(--red);
-  color: var(--red);
-}
+.device-btn-group:hover .device-caret { color: var(--text); }
+.device-btn-group.muted { border-color: #ef4444; }
+.device-btn-group.muted .ctrl-btn { color: #ef4444; }
+.device-btn-group.muted .device-caret { color: #ef4444; }
+.device-btn-group.muted:hover { border-color: #ef4444; }
+.device-btn-group.muted:hover .ctrl-btn,
+.device-btn-group.muted:hover .device-caret { color: #ef4444; }
+
 .device-dropdown {
   position: absolute;
   bottom: calc(100% + 8px);
