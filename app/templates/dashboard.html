@@ -15,7 +15,7 @@
   {% else %}
   <div class="session-list">
     {% for session in sessions %}
-    <div class="session-card {% if session.ended %}ended{% endif %}" data-session-id="{{ session.id }}" data-has-files="{{ 'true' if session_files[session.id] else 'false' }}">
+    <div class="session-card {% if session.ended %}ended{% endif %}" data-session-id="{{ session.id }}" data-has-files="{{ 'true' if session_files[session.id] else 'false' }}" data-video-count="{{ session_video_count[session.id] }}">
       <div class="session-card-header">
         <div>
           <span class="session-card-title">{{ session.title }}</span>
@@ -57,6 +57,12 @@
       <div class="session-card-actions">
         {% if files %}
         <a href="/download-zip/{{ session.id }}" class="btn-secondary">↓ Download All</a>
+        {% endif %}
+        {% if session_video_count[session.id] >= 2 %}
+        <div class="export-grid-wrap">
+          <button class="btn-secondary btn-export-grid" data-session-id="{{ session.id }}" onclick="startExport('{{ session.id }}')">⊞ Export Grid</button>
+          <button class="btn-reexport" data-session-id="{{ session.id }}" onclick="startExport('{{ session.id }}')" style="display:none">re-export</button>
+        </div>
         {% endif %}
         {% if not session.ended %}
         <a href="/studio/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Rejoin as Host →</a>
@@ -119,6 +125,69 @@ function closePreview(e) {
 function _previewEsc(e) {
   if (e.key === 'Escape') closePreview();
 }
+
+// ── Grid export ──────────────────────────────────────────────────
+
+function _exportBtn(sessionId) {
+  return document.querySelector(`.btn-export-grid[data-session-id="${sessionId}"]`);
+}
+function _reexportBtn(sessionId) {
+  return document.querySelector(`.btn-reexport[data-session-id="${sessionId}"]`);
+}
+
+function _setExportState(sessionId, status, path, size_mb) {
+  const btn = _exportBtn(sessionId);
+  const reBtn = _reexportBtn(sessionId);
+  if (!btn) return;
+  if (status === 'processing') {
+    btn.textContent = 'Exporting…';
+    btn.disabled = true;
+    if (reBtn) reBtn.style.display = 'none';
+    setTimeout(() => _pollExport(sessionId), 2500);
+  } else if (status === 'ready') {
+    btn.textContent = `↓ Grid (${size_mb} MB)`;
+    btn.disabled = false;
+    btn.onclick = () => { window.location.href = '/download/' + path; };
+    if (reBtn) reBtn.style.display = '';
+  } else {
+    btn.textContent = '⊞ Export Grid';
+    btn.disabled = false;
+    btn.onclick = () => startExport(sessionId);
+    if (reBtn) reBtn.style.display = 'none';
+  }
+}
+
+async function _pollExport(sessionId) {
+  try {
+    const r = await fetch(`/api/session/${sessionId}/export-status`);
+    if (!r.ok) return;
+    const { status, path, size_mb } = await r.json();
+    _setExportState(sessionId, status, path, size_mb);
+  } catch (e) {}
+}
+
+async function startExport(sessionId) {
+  const btn = _exportBtn(sessionId);
+  if (!btn) return;
+  btn.textContent = 'Starting…';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/session/${sessionId}/export-grid`, { method: 'POST' });
+    if (!r.ok) {
+      _setExportState(sessionId, 'idle');
+      alert('Export failed to start.');
+      return;
+    }
+    _setExportState(sessionId, 'processing');
+  } catch (e) {
+    _setExportState(sessionId, 'idle');
+  }
+}
+
+// On load, sync export button state for any session that might already have an export
+document.querySelectorAll('.btn-export-grid').forEach(btn => {
+  _pollExport(btn.dataset.sessionId);
+});
 
 async function deleteSession(sessionId, hostToken, title) {
   if (!confirm(`Delete "${title}"?\n\nThis will permanently remove the session and all its recordings.`)) return;

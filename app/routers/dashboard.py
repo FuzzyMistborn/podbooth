@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import re
 import tempfile
@@ -6,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
@@ -15,6 +16,9 @@ from app.config import settings, ASSET_VERSION
 from app.auth import require_host
 
 _VALID_MEDIA_RE = re.compile(r"^(audio|video|screen)[_a-z0-9]*\.(wav|mp4)$")
+
+_export_tasks: set[str] = set()          # session IDs currently exporting
+_export_task_refs: set[asyncio.Task] = set()  # keep tasks alive
 
 
 def _safe_name(value: str) -> str:
@@ -25,14 +29,165 @@ templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["asset_v"] = ASSET_VERSION
 
 
+def _collect_video_paths(session) -> list[Path]:
+    """Return one assembled video*.mp4 per participant (latest epoch, no intermediates)."""
+    recordings_path = Path(settings.recordings_dir)
+    session_path = recordings_path / session.dir_name
+    paths = []
+    if not session_path.is_dir():
+        return paths
+    for pdir in sorted(session_path.iterdir()):
+        if not pdir.is_dir():
+            continue
+        vfiles = sorted([
+            f for f in pdir.iterdir()
+            if f.is_file()
+            and f.suffix == ".mp4"
+            and (f.stem == "video" or f.stem.startswith("video_"))
+            and "_noaudio" not in f.stem
+            and "_source" not in f.stem
+        ])
+        if vfiles:
+            paths.append(vfiles[-1])
+    return paths
+
+
+def _build_export_cmd(video_paths: list[Path], output_path: Path) -> list[str]:
+    n = len(video_paths)
+    cmd = ["ffmpeg", "-y"]
+    for vp in video_paths:
+        cmd += ["-i", str(vp)]
+
+    if n == 1:
+        cmd += [
+            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "320k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        return cmd
+
+    # Grid geometry: target 1920 wide, 16:9 cells
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    cell_w = 1920 // cols
+    cell_h = (cell_w * 9) // 16
+    total_tiles = cols * rows
+    n_blank = total_tiles - n
+
+    fc = []
+
+    # Scale each real video into its cell, preserving aspect ratio with black bars
+    for i in range(n):
+        fc.append(
+            f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+            f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black[v{i}]"
+        )
+
+    # Blank filler tiles (infinite duration; -shortest ends at the real video)
+    for i in range(n_blank):
+        fc.append(f"color=black:size={cell_w}x{cell_h}:rate=30[blank{i}]")
+
+    tile_refs = "".join(f"[v{i}]" for i in range(n)) + "".join(f"[blank{i}]" for i in range(n_blank))
+    layout = "|".join(
+        f"{(idx % cols) * cell_w}_{(idx // cols) * cell_h}"
+        for idx in range(total_tiles)
+    )
+    fc.append(f"{tile_refs}xstack=inputs={total_tiles}:layout={layout}[xstacked]")
+    fc.append("[xstacked]pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[vout]")
+
+    # Mix audio from all real video inputs
+    audio_refs = "".join(f"[{i}:a]" for i in range(n))
+    fc.append(f"{audio_refs}amix=inputs={n}:normalize=0[aout]")
+
+    cmd += ["-filter_complex", ";".join(fc)]
+    cmd += ["-map", "[vout]", "-map", "[aout]"]
+    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20"]
+    cmd += ["-c:a", "aac", "-b:a", "320k"]
+    cmd += ["-movflags", "+faststart", "-shortest"]
+    cmd += [str(output_path)]
+    return cmd
+
+
+async def _run_grid_export(session_id: str, video_paths: list[Path], output_path: Path):
+    try:
+        cmd = _build_export_cmd(video_paths, output_path)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            print(f"Grid export failed ({session_id}): {stderr.decode()[-2000:]}")
+    except Exception as e:
+        print(f"Grid export error ({session_id}): {e}")
+    finally:
+        _export_tasks.discard(session_id)
+
+
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, _: None = Depends(require_host)):
     sessions = list_sessions()
     session_files = {s.id: _get_session_files(s) for s in sessions}
+    session_video_count = {
+        s.id: sum(1 for f in session_files[s.id] if f["type"] == "video")
+        for s in sessions
+    }
     return templates.TemplateResponse(
         request, "dashboard.html",
-        {"sessions": sessions, "session_files": session_files},
+        {
+            "sessions": sessions,
+            "session_files": session_files,
+            "session_video_count": session_video_count,
+        },
     )
+
+
+@router.post("/api/session/{session_id}/export-grid")
+async def start_grid_export(session_id: str, _: None = Depends(require_host)):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_id in _export_tasks:
+        return JSONResponse({"status": "processing"})
+
+    video_paths = _collect_video_paths(session)
+    if len(video_paths) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 video files for grid export")
+
+    output_path = Path(settings.recordings_dir) / session.dir_name / "video_grid.mp4"
+    output_path.unlink(missing_ok=True)
+
+    _export_tasks.add(session_id)
+    task = asyncio.create_task(_run_grid_export(session_id, video_paths, output_path))
+    _export_task_refs.add(task)
+    task.add_done_callback(_export_task_refs.discard)
+
+    return JSONResponse({"status": "processing"})
+
+
+@router.get("/api/session/{session_id}/export-status")
+async def grid_export_status(session_id: str, _: None = Depends(require_host)):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    recordings_path = Path(settings.recordings_dir)
+    output_path = recordings_path / session.dir_name / "video_grid.mp4"
+
+    if session_id in _export_tasks:
+        return JSONResponse({"status": "processing"})
+    if output_path.exists():
+        size_mb = round(output_path.stat().st_size / (1024 * 1024), 1)
+        return JSONResponse({
+            "status": "ready",
+            "path": str(output_path.relative_to(recordings_path)),
+            "size_mb": size_mb,
+        })
+    return JSONResponse({"status": "idle"})
 
 
 def _get_session_files(session) -> list[dict]:

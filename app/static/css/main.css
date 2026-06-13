@@ -1457,6 +1457,30 @@ input::placeholder { color: var(--text-3); }
   color: var(--accent);
 }
 
+/* ── Grid export ─────────────────────────────────────────────── */
+.export-grid-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.btn-export-grid:disabled {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+}
+.btn-reexport {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  transition: color 0.12s;
+}
+.btn-reexport:hover { color: var(--text-2); }
+
 /* ── Preview modal ───────────────────────────────────────────── */
 .btn-play {
   background: var(--bg-3);
