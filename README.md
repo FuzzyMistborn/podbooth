@@ -102,6 +102,7 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `SECRET_KEY` | Yes | Random string for signing session cookies. Generate with `openssl rand -base64 32` |
 | `BASE_URL` | Yes | Public URL of the app, e.g. `https://your-server.example.com` |
 | `RECORDINGS_DIR` | No | Path inside the container for recordings. Default: `/recordings` |
+| `TZ` | No | Timezone for session timestamps and recording folder dates (e.g. `America/New_York`). Defaults to `UTC` |
 | `HOST_PASSWORD` | No | Password for the host UI. Leave blank to disable authentication |
 
 ---

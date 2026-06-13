@@ -30,6 +30,8 @@ services:
     #   SECRET_KEY: change-me-generate-with-openssl-rand-base64-32
     #   BASE_URL: https://your-server.example.com
     #   RECORDINGS_DIR: /recordings
+    #   # Timezone for session timestamps and recording folder dates (e.g. America/New_York)
+    #   TZ: UTC
     #   # Uncomment to require a password for the host UI:
     #   # HOST_PASSWORD: your-password
 
