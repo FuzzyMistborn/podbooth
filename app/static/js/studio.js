@@ -37,10 +37,16 @@ let pcmSource = null;
 let pcmStream = null;
 let pcmBuffers = [];
 let pcmFrames = 0;
+let pcmFramesWritten = 0;  // cumulative frames across all flushed chunks
 let pcmChannels = 2;
 let opusCtx = null;
 let audioFormat = 'pcm';   // 'pcm' or 'container' (Opus fallback)
 let audioRecorder = null;  // fallback only
+
+// Per-track wall-clock start times (performance.now()) sent in finalize so
+// post-processing can align tracks that started at slightly different times.
+let videoStartTime = null;
+let audioStartTime = null;
 
 // Upload queues — serialized per track so chunks arrive in order and
 // finalize only fires after everything is flushed.
@@ -1146,18 +1152,34 @@ function startVideoRecording() {
   }
   const [mime, ext] = found;
   videoExt = ext;
-  const camStream = new MediaStream([camTrack.mediaStreamTrack]);
+
+  // Include the live mic track so the browser muxes A/V with shared hardware
+  // timestamps — this eliminates clock-rate drift between audio and video.
+  // We still record raw PCM separately for full-quality audio; the embedded
+  // audio track here is only a sync reference and can be discarded in post.
+  const micTrack = getLocalTrack('audio');
+  const streamTracks = [camTrack.mediaStreamTrack];
+  if (micTrack) streamTracks.push(micTrack.mediaStreamTrack);
+  const hasAudioSync = streamTracks.length > 1;
+
+  const camStream = new MediaStream(streamTracks);
   videoRecorder = new MediaRecorder(camStream, {
     mimeType: mime,
     videoBitsPerSecond: 12_000_000, // generous for 1080p30
   });
+  videoStartTime = null;
   videoRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
+      if (videoStartTime === null) videoStartTime = performance.now();
       enqueueChunk(e.data, 'video', videoExt);
     }
   };
   videoRecorder.onstop = () => {
-    finalizeTrack('video', { format: 'container' });
+    finalizeTrack('video', {
+      format: 'container',
+      start_time_ms: videoStartTime,
+      has_audio_sync: hasAudioSync,
+    });
   };
   videoRecorder.start(5000);
 }
@@ -1249,10 +1271,13 @@ async function startPcmCapture() {
 
   pcmBuffers = [];
   pcmFrames = 0;
+  pcmFramesWritten = 0;
+  audioStartTime = null;
 
   pcmNode.port.onmessage = (e) => {
     const channels = e.data;
     if (!channels || !channels.length) return;
+    if (audioStartTime === null) audioStartTime = performance.now();
     pcmChannels = 2; // always stereo; interleave duplicates mono source if needed
     pcmBuffers.push(channels);
     pcmFrames += channels[0].length;
@@ -1269,6 +1294,11 @@ function flushPcm(isLast) {
   if (pcmFrames > 0) {
     const frames = pcmFrames;
     const ch = pcmChannels;
+    // Snapshot the chunk's frame offset before clearing state so the server
+    // can reconstruct the exact position of each chunk in the audio timeline
+    // and detect clock-rate drift by comparing cumulative frame counts to
+    // wall-clock timestamps.
+    const chunkOffsetS = pcmFramesWritten / (pcmCtx?.sampleRate ?? 48000);
     const interleaved = new Float32Array(frames * ch);
     let offset = 0;
     for (const block of pcmBuffers) {
@@ -1282,7 +1312,8 @@ function flushPcm(isLast) {
     }
     pcmBuffers = [];
     pcmFrames = 0;
-    enqueueChunk(new Blob([interleaved.buffer]), 'audio', 'raw');
+    pcmFramesWritten += frames;
+    enqueueChunk(new Blob([interleaved.buffer]), 'audio', 'raw', { chunk_offset_s: chunkOffsetS });
   }
 
   if (isLast) {
@@ -1290,6 +1321,7 @@ function flushPcm(isLast) {
       format: 'pcm',
       sample_rate: pcmCtx ? pcmCtx.sampleRate : 48000,
       channels: pcmChannels,
+      start_time_ms: audioStartTime,
     });
   }
 }
@@ -1319,11 +1351,15 @@ function startOpusFallback() {
     mimeType: mime,
     audioBitsPerSecond: 320000,
   });
+  audioStartTime = null;
   audioRecorder.ondataavailable = e => {
-    if (e.data && e.data.size > 0) enqueueChunk(e.data, 'audio', ext);
+    if (e.data && e.data.size > 0) {
+      if (audioStartTime === null) audioStartTime = performance.now();
+      enqueueChunk(e.data, 'audio', ext);
+    }
   };
   audioRecorder.onstop = () => {
-    finalizeTrack('audio', { format: 'container' });
+    finalizeTrack('audio', { format: 'container', start_time_ms: audioStartTime });
   };
   audioRecorder.start(5000);
 }
@@ -1362,25 +1398,29 @@ function stopLocalRecording() {
 
 // ── Upload pipeline ──────────────────────────────────────────────────────────
 
-function enqueueChunk(blob, trackType, ext) {
+function enqueueChunk(blob, trackType, ext, meta = {}) {
   const index = chunkIndex[trackType]++;
   const epoch = recordingEpoch;
   uploadQueues[trackType] = uploadQueues[trackType].then(() =>
-    uploadChunkWithRetry(blob, trackType, index, ext, epoch)
+    uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta)
   );
   return uploadQueues[trackType];
 }
 
-async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, attempts = 3) {
+async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     try {
       const form = new FormData();
       form.append('session_id', SESSION_ID);
       form.append('participant', displayName);
+      form.append('identity', identity);
       form.append('track_type', trackType);
       form.append('chunk_index', index);
       form.append('ext', ext);
       form.append('epoch', epoch || '');
+      if (Object.keys(meta).length > 0) {
+        form.append('chunk_meta', JSON.stringify(meta));
+      }
       form.append('file', blob, `chunk_${index}.${ext}`);
 
       const r = await fetch('/api/upload/chunk', { method: 'POST', body: form });
@@ -1406,6 +1446,7 @@ function finalizeTrack(trackType, meta) {
         body: JSON.stringify({
           session_id: SESSION_ID,
           participant: displayName,
+          identity: identity,
           track_type: trackType,
           epoch: epoch || '',
           ...meta,

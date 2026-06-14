@@ -17,6 +17,7 @@ How assembly works:
 """
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.models import get_session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/upload")
 
@@ -38,6 +41,14 @@ _merge_locks: dict[str, asyncio.Lock] = {}
 # Epoch is client-supplied and ends up in filenames and glob patterns, so it
 # must never contain path separators or glob metacharacters.
 _EPOCH_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
+
+# Matches chunk files in both epoch and no-epoch forms:
+#   audio_abc123_chunk_000000.raw   →  track=audio  epoch=abc123  ext=raw
+#   audio_chunk_000000.raw          →  track=audio  epoch=None    ext=raw
+# Epoch uses [A-Za-z0-9]+ (no underscores) to avoid ambiguity with _chunk_.
+_CHUNK_SCAN_RE = re.compile(
+    r'^(audio|video|screen)_(?:([A-Za-z0-9]+)_)?chunk_\d+\.(raw|webm|mp4)$'
+)
 
 
 def _validate_epoch(epoch) -> str:
@@ -59,8 +70,12 @@ def _safe_name(value: str) -> str:
     return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
 
 
-def participant_dir(session, participant: str) -> Path:
-    name = _safe_name(participant)
+def participant_dir(session, participant: str, identity: str = "") -> Path:
+    # Prefer identity (unique per LiveKit connection) to avoid directory collisions
+    # when two display names sanitize to the same string (e.g. "John?" and "John*"
+    # both become "John_"). Identity already embeds the display name as a prefix.
+    raw = identity if identity else participant
+    name = _safe_name(raw)
     if not name:
         raise HTTPException(status_code=400, detail="Invalid participant name")
     path = Path(settings.recordings_dir) / session.dir_name / name
@@ -72,10 +87,12 @@ def participant_dir(session, participant: str) -> Path:
 async def upload_chunk(
     session_id: str = Form(...),
     participant: str = Form(...),
-    track_type: str = Form(...),   # "audio", "video", or "screen"
+    identity: str = Form(default=""),  # LiveKit identity — unique, used for dir naming
+    track_type: str = Form(...),       # "audio", "video", or "screen"
     chunk_index: int = Form(...),
-    ext: str = Form(...),          # "raw" (pcm), "webm", or "mp4"
-    epoch: str = Form(default=""),  # recording-run identifier to avoid chunk collisions
+    ext: str = Form(...),              # "raw" (pcm), "webm", or "mp4"
+    epoch: str = Form(default=""),     # recording-run identifier to avoid chunk collisions
+    chunk_meta: str = Form(default=""),  # optional JSON metadata (e.g. chunk_offset_s)
     file: UploadFile = File(...),
 ):
     session = get_session(session_id)
@@ -91,7 +108,7 @@ async def upload_chunk(
     if len(content) == 0:
         return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
 
-    directory = participant_dir(session, participant)
+    directory = participant_dir(session, participant, identity)
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
     chunk_path = directory / f"{prefix}chunk_{chunk_index:06d}.{ext}"
 
@@ -112,6 +129,7 @@ async def finalize_track(request: Request):
     data = await request.json()
     session_id = data.get("session_id")
     participant = data.get("participant")
+    identity = data.get("identity", "")
     track_type = data.get("track_type")
     fmt = data.get("format", "container")
     epoch = data.get("epoch", "")
@@ -125,7 +143,7 @@ async def finalize_track(request: Request):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     _validate_epoch(epoch)
 
-    directory = participant_dir(session, participant)
+    directory = participant_dir(session, participant, identity)
 
     task = asyncio.create_task(
         assemble_track(directory, track_type, fmt, sample_rate, channels, epoch, session_id, participant)
@@ -149,7 +167,7 @@ async def assemble_track(
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
     chunks = sorted(directory.glob(f"{prefix}chunk_*"))
     if not chunks:
-        print(f"No chunks to assemble in {directory} for {track_type}")
+        logger.warning("No chunks to assemble in %s for %s", directory, track_type)
         return
 
     # Byte-concatenate chunks in index order into one source file.
@@ -282,6 +300,51 @@ async def _try_merge_av(directory: Path, epoch: str = ""):
             _merge_locks.pop(key, None)
 
 
+async def recover_orphaned_chunks(session) -> int:
+    """
+    Scan participant dirs for chunk sets that were never finalized — e.g. the
+    client crashed or closed the browser before /finalize was sent. Queues
+    assembly for each orphaned (track_type, epoch) group found. The filesystem
+    scan is fast; actual assembly runs in background tasks tracked by _tasks.
+    Returns the number of tracks queued.
+    """
+    recordings_dir = Path(settings.recordings_dir) / session.dir_name
+    if not recordings_dir.is_dir():
+        return 0
+
+    queued = 0
+    for pdir in recordings_dir.iterdir():
+        if not pdir.is_dir():
+            continue
+
+        pending: dict[tuple[str, str], str] = {}  # (track_type, epoch) → ext
+        for f in pdir.iterdir():
+            if not f.is_file():
+                continue
+            m = _CHUNK_SCAN_RE.match(f.name)
+            if not m:
+                continue
+            track_type = m.group(1)
+            epoch = m.group(2) or ""
+            ext = m.group(3)
+            pending.setdefault((track_type, epoch), ext)
+
+        for (track_type, epoch), ext in pending.items():
+            fmt = "pcm" if ext == "raw" else "container"
+            logger.info(
+                "Recovering orphaned %s chunks in %s/%s (epoch=%r)",
+                track_type, session.dir_name, pdir.name, epoch,
+            )
+            task = asyncio.create_task(
+                assemble_track(pdir, track_type, fmt, 48000, 2, epoch, session.id, "")
+            )
+            _tasks.add(task)
+            task.add_done_callback(_tasks.discard)
+            queued += 1
+
+    return queued
+
+
 async def _probe_video_codec(source: Path) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -308,9 +371,9 @@ async def _run_ffmpeg(cmd: list[str], directory: Path, track_type: str) -> bool:
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-            print(f"ffmpeg failed ({directory.name}/{track_type}): {stderr.decode()[-2000:]}")
+            logger.error("ffmpeg failed (%s/%s): %s", directory.name, track_type, stderr.decode()[-2000:])
             return False
         return True
     except Exception as e:
-        print(f"Assembly failed ({directory.name}/{track_type}): {e}")
+        logger.error("Assembly failed (%s/%s): %s", directory.name, track_type, e)
         return False

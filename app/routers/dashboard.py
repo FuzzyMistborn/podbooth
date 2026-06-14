@@ -6,12 +6,16 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import logging
+
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from app.models import list_sessions, get_session
+
+logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION
 from app.auth import require_host
 
@@ -120,9 +124,9 @@ async def _run_grid_export(session_id: str, video_paths: list[Path], output_path
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-            print(f"Grid export failed ({session_id}): {stderr.decode()[-2000:]}")
+            logger.error("Grid export failed (%s): %s", session_id, stderr.decode()[-2000:])
     except Exception as e:
-        print(f"Grid export error ({session_id}): {e}")
+        logger.error("Grid export error (%s): %s", session_id, e)
     finally:
         _export_tasks.discard(session_id)
 

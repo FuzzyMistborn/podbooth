@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import asyncio
 import json
 import secrets
 from pathlib import Path
@@ -9,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use
+from app.routers.upload import recover_orphaned_chunks
 from app.config import settings, ASSET_VERSION
 from app.auth import require_host
 
@@ -188,6 +190,10 @@ async def get_recordings(session_id: str):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    # Trigger orphan recovery so a client crash doesn't require a server
+    # restart before the host can see assembled files. Fast scan; assembly
+    # runs in background tasks and won't block this response.
+    asyncio.ensure_future(recover_orphaned_chunks(session))
     recordings_path = Path(settings.recordings_dir)
     session_path = recordings_path / session.dir_name
     files = []

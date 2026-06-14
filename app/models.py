@@ -3,11 +3,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import json
+import logging
+import secrets
 import shutil
 import threading
-import uuid
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_name(value: str) -> str:
@@ -53,7 +56,7 @@ def _save():
         tmp.write_text(json.dumps(data, indent=2))
         tmp.replace(_store_path())
     except Exception as e:
-        print(f"Session persistence failed: {e}")
+        logger.error("Session persistence failed: %s", e)
 
 
 def load():
@@ -71,17 +74,18 @@ def load():
             session.recording = False
             _sessions[session.id] = session
     except Exception as e:
-        print(f"Failed to load sessions: {e}")
+        logger.error("Failed to load sessions: %s", e)
 
 
 def title_in_use(title: str) -> bool:
-    """True if any active (non-ended) session has this title."""
-    return any(s.title == title and not s.ended for s in _sessions.values())
+    """True if any active (non-ended) session has this title (case-insensitive)."""
+    needle = title.casefold()
+    return any(s.title.casefold() == needle and not s.ended for s in _sessions.values())
 
 
 def create_session(title: str) -> Session:
-    session_id = uuid.uuid4().hex[:12]
-    host_token = uuid.uuid4().hex
+    session_id = secrets.token_urlsafe(9)   # 72 bits, URL-safe
+    host_token = secrets.token_hex(32)      # 256-bit secret
     created_at = datetime.now()
     dir_name = f"{created_at.strftime('%Y-%m-%d')}-{_safe_name(title)}-{session_id[:6]}"
     session = Session(
@@ -112,11 +116,11 @@ def touch(session_id: str):
 
 
 def end_session(session_id: str):
-    session = _sessions.get(session_id)
-    if session:
-        session.ended = True
-        session.recording = False
-        with _lock:
+    with _lock:
+        session = _sessions.get(session_id)
+        if session:
+            session.ended = True
+            session.recording = False
             _save()
 
 
@@ -127,4 +131,7 @@ def delete_session(session_id: str):
     if session:
         recordings_dir = Path(settings.recordings_dir) / session.dir_name
         if recordings_dir.is_dir():
-            shutil.rmtree(recordings_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(recordings_dir)
+            except Exception as e:
+                logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
