@@ -58,6 +58,7 @@ def _collect_video_paths(session) -> list[Path]:
 
 def _build_export_cmd(video_paths: list[Path], output_path: Path) -> list[str]:
     n = len(video_paths)
+    speakers = [vp.parent.name for vp in video_paths]
     cmd = ["ffmpeg", "-y"]
     for vp in video_paths:
         cmd += ["-i", str(vp)]
@@ -67,6 +68,7 @@ def _build_export_cmd(video_paths: list[Path], output_path: Path) -> list[str]:
             "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-c:a", "aac", "-b:a", "320k",
+            "-metadata:s:a:0", f"title={speakers[0]}",
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -101,14 +103,21 @@ def _build_export_cmd(video_paths: list[Path], output_path: Path) -> list[str]:
     fc.append(f"{tile_refs}xstack=inputs={total_tiles}:layout={layout}[xstacked]")
     fc.append("[xstacked]pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[vout]")
 
-    # Mix audio from all real video inputs
+    # Track 0: mixed audio from all speakers
     audio_refs = "".join(f"[{i}:a]" for i in range(n))
     fc.append(f"{audio_refs}amix=inputs={n}:normalize=0[aout]")
 
     cmd += ["-filter_complex", ";".join(fc)]
     cmd += ["-map", "[vout]", "-map", "[aout]"]
+    # Tracks 1..n: per-speaker audio
+    for i in range(n):
+        cmd += ["-map", f"{i}:a"]
+
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20"]
     cmd += ["-c:a", "aac", "-b:a", "320k"]
+    cmd += ["-metadata:s:a:0", "title=Mixed"]
+    for i, name in enumerate(speakers):
+        cmd += [f"-metadata:s:a:{i + 1}", f"title={name}"]
     cmd += ["-movflags", "+faststart", "-shortest"]
     cmd += [str(output_path)]
     return cmd
