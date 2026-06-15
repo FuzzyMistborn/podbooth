@@ -1102,34 +1102,79 @@ function appendChatMessage(senderIdentity, senderName, text, own) {
 // ── Recordings files panel ────────────────────────────────────────────────────
 
 let filesPollTimer = null;
+let _lastFileCount = -1;
+let _stablePolls = 0;
 
 async function fetchFiles() {
-  if (!filesList) return;
-  const r = await fetch(`/api/session/${SESSION_ID}/recordings`);
-  if (!r.ok) return;
-  const { files } = await r.json();
-  if (!files.length) {
-    filesList.innerHTML = '<span class="files-empty">No recordings yet.</span>';
-    return;
+  if (!IS_HOST) return;
+
+  const [asmRes, recRes] = await Promise.all([
+    fetch(`/api/session/${SESSION_ID}/assembly-status`).catch(() => null),
+    fetch(`/api/session/${SESSION_ID}/recordings`).catch(() => null),
+  ]);
+  if (!recRes?.ok) return null;
+
+  const { assembling } = asmRes?.ok ? await asmRes.json() : { assembling: false };
+  const { files } = await recRes.json();
+
+  // Update badge regardless of panel visibility
+  const badge = document.getElementById('files-badge');
+  if (badge) {
+    if (files.length > 0) {
+      badge.textContent = files.length;
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
   }
-  filesList.innerHTML = '';
-  files.forEach(f => {
-    const row = document.createElement('div');
-    row.className = 'files-row';
-    const p = document.createElement('span'); p.className = 'files-participant'; p.textContent = f.participant;
-    const t = document.createElement('span'); t.className = 'files-type'; t.textContent = f.type;
-    const s = document.createElement('span'); s.className = 'files-size'; s.textContent = `${f.size_mb} MB`;
-    const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓ Download';
-    row.append(p, t, s, a);
-    filesList.appendChild(row);
-  });
+
+  // Only repaint the panel if it's open
+  if (filesList && filesPanel?.style.display !== 'none') {
+    filesList.innerHTML = '';
+    if (files.length === 0 && assembling) {
+      filesList.innerHTML = '<span class="files-empty">Assembling recordings…</span>';
+    } else if (files.length === 0) {
+      filesList.innerHTML = '<span class="files-empty">No recordings yet.</span>';
+    } else {
+      files.forEach(f => {
+        const row = document.createElement('div');
+        row.className = 'files-row';
+        const p = document.createElement('span'); p.className = 'files-participant'; p.textContent = f.participant;
+        const t = document.createElement('span'); t.className = 'files-type'; t.textContent = f.type;
+        const s = document.createElement('span'); s.className = 'files-size'; s.textContent = `${f.size_mb} MB`;
+        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓ Download';
+        row.append(p, t, s, a);
+        filesList.appendChild(row);
+      });
+      if (assembling) {
+        const note = document.createElement('span');
+        note.className = 'files-empty';
+        note.style.marginTop = '6px';
+        note.textContent = 'More files assembling…';
+        filesList.appendChild(note);
+      }
+    }
+  }
+
+  return { fileCount: files.length, assembling };
 }
 
 function startFilesPoll() {
   if (!IS_HOST || filesPollTimer) return;
+  _lastFileCount = -1;
+  _stablePolls = 0;
   filesPollTimer = setInterval(async () => {
-    if (filesPanel?.style.display !== 'none') await fetchFiles();
-  }, 5000);
+    const result = await fetchFiles();
+    if (!result) return;
+    const { fileCount, assembling } = result;
+    if (!assembling && fileCount === _lastFileCount) {
+      _stablePolls++;
+      if (_stablePolls >= 2) { stopFilesPoll(); return; }
+    } else {
+      _stablePolls = 0;
+    }
+    _lastFileCount = fileCount;
+  }, 3000);
 }
 
 function stopFilesPoll() {
@@ -1463,7 +1508,7 @@ async function startPcmCapture() {
   ]);
 
   pcmCtx = new AudioContext({ sampleRate: 48000 });
-  await pcmCtx.audioWorklet.addModule('/static/js/pcm-worklet.js');
+  await pcmCtx.audioWorklet.addModule(`/static/js/pcm-worklet.js?v=${ASSET_V}`);
 
   pcmSource = pcmCtx.createMediaStreamSource(pcmStream);
   pcmNode = new AudioWorkletNode(pcmCtx, 'pcm-capture', {

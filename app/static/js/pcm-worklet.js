@@ -6,9 +6,21 @@ class PCMCapture extends AudioWorkletProcessor {
   process(inputs) {
     const input = inputs[0];
     if (input && input.length > 0 && input[0].length > 0) {
-      // Copy each channel's Float32Array (the underlying buffers are reused)
-      const channels = input.map(c => c.slice());
-      this.port.postMessage(channels, channels.map(c => c.buffer));
+      const len = input[0].length;
+      let mono;
+      if (input.length === 1) {
+        mono = input[0].slice();
+      } else {
+        // Mix down to mono — avoids silent-channel stereo from XLR/USB interfaces
+        // that deliver signal on only one channel.
+        mono = new Float32Array(len);
+        for (const ch of input) {
+          for (let i = 0; i < len; i++) mono[i] += ch[i];
+        }
+        const scale = 1 / input.length;
+        for (let i = 0; i < len; i++) mono[i] *= scale;
+      }
+      this.port.postMessage([mono], [mono.buffer]);
     }
     return true; // keep processor alive
   }

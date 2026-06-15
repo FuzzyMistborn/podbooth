@@ -191,7 +191,7 @@
       </div>
 
       {% if is_host %}
-      <button class="btn-share" id="btn-files">Files</button>
+      <button class="btn-share" id="btn-files">Files <span id="files-badge" class="files-badge" style="display:none"></span></button>
       <button class="btn-share" id="btn-show-share">Share Link</button>
       <button class="btn-danger" id="btn-end">End Session</button>
       {% else %}
@@ -234,6 +234,7 @@
   const LIVEKIT_URL  = "{{ livekit_url }}";
   const BASE_URL     = "{{ base_url }}";
   const JOIN_LINK    = BASE_URL + "/join/" + SESSION_ID;
+  const ASSET_V      = "{{ asset_v }}";
 </script>
 <script src="/static/js/studio.js?v={{ asset_v }}"></script>
 {% endblock %}

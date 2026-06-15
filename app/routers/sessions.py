@@ -202,13 +202,18 @@ async def get_recordings(session_id: str):
         for pdir in sorted(session_path.iterdir()):
             if not pdir.is_dir():
                 continue
-            for fname in ("audio.wav", "video.mp4", "screen.mp4"):
-                fpath = pdir / fname
-                if fpath.exists():
+            for pattern, ftype in [
+                ("audio*.wav", "audio"),
+                ("video*.mp4", "video"),
+                ("screen*.mp4", "screen"),
+            ]:
+                for fpath in sorted(pdir.glob(pattern)):
+                    if "_noaudio" in fpath.name or "_source" in fpath.name:
+                        continue
                     files.append({
                         "participant": pdir.name,
-                        "type": fname.split(".")[0],
-                        "filename": fname,
+                        "type": ftype,
+                        "filename": fpath.name,
                         "path": str(fpath.relative_to(recordings_path)),
                         "size_mb": round(fpath.stat().st_size / (1024 * 1024), 1),
                     })
