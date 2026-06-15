@@ -147,6 +147,7 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `RECORDINGS_DIR` | No | Path inside the container for recordings. Default: `/recordings` |
 | `TZ` | No | Timezone for session timestamps and recording folder dates (e.g. `America/New_York`). Defaults to `UTC` |
 | `HOST_PASSWORD` | No | Password for the host UI. Leave blank to disable authentication |
+| `RETENTION_DAYS` | No | Delete sessions older than this many days on startup. Default: `0` (disabled) |
 
 ---
 
@@ -157,9 +158,14 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 3. Click **Share Link** → copy the guest URL → send to participants
 4. Guests open the link, check their devices, enter their name, and join
 5. Host clicks **REC** to start — all participants record locally and upload in real time
-6. Host clicks **REC** again or **End Session** to stop
-7. Files are assembled server-side: `recordings/{date}-{title}/{participant}/audio.wav` + `video.mp4`
-8. Download from `/dashboard`
+6. While recording, the host can:
+   - Click **PAUSE** to suspend recording (guests stop capturing; click **RESUME** to start a new take)
+   - Click **STOP** to end recording entirely
+   - Click **PAUSE** on a participant tile to force-mute them, or **KICK** to remove them
+   - Click the bell icon to send a text alert to all participants
+7. The **Files** panel in the studio shows recordings as they assemble in real time
+8. Guests can leave at any time with the **Leave** button; host clicks **End Session** to close the room
+9. Files are assembled server-side and downloadable from `/dashboard`
 
 ---
 
@@ -171,14 +177,19 @@ Per participant, per session:
 recordings/
   2025-01-15-Episode 42/
     Alice/
-      audio.wav    ← 48kHz 24-bit PCM, lossless
-      video.mp4    ← H.264, 1080p, ~8 Mbps
+      audio_lz4abc.wav    ← 48kHz 24-bit PCM, lossless (one file per take)
+      video_lz4abc.mp4    ← H.264, with mic audio mixed in
+      audio_lz4def.wav    ← second take (after a pause/resume)
+      video_lz4def.mp4
     Bob/
-      audio.wav
-      video.mp4
+      audio_lz4abc.wav
+      video_lz4abc.mp4
+    video_grid.mp4        ← optional: all participants composited side-by-side
 ```
 
-`audio.wav` and `video.mp4` are produced independently. `video.mp4` has the participant's mic audio mixed in so it can be used directly in an editor without needing to manually sync tracks.
+Each recording take gets a unique epoch tag in the filename. A single uninterrupted session produces one `audio_<epoch>.wav` and `video_<epoch>.mp4` per participant; pause/resume produces additional pairs. `video.mp4` has the participant's mic audio mixed in so it can be used directly in an editor without needing to manually sync tracks.
+
+The **grid export** (available from the dashboard) composites all participants into a single `video_grid.mp4` with an xstack layout. If a participant has multiple takes, they are spliced together automatically before compositing.
 
 ---
 
@@ -188,9 +199,12 @@ recordings/
 - **Truly lossless audio**: Audio is captured as raw Float32 PCM via an `AudioWorklet` from a dedicated *unprocessed* mic stream (echo cancellation / noise suppression off), then written server-side to 24-bit WAV. The call itself still uses processed audio. Browsers without AudioWorklet fall back to 320 kbps Opus.
 - **Chunked upload**: Audio flushes every 5s; video MediaRecorder fires every 5s. Uploads run through a per-track serialized queue with retries, so chunks land in order and `finalize` only fires once the queue drains — no race between the final chunk and assembly.
 - **Assembly by byte-concatenation**: MediaRecorder chunks after the first are continuation data, not standalone files, so chunks are byte-concatenated into one source file, then ffmpeg runs once. Video already in H.264 is remuxed with `-c:v copy` (no re-encode); VP8/VP9 is transcoded to H.264 CRF 18.
-- **Cross-browser**: MIME fallback chain includes `video/mp4` and `audio/mp4` for Safari.
-- **Recording sync**: Start/stop broadcasts over the LiveKit data channel; a 10s status poll reconciles missed messages and catches late joiners. If the host drops (detected via `is_host` in token metadata), guests stop recording.
-- **Persistence**: Sessions are stored in `.sessions.json` so they survive container restarts.
+- **Cross-browser**: MIME fallback chain tries `video/mp4` (H.264) first, then WebM variants. Audio uses raw PCM via AudioWorklet with 320 kbps Opus as a fallback for Firefox.
+- **Recording sync**: Start/pause/resume/stop broadcasts over the LiveKit data channel; a 3s status poll reconciles missed messages and catches late joiners. If the host drops (detected via `is_host` in token metadata), guests stop recording automatically.
+- **Resumable uploads**: Each recording run gets a unique epoch tag stored in `sessionStorage`. If the page reloads mid-session, the client queries the server for the last received chunk and resumes from there rather than re-uploading.
+- **Host moderation**: Force-mute and kick are issued via the LiveKit server API. Force-unmute is sent as a `force_unmute` data-channel message so the guest's browser re-enables its mic track client-side.
+- **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes from pause/resume, they are stream-copied (no re-encode) into a single temp file before compositing.
+- **Persistence**: Sessions survive container restarts via `.sessions.json`. Optional `RETENTION_DAYS` purges old sessions and their recordings on startup.
 
 ---
 
