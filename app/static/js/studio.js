@@ -1343,9 +1343,9 @@ function startVideoRecording() {
   const candidates = [
     ['video/mp4;codecs=avc1', 'mp4'],
     ['video/mp4', 'mp4'],
-    ['video/webm;codecs=h264', 'webm'],
-    ['video/webm;codecs=vp9', 'webm'],
-    ['video/webm;codecs=vp8', 'webm'],
+    ['video/webm;codecs=h264,opus', 'webm'],
+    ['video/webm;codecs=vp9,opus', 'webm'],
+    ['video/webm;codecs=vp8,opus', 'webm'],
     ['video/webm', 'webm'],
   ];
   const found = candidates.find(([mime]) => MediaRecorder.isTypeSupported(mime));
