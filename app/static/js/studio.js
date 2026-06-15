@@ -106,6 +106,7 @@ const btnRecord    = document.getElementById('btn-record');
 const recIndicator = document.getElementById('rec-indicator');
 const recTime      = document.getElementById('rec-time');
 const btnEnd       = document.getElementById('btn-end');
+const btnLeave     = document.getElementById('btn-leave');
 const btnShowShare = document.getElementById('btn-show-share');
 const shareWrap    = document.getElementById('share-wrap');
 const shareLink    = document.getElementById('share-link');
@@ -924,6 +925,8 @@ function setupControls() {
     }
   });
 
+  btnLeave?.addEventListener('click', leaveSession);
+
   if (IS_HOST) {
     btnRecord?.addEventListener('click', toggleRecording);
     btnEnd?.addEventListener('click', endSession);
@@ -1635,6 +1638,21 @@ function finalizeTrack(trackType, meta) {
 }
 
 // ── Session end ──────────────────────────────────────────────────────────────
+
+async function leaveSession() {
+  if (!confirm('Leave this session?')) return;
+
+  if (isRecording) {
+    setRecordingUI(false);
+    stopLocalRecording();
+  }
+
+  showUploadBanner('uploading');
+  await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+
+  try { await room?.disconnect(); } catch (e) {}
+  window.location.href = '/';
+}
 
 async function endSession() {
   if (!confirm('End this session for everyone?')) return;

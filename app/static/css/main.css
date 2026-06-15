@@ -152,8 +152,8 @@ input::placeholder { color: var(--text-3); }
 .btn-secondary {
   display: inline-block;
   background: transparent;
-  color: var(--text-2);
-  border: 1px solid var(--border);
+  color: var(--text);
+  border: 1px solid #444;
   border-radius: var(--radius);
   padding: 9px 18px;
   font-size: 13px;
@@ -179,8 +179,8 @@ input::placeholder { color: var(--text-3); }
 .btn-download {
   display: inline-block;
   background: var(--bg-3);
-  color: var(--text-2);
-  border: 1px solid var(--border);
+  color: var(--text);
+  border: 1px solid #444;
   border-radius: var(--radius);
   padding: 5px 12px;
   font-size: 12px;
@@ -899,8 +899,8 @@ input::placeholder { color: var(--text-3); }
 
 .btn-share {
   background: transparent;
-  color: var(--text-2);
-  border: 1px solid var(--border);
+  color: var(--text);
+  border: 1px solid #444;
   border-radius: var(--radius);
   padding: 8px 14px;
   font-size: 13px;
@@ -1462,29 +1462,75 @@ input::placeholder { color: var(--text-3); }
   color: var(--accent);
 }
 
-/* ── Grid export ─────────────────────────────────────────────── */
-.export-grid-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* ── Grid export split button ────────────────────────────────── */
+.export-split-btn {
+  position: relative;
+  display: inline-block;
 }
+.export-split-group {
+  display: inline-flex;
+  border: 1px solid #444;
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.export-split-group:hover { border-color: var(--accent); }
+.btn-export-grid {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  padding: 9px 14px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+.btn-export-grid:hover { color: var(--accent); }
 .btn-export-grid:disabled {
   opacity: 0.55;
   cursor: default;
   pointer-events: none;
 }
-.btn-reexport {
-  background: none;
+.export-split-caret {
+  background: transparent;
   border: none;
-  color: var(--text-3);
-  font-size: 11px;
+  border-left: 1px solid #444;
+  color: var(--text);
+  padding: 0 10px;
   cursor: pointer;
-  padding: 0;
-  font-family: var(--font-mono);
-  letter-spacing: 0.04em;
-  transition: color 0.12s;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s, background 0.15s;
 }
-.btn-reexport:hover { color: var(--text-2); }
+.export-split-caret:hover { color: var(--accent); background: rgba(232,93,0,0.08); }
+.export-split-caret svg { width: 10px; height: 6px; }
+.export-split-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  background: var(--bg-2);
+  border: 1px solid #444;
+  border-radius: var(--radius);
+  z-index: 200;
+  overflow: hidden;
+}
+.export-dropdown-item {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  padding: 9px 14px;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.export-dropdown-item:hover { background: var(--bg-3); color: var(--accent); }
 
 /* ── Preview modal ───────────────────────────────────────────── */
 .btn-play {
