@@ -19,6 +19,7 @@ let displayName = '';
 let identity = '';
 
 let isRecording = false;
+let isPaused = false;
 let recordingStartTime = null;
 let recTimerInterval = null;
 
@@ -103,6 +104,9 @@ let activeMicDeviceId = '';
 let activeCamDeviceId = '';
 const btnRaiseHand = document.getElementById('btn-raise-hand');
 const btnRecord    = document.getElementById('btn-record');
+const btnPause     = document.getElementById('btn-pause');
+const btnResume    = document.getElementById('btn-resume');
+const btnStopRec   = document.getElementById('btn-stop-rec');
 const recIndicator = document.getElementById('rec-indicator');
 const recTime      = document.getElementById('rec-time');
 const btnEnd       = document.getElementById('btn-end');
@@ -237,6 +241,9 @@ async function init() {
       setRecordingUI(true);
       await startLocalRecording();
       showToast('Recording in progress — your track is being captured');
+    } else if (s.paused && !isPaused) {
+      setRecordingUI(false, true);
+      showToast('Recording is paused');
     }
   } catch (e) {}
 }
@@ -254,6 +261,8 @@ function attachRoomEvents() {
     // Host re-broadcasts recording state so late joiners start capturing
     if (IS_HOST && isRecording) {
       broadcastData({ type: 'recording_started' });
+    } else if (IS_HOST && isPaused) {
+      broadcastData({ type: 'recording_paused' });
     }
     // Host re-broadcasts timer state so late joiners see the current timer
     if (IS_HOST && timerState.active) {
@@ -272,7 +281,7 @@ function attachRoomEvents() {
 
     // Spec: if the host drops, recording stops. Guests detect this via
     // the is_host flag in the participant's token metadata.
-    if (!IS_HOST && isRecording && participantIsHost(p)) {
+    if (!IS_HOST && (isRecording || isPaused) && participantIsHost(p)) {
       showToast('Host disconnected — recording stopped');
       setRecordingUI(false);
       stopLocalRecording();
@@ -387,9 +396,18 @@ function attachRoomEvents() {
         });
       }
     }
-    if (msg.type === 'recording_stopped' && !IS_HOST && isRecording) {
-      setRecordingUI(false);
+    if (msg.type === 'recording_paused' && !IS_HOST && isRecording) {
+      setRecordingUI(false, true);
       stopLocalRecording();
+      waitForUploads();
+    }
+    if (msg.type === 'recording_resumed' && !IS_HOST && isPaused) {
+      setRecordingUI(true);
+      startLocalRecording();
+    }
+    if (msg.type === 'recording_stopped' && !IS_HOST && (isRecording || isPaused)) {
+      setRecordingUI(false);
+      if (isRecording) stopLocalRecording();
       waitForUploads();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
@@ -956,7 +974,10 @@ function setupControls() {
       }
     });
 
-    btnRecord?.addEventListener('click', toggleRecording);
+    btnRecord?.addEventListener('click', startRecording);
+    btnPause?.addEventListener('click', pauseRecording);
+    btnResume?.addEventListener('click', resumeRecording);
+    btnStopRec?.addEventListener('click', stopRecording);
     btnEnd?.addEventListener('click', endSession);
     btnShowShare?.addEventListener('click', () => {
       shareWrap.style.display = shareWrap.style.display === 'none' ? 'flex' : 'none';
@@ -1184,33 +1205,51 @@ function stopFilesPoll() {
 
 // ── Recording control (host) ─────────────────────────────────────────────────
 
-async function toggleRecording() {
-  const action = isRecording ? 'stop' : 'start';
+async function _postRecordingAction(action) {
+  await fetch(`/api/session/${SESSION_ID}/recording`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host_token: HOST_TOKEN, action }),
+  });
+}
 
-  if (action === 'start') {
-    if (btnRecord) btnRecord.disabled = true;
-    // Broadcast before the countdown so all participants count down together
-    await fetch(`/api/session/${SESSION_ID}/recording`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host_token: HOST_TOKEN, action }),
-    });
-    await broadcastData({ type: 'recording_started' });
-    await showCountdown();
-    if (btnRecord) btnRecord.disabled = false;
-    setRecordingUI(true);
-    await startLocalRecording();
-  } else {
-    await fetch(`/api/session/${SESSION_ID}/recording`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host_token: HOST_TOKEN, action }),
-    });
-    await broadcastData({ type: 'recording_stopped' });
-    setRecordingUI(false);
-    stopLocalRecording();
-    await waitForUploads();
-  }
+async function startRecording() {
+  if (btnRecord) btnRecord.disabled = true;
+  await _postRecordingAction('start');
+  await broadcastData({ type: 'recording_started' });
+  await showCountdown();
+  if (btnRecord) btnRecord.disabled = false;
+  setRecordingUI(true);
+  await startLocalRecording();
+}
+
+async function pauseRecording() {
+  if (btnPause) btnPause.disabled = true;
+  await _postRecordingAction('pause');
+  await broadcastData({ type: 'recording_paused' });
+  setRecordingUI(false, true);
+  stopLocalRecording();
+  await waitForUploads();
+  if (btnPause) btnPause.disabled = false;
+}
+
+async function resumeRecording() {
+  if (btnResume) btnResume.disabled = true;
+  await _postRecordingAction('resume');
+  await broadcastData({ type: 'recording_resumed' });
+  setRecordingUI(true);
+  await startLocalRecording();
+  if (btnResume) btnResume.disabled = false;
+}
+
+async function stopRecording() {
+  if (btnStopRec) btnStopRec.disabled = true;
+  await _postRecordingAction('stop');
+  await broadcastData({ type: 'recording_stopped' });
+  setRecordingUI(false);
+  if (isRecording) stopLocalRecording();
+  await waitForUploads();
+  if (btnStopRec) btnStopRec.disabled = false;
 }
 
 async function waitForUploads() {
@@ -1230,16 +1269,29 @@ async function waitForUploads() {
   }
 }
 
-function setRecordingUI(recording) {
+function setRecordingUI(recording, paused = false) {
   isRecording = recording;
+  isPaused = !recording && paused;
+
+  if (IS_HOST) {
+    const idle = !recording && !isPaused;
+    btnRecord  && (btnRecord.style.display   = idle       ? '' : 'none');
+    btnPause   && (btnPause.style.display    = recording  ? '' : 'none');
+    btnResume  && (btnResume.style.display   = isPaused   ? '' : 'none');
+    btnStopRec && (btnStopRec.style.display  = !idle      ? '' : 'none');
+  }
+
   if (recording) {
-    btnRecord?.classList.add('recording');
     recIndicator?.classList.add('active');
+    recIndicator?.classList.remove('paused');
     recordingStartTime = Date.now();
     recTimerInterval = setInterval(updateRecTimer, 1000);
-  } else {
-    btnRecord?.classList.remove('recording');
+  } else if (isPaused) {
     recIndicator?.classList.remove('active');
+    recIndicator?.classList.add('paused');
+    clearInterval(recTimerInterval);
+  } else {
+    recIndicator?.classList.remove('active', 'paused');
     clearInterval(recTimerInterval);
     if (recTime) recTime.textContent = '00:00';
     startFilesPoll();
@@ -1732,9 +1784,9 @@ function showAlertBanner(text) {
 async function leaveSession() {
   if (!confirm('Leave this session?')) return;
 
-  if (isRecording) {
+  if (isRecording || isPaused) {
+    if (isRecording) stopLocalRecording();
     setRecordingUI(false);
-    stopLocalRecording();
   }
 
   showUploadBanner('uploading');
@@ -1747,9 +1799,9 @@ async function leaveSession() {
 async function endSession() {
   if (!confirm('End this session for everyone?')) return;
 
-  if (isRecording) {
+  if (isRecording || isPaused) {
+    if (isRecording) stopLocalRecording();
     setRecordingUI(false);
-    stopLocalRecording();
   }
 
   // Broadcast and API call are best-effort — don't let either crash the flow
@@ -1770,9 +1822,9 @@ async function endSession() {
 }
 
 async function handleSessionEnded() {
-  if (isRecording) {
+  if (isRecording || isPaused) {
+    if (isRecording) stopLocalRecording();
     setRecordingUI(false);
-    stopLocalRecording();
   }
   showUploadBanner('uploading');
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
@@ -1865,9 +1917,17 @@ function pollSessionStatus() {
           if (!hasActiveRecorders() && !recordingStarting) {
             await startLocalRecording();
           }
-        } else if (isRecording) {
+        } else if (data.paused) {
+          if (isRecording) {
+            setRecordingUI(false, true);
+            stopLocalRecording();
+            waitForUploads();
+          } else if (!isPaused) {
+            setRecordingUI(false, true);
+          }
+        } else if (isRecording || isPaused) {
           setRecordingUI(false);
-          stopLocalRecording();
+          if (isRecording) stopLocalRecording();
           waitForUploads();
         }
       }

@@ -837,7 +837,7 @@ input::placeholder { color: var(--text-3); }
 .ctrl-btn.active { background: var(--bg-2); color: var(--text); border-color: var(--text-2); }
 .ctrl-btn.muted { border-color: var(--red); color: var(--red); }
 
-.record-btn {
+.record-btn, .pause-btn, .resume-btn, .stop-btn {
   width: auto;
   gap: 8px;
   padding: 0 16px;
@@ -847,13 +847,20 @@ input::placeholder { color: var(--text-3); }
   color: var(--text-3);
   border-color: var(--text-3);
 }
-.record-btn.recording {
-  background: var(--accent);
+.pause-btn {
+  color: var(--accent);
   border-color: var(--accent);
-  color: #fff;
   animation: pulse-border 2s infinite;
 }
-.record-btn.recording svg { fill: #fff; }
+.resume-btn {
+  color: #22c55e;
+  border-color: #22c55e;
+}
+.stop-btn {
+  color: var(--red);
+  border-color: var(--red);
+}
+.stop-btn:hover { background: rgba(239,68,68,0.1); }
 @keyframes pulse-border {
   0%, 100% { box-shadow: 0 0 0 0 rgba(232,93,0,0.4); }
   50%       { box-shadow: 0 0 0 6px rgba(232,93,0,0); }
@@ -873,6 +880,8 @@ input::placeholder { color: var(--text-3); }
   color: var(--red);
 }
 .rec-indicator.active { display: flex; }
+.rec-indicator.paused { display: flex; color: var(--text-3); }
+.rec-indicator.paused .rec-dot { background: var(--text-3); animation: none; opacity: 0.5; }
 .rec-dot {
   width: 8px;
   height: 8px;

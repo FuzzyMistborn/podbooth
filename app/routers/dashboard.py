@@ -35,13 +35,17 @@ templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["asset_v"] = ASSET_VERSION
 
 
-def _collect_video_paths(session) -> list[Path]:
-    """Return one assembled video*.mp4 per participant (latest epoch, no intermediates)."""
+def _collect_video_groups(session) -> list[list[Path]]:
+    """Return all assembled video*.mp4 per participant, grouped by participant.
+
+    Each inner list contains one or more epoch-tagged files in chronological
+    order (base-36 epoch strings sort chronologically as strings).
+    """
     recordings_path = Path(settings.recordings_dir)
     session_path = recordings_path / session.dir_name
-    paths = []
+    groups = []
     if not session_path.is_dir():
-        return paths
+        return groups
     for pdir in sorted(session_path.iterdir()):
         if not pdir.is_dir():
             continue
@@ -54,13 +58,46 @@ def _collect_video_paths(session) -> list[Path]:
             and "_source" not in f.stem
         ])
         if vfiles:
-            paths.append(vfiles[-1])
-    return paths
+            groups.append(vfiles)
+    return groups
 
 
-def _build_export_cmd(video_paths: list[Path], output_path: Path) -> list[str]:
+async def _concat_takes(paths: list[Path]) -> Path:
+    """Stream-copy multiple mp4 takes into a single temp mp4 (no re-encode)."""
+    list_fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="pb_concat_list_")
+    out_fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="pb_concat_")
+    os.close(out_fd)
+    try:
+        with os.fdopen(list_fd, "w") as f:
+            for p in paths:
+                f.write(f"file '{p}'\n")
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",
+            out_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"Concat failed: {stderr.decode()[-1000:]}")
+        return Path(out_path)
+    except Exception:
+        Path(out_path).unlink(missing_ok=True)
+        raise
+    finally:
+        Path(list_path).unlink(missing_ok=True)
+
+
+def _build_export_cmd(video_paths: list[Path], output_path: Path, speakers: list[str] | None = None) -> list[str]:
     n = len(video_paths)
-    speakers = [vp.parent.name for vp in video_paths]
+    if speakers is None:
+        speakers = [vp.parent.name for vp in video_paths]
     cmd = ["ffmpeg", "-y"]
     for vp in video_paths:
         cmd += ["-i", str(vp)]
@@ -138,13 +175,26 @@ async def _probe_duration(path: Path) -> float:
         return 0.0
 
 
-async def _run_grid_export(session_id: str, video_paths: list[Path], output_path: Path):
+async def _run_grid_export(session_id: str, video_groups: list[list[Path]], output_path: Path):
     progress_file = Path(f"/tmp/pb_progress_{session_id}")
+    tmp_files: list[Path] = []
     try:
-        durations = [await _probe_duration(p) for p in video_paths]
+        resolved: list[Path] = []
+        speaker_names: list[str] = []
+        for group in video_groups:
+            speaker_names.append(group[0].parent.name)
+            if len(group) == 1:
+                resolved.append(group[0])
+            else:
+                logger.info("Concatenating %d takes for %s", len(group), group[0].parent.name)
+                tmp = await _concat_takes(group)
+                tmp_files.append(tmp)
+                resolved.append(tmp)
+
+        durations = [await _probe_duration(p) for p in resolved]
         total_duration = max(durations) if durations else 0.0
 
-        cmd = _build_export_cmd(video_paths, output_path)
+        cmd = _build_export_cmd(resolved, output_path, speakers=speaker_names)
         # Insert -progress flag right after 'ffmpeg -y'
         cmd = [cmd[0], cmd[1], "-progress", str(progress_file)] + cmd[2:]
 
@@ -165,6 +215,8 @@ async def _run_grid_export(session_id: str, video_paths: list[Path], output_path
     except Exception as e:
         logger.error("Grid export error (%s): %s", session_id, e)
     finally:
+        for f in tmp_files:
+            f.unlink(missing_ok=True)
         progress_file.unlink(missing_ok=True)
         _export_progress.pop(session_id, None)
         _export_tasks.discard(session_id)
@@ -255,15 +307,15 @@ async def start_grid_export(session_id: str, _: None = Depends(require_host)):
     if session_id in _export_tasks:
         return JSONResponse({"status": "processing"})
 
-    video_paths = _collect_video_paths(session)
-    if len(video_paths) < 2:
-        raise HTTPException(status_code=400, detail="Need at least 2 video files for grid export")
+    video_groups = _collect_video_groups(session)
+    if len(video_groups) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 participants with video for grid export")
 
     output_path = Path(settings.recordings_dir) / session.dir_name / "video_grid.mp4"
     output_path.unlink(missing_ok=True)
 
     _export_tasks.add(session_id)
-    task = asyncio.create_task(_run_grid_export(session_id, video_paths, output_path))
+    task = asyncio.create_task(_run_grid_export(session_id, video_groups, output_path))
     _export_task_refs.add(task)
     task.add_done_callback(_export_task_refs.discard)
 

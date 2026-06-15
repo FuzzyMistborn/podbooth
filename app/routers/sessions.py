@@ -137,7 +137,7 @@ async def get_token(request: Request):
 async def set_recording(session_id: str, request: Request):
     data = await request.json()
     host_token = data.get("host_token", "")
-    action = data.get("action")  # "start" or "stop"
+    action = data.get("action")  # "start", "stop", "pause", or "resume"
 
     session = get_session(session_id)
     if not session:
@@ -147,13 +147,21 @@ async def set_recording(session_id: str, request: Request):
 
     if action == "start":
         session.recording = True
+        session.paused = False
     elif action == "stop":
         session.recording = False
+        session.paused = False
+    elif action == "pause":
+        session.recording = False
+        session.paused = True
+    elif action == "resume":
+        session.recording = True
+        session.paused = False
     else:
-        raise HTTPException(status_code=400, detail="action must be 'start' or 'stop'")
+        raise HTTPException(status_code=400, detail="action must be 'start', 'stop', 'pause', or 'resume'")
 
     touch(session_id)
-    return JSONResponse({"recording": session.recording})
+    return JSONResponse({"recording": session.recording, "paused": session.paused})
 
 
 @router.post("/api/session/{session_id}/end")
@@ -227,6 +235,7 @@ async def session_status(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     return JSONResponse({
         "recording": session.recording,
+        "paused": session.paused,
         "ended": session.ended,
         "participants": list(session.participants.keys()),
     })
