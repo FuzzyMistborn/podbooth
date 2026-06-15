@@ -83,6 +83,51 @@ def participant_dir(session, participant: str, identity: str = "") -> Path:
     return path
 
 
+@router.get("/chunks")
+async def get_chunk_progress(
+    session_id: str,
+    identity: str = "",
+    participant: str = "",
+    track_type: str = "",
+    epoch: str = "",
+):
+    """Return the next chunk index to use for a resumable upload."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if track_type not in ("audio", "video", "screen"):
+        raise HTTPException(status_code=400, detail="Invalid track_type")
+    _validate_epoch(epoch)
+
+    raw = identity if identity else participant
+    name = _safe_name(raw) if raw else None
+    if not name:
+        return JSONResponse({"next_chunk": 0})
+
+    directory = Path(settings.recordings_dir) / session.dir_name / name
+    if not directory.is_dir():
+        return JSONResponse({"next_chunk": 0})
+
+    max_index = -1
+    for f in directory.iterdir():
+        if not f.is_file():
+            continue
+        m = _CHUNK_SCAN_RE.match(f.name)
+        if not m:
+            continue
+        if m.group(1) != track_type:
+            continue
+        file_epoch = m.group(2) or ""
+        if file_epoch != epoch:
+            continue
+        # Extract chunk index from the filename
+        idx_match = re.search(r'_chunk_(\d+)\.', f.name)
+        if idx_match:
+            max_index = max(max_index, int(idx_match.group(1)))
+
+    return JSONResponse({"next_chunk": max_index + 1})
+
+
 @router.post("/chunk")
 async def upload_chunk(
     session_id: str = Form(...),

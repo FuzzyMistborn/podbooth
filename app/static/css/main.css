@@ -1577,3 +1577,257 @@ input::placeholder { color: var(--text-3); }
   padding: 4px 0;
   animation: blink 1.8s ease-in-out infinite;
 }
+
+/* ── Dashboard toolbar (search / filter / sort) ──────────────── */
+.dash-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.dash-search-input {
+  flex: 1;
+  min-width: 180px;
+  padding: 9px 14px;
+  font-size: 13px;
+}
+.dash-status-btns {
+  display: flex;
+  gap: 4px;
+}
+.dash-filter-btn {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.dash-filter-btn:hover { border-color: var(--text-2); color: var(--text); }
+.dash-filter-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.dash-sort-select {
+  padding: 9px 12px;
+  font-size: 13px;
+  width: auto;
+  min-width: 120px;
+}
+
+/* ── Session metadata display ────────────────────────────────── */
+.session-episode-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent-dim);
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.session-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.session-tag {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--bg-3);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 7px;
+}
+.session-expiry {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+  margin-left: 10px;
+}
+.session-expiry-warn {
+  color: var(--yellow) !important;
+}
+.session-notes-wrap {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.session-notes-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-2);
+  border: none;
+  color: var(--text-2);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.session-notes-toggle:hover { color: var(--text); }
+.session-notes-body {
+  display: none;
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+}
+.session-notes-wrap.open .session-notes-body { display: block; }
+.session-desc {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.session-note-text {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ── Metadata edit form ──────────────────────────────────────── */
+.meta-edit-form {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.meta-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.meta-edit-row label {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  letter-spacing: 0.06em;
+}
+.meta-edit-row input,
+.meta-edit-row textarea {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.meta-edit-row textarea {
+  resize: vertical;
+  min-height: 60px;
+  font-family: var(--font-ui);
+  line-height: 1.45;
+}
+.meta-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+.btn-edit-meta {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.btn-edit-meta:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Moderation overlay ──────────────────────────────────────── */
+.mod-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.65);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 12;
+}
+.participant-tile:hover .mod-overlay { opacity: 1; }
+.mod-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius);
+  color: #fff;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.mod-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.mod-btn-mute { border-color: rgba(234, 179, 8, 0.5); }
+.mod-btn-mute:hover { background: rgba(234, 179, 8, 0.2); border-color: var(--yellow); }
+.mod-btn-mute.active { background: rgba(239, 68, 68, 0.2); border-color: var(--red); }
+.mod-btn-mute.active:hover { background: rgba(239, 68, 68, 0.35); }
+.mod-btn-kick { border-color: rgba(239, 68, 68, 0.5); }
+.mod-btn-kick:hover { background: rgba(239, 68, 68, 0.25); border-color: var(--red); }
+
+/* ── Upload banner (Feature 7) ───────────────────────────────── */
+.upload-banner {
+  position: fixed;
+  bottom: 64px; /* above controls bar */
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 20px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+.upload-banner.hidden { display: none; }
+.upload-banner.uploading {
+  background: var(--accent);
+  color: #fff;
+  pointer-events: auto;
+  animation: pulse-border 2s infinite;
+}
+.upload-banner.done {
+  background: var(--green);
+  color: #000;
+  pointer-events: auto;
+}
+.upload-banner.error {
+  background: var(--yellow);
+  color: #000;
+  pointer-events: auto;
+}
+.upload-banner-close {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.7;
+}
+.upload-banner-close:hover { opacity: 1; }

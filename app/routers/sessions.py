@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import asyncio
 import json
+import logging
 import secrets
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from livekit.api import AccessToken, VideoGrants
 
-from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use
+from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
 from app.routers.upload import recover_orphaned_chunks
 from app.config import settings, ASSET_VERSION
 from app.auth import require_host
@@ -311,6 +312,93 @@ async def admit_guest(session_id: str, identity: str, request: Request):
         raise HTTPException(status_code=403, detail="Not authorized")
     session.admitted_guests[identity] = True
     touch(session_id)
+    return JSONResponse({"ok": True})
+
+
+# ── Session metadata ─────────────────────────────────────────────────────────
+
+@router.post("/api/session/{session_id}/metadata")
+async def update_metadata(session_id: str, request: Request):
+    data = await request.json()
+    host_token = data.get("host_token", "")
+
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not _is_host(host_token, session):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if "description" in data:
+        session.description = str(data["description"])[:500]
+    if "episode" in data:
+        session.episode = str(data["episode"])[:100]
+    if "notes" in data:
+        session.notes = str(data["notes"])[:2000]
+    if "tags" in data:
+        raw_tags = data["tags"]
+        if isinstance(raw_tags, list):
+            session.tags = [str(t)[:50] for t in raw_tags[:20]]
+
+    touch(session_id)
+    return JSONResponse({"ok": True})
+
+
+# ── Host moderation ───────────────────────────────────────────────────────────
+
+@router.post("/api/session/{session_id}/kick/{p_identity}")
+async def kick_participant(session_id: str, p_identity: str, request: Request):
+    data = await request.json()
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404)
+    if not _is_host(data.get("host_token", ""), session):
+        raise HTTPException(status_code=403)
+    from livekit import api as lkapi
+    try:
+        async with lkapi.LiveKitAPI(
+            url=settings.livekit_url,
+            api_key=settings.livekit_api_key,
+            api_secret=settings.livekit_api_secret,
+        ) as lk:
+            await lk.room.remove_participant(
+                lkapi.RoomParticipantIdentity(room=session_id, identity=p_identity)
+            )
+    except Exception as e:
+        logging.error("LiveKit remove_participant failed for %s: %s", p_identity, e)
+        raise HTTPException(status_code=500, detail=f"LiveKit error: {e}")
+    return JSONResponse({"ok": True})
+
+
+@router.post("/api/session/{session_id}/mute/{p_identity}")
+async def mute_participant(session_id: str, p_identity: str, request: Request):
+    data = await request.json()
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404)
+    if not _is_host(data.get("host_token", ""), session):
+        raise HTTPException(status_code=403)
+    track_sid = data.get("track_sid", "")
+    muted = bool(data.get("muted", True))
+    if not track_sid:
+        raise HTTPException(status_code=400, detail="track_sid required")
+    from livekit import api as lkapi
+    try:
+        async with lkapi.LiveKitAPI(
+            url=settings.livekit_url,
+            api_key=settings.livekit_api_key,
+            api_secret=settings.livekit_api_secret,
+        ) as lk:
+            await lk.room.mute_published_track(
+                lkapi.MuteRoomTrackRequest(
+                    room=session_id,
+                    identity=p_identity,
+                    track_sid=track_sid,
+                    muted=muted,
+                )
+            )
+    except Exception as e:
+        logging.error("LiveKit mute_published_track failed for %s (track %s): %s", p_identity, track_sid, e)
+        raise HTTPException(status_code=500, detail=f"LiveKit error: {e}")
     return JSONResponse({"ok": True})
 
 

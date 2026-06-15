@@ -20,6 +20,7 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     os.makedirs(settings.recordings_dir, exist_ok=True)
     models.load()
+    models.purge_expired()
     # Recover any chunks that were never finalized before the last shutdown
     # (e.g. a client crashed mid-recording). Assembly runs as background tasks.
     for session in models.list_sessions():

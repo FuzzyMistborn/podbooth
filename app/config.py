@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     recordings_dir: str = "/recordings"
     base_url: str = "http://localhost:8000"
     host_password: str = ""
+    retention_days: int = 0
 
     class Config:
         env_file = ".env"

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import json
@@ -29,6 +29,10 @@ class Session:
     participants: dict = field(default_factory=dict)   # display name -> joined_at iso
     pending_guests: dict = field(default_factory=dict) # identity -> {display_name, requested_at}
     admitted_guests: dict = field(default_factory=dict) # identity -> True
+    description: str = ""
+    episode: str = ""
+    notes: str = ""
+    tags: list = field(default_factory=list)
 
     @property
     def guest_link_path(self) -> str:
@@ -135,3 +139,15 @@ def delete_session(session_id: str):
                 shutil.rmtree(recordings_dir)
             except Exception as e:
                 logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
+
+
+def purge_expired() -> list[str]:
+    """Delete sessions older than retention_days. Returns deleted session IDs."""
+    if settings.retention_days <= 0:
+        return []
+    cutoff = datetime.now() - timedelta(days=settings.retention_days)
+    expired = [sid for sid, s in list(_sessions.items()) if s.created_at < cutoff]
+    for sid in expired:
+        logger.info("Purging expired session %s", sid)
+        delete_session(sid)
+    return expired

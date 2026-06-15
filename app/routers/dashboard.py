@@ -3,6 +3,7 @@ import math
 import os
 import re
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -23,6 +24,7 @@ _VALID_MEDIA_RE = re.compile(r"^(audio|video|screen)[_a-z0-9]*\.(wav|mp4)$")
 
 _export_tasks: set[str] = set()          # session IDs currently exporting
 _export_task_refs: set[asyncio.Task] = set()  # keep tasks alive
+_export_progress: dict[str, dict] = {}  # session_id → progress info
 
 
 def _safe_name(value: str) -> str:
@@ -123,9 +125,35 @@ def _build_export_cmd(video_paths: list[Path], output_path: Path) -> list[str]:
     return cmd
 
 
-async def _run_grid_export(session_id: str, video_paths: list[Path], output_path: Path):
+async def _probe_duration(path: Path) -> float:
     try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return float(stdout.decode().strip() or 0)
+    except Exception:
+        return 0.0
+
+
+async def _run_grid_export(session_id: str, video_paths: list[Path], output_path: Path):
+    progress_file = Path(f"/tmp/pb_progress_{session_id}")
+    try:
+        durations = [await _probe_duration(p) for p in video_paths]
+        total_duration = max(durations) if durations else 0.0
+
         cmd = _build_export_cmd(video_paths, output_path)
+        # Insert -progress flag right after 'ffmpeg -y'
+        cmd = [cmd[0], cmd[1], "-progress", str(progress_file)] + cmd[2:]
+
+        _export_progress[session_id] = {
+            "start": time.time(),
+            "total": total_duration,
+            "file": str(progress_file),
+        }
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -137,7 +165,66 @@ async def _run_grid_export(session_id: str, video_paths: list[Path], output_path
     except Exception as e:
         logger.error("Grid export error (%s): %s", session_id, e)
     finally:
+        progress_file.unlink(missing_ok=True)
+        _export_progress.pop(session_id, None)
         _export_tasks.discard(session_id)
+
+
+@router.get("/api/session/{session_id}/export-progress")
+async def grid_export_progress(session_id: str, _: None = Depends(require_host)):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_id not in _export_tasks:
+        return JSONResponse({"active": False})
+
+    info = _export_progress.get(session_id)
+    if not info:
+        return JSONResponse({"active": True, "pct": 0, "elapsed_s": 0, "speed": 0, "remaining_s": None})
+
+    elapsed_s = time.time() - info["start"]
+    total_duration = info["total"]
+    progress_path = Path(info["file"])
+
+    out_time_us = 0.0
+    speed = 0.0
+    try:
+        if progress_path.exists():
+            content = progress_path.read_text()
+            for line in content.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k == "out_time_us":
+                        try:
+                            out_time_us = float(v)
+                        except ValueError:
+                            pass
+                    elif k == "speed":
+                        try:
+                            speed = float(v.rstrip("x"))
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+
+    out_time_s = out_time_us / 1_000_000
+    pct = 0.0
+    remaining_s = None
+    if total_duration > 0:
+        pct = min(99.0, out_time_s / total_duration * 100)
+        if speed > 0:
+            remaining_s = (total_duration - out_time_s) / speed
+
+    return JSONResponse({
+        "active": True,
+        "pct": round(pct, 1),
+        "elapsed_s": round(elapsed_s, 1),
+        "speed": round(speed, 2),
+        "remaining_s": round(remaining_s, 0) if remaining_s is not None else None,
+    })
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -154,6 +241,7 @@ async def dashboard(request: Request, _: None = Depends(require_host)):
             "sessions": sessions,
             "session_files": session_files,
             "session_video_count": session_video_count,
+            "retention_days": settings.retention_days,
         },
     )
 

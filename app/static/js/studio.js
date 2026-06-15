@@ -42,6 +42,7 @@ let pcmChannels = 2;
 let opusCtx = null;
 let audioFormat = 'pcm';   // 'pcm' or 'container' (Opus fallback)
 let audioRecorder = null;  // fallback only
+let micMuted = false;      // true while local mic is muted; gates PCM/Opus capture
 
 // Per-track wall-clock start times (performance.now()) sent in finalize so
 // post-processing can align tracks that started at slightly different times.
@@ -72,6 +73,9 @@ let timerEditIndex  = -1; // -1 = adding new, ≥0 = editing existing
 const raisedHands = new Map();
 const handQueue = []; // ordered by raise time: [{identity, displayName}, ...]
 let handRaised = false;
+
+// Host moderation: remote participant identity → audio track SID
+const remoteAudioTrackSids = new Map();
 
 // ── View / layout state (per-user, local to this browser) ──
 // 'grid' = equal tiles; 'spotlight' = active speaker (or pinned) enlarged,
@@ -199,10 +203,11 @@ async function init() {
 
   attachRoomEvents();
 
+  setupDeviceButtons(micDeviceId, camDeviceId);
+
   try {
     await room.connect(LIVEKIT_URL, token);
     await room.localParticipant.enableCameraAndMicrophone();
-    setupDeviceButtons(micDeviceId, camDeviceId);
 
     renderLocalParticipant();
     for (const p of room.remoteParticipants.values()) {
@@ -210,7 +215,11 @@ async function init() {
     }
   } catch (e) {
     console.error('LiveKit connection failed:', e);
-    showToast('Could not connect to room — check TURN/network config');
+    if (e?.name === 'NotAllowedError') {
+      showToast('Microphone/camera access denied — your reverse proxy may be blocking the Permissions-Policy header');
+    } else {
+      showToast('Could not connect to room — check TURN/network config');
+    }
   }
 
   // Late joiner: if recording is already in progress, start capturing now
@@ -259,11 +268,20 @@ function attachRoomEvents() {
       showToast('Host disconnected — recording stopped');
       setRecordingUI(false);
       stopLocalRecording();
+      waitForUploads();
     }
   });
 
   room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
     if (track.kind !== Track.Kind.Video && track.kind !== Track.Kind.Audio) return;
+
+    // Store microphone SID before any tile check — TrackSubscribed can fire
+    // before renderRemoteParticipant creates the tile (e.g. host joining a room
+    // where participants are already present), and we need the SID for force-mute.
+    if (track.kind === Track.Kind.Audio && pub.source === Track.Source.Microphone) {
+      const sid = track.sid || pub.trackSid;
+      if (sid) remoteAudioTrackSids.set(participant.identity, sid);
+    }
 
     if (pub.source === Track.Source.ScreenShare) {
       // Screen shares get their own tile instead of replacing the camera
@@ -311,11 +329,23 @@ function attachRoomEvents() {
   room.on(RoomEvent.TrackMuted, (pub, participant) => {
     const tile = document.getElementById(`tile-${participant.identity}`);
     if (tile) updateMuteIndicator(tile, participant);
+    // When our own mic is muted (user-initiated or host force-mute), sync the button
+    if (participant === room.localParticipant && pub.source === Track.Source.Microphone) {
+      micMuted = true;
+      btnMic?.classList.add('muted');
+      btnMic?.closest('.device-btn-group')?.classList.add('muted');
+    }
   });
 
   room.on(RoomEvent.TrackUnmuted, (pub, participant) => {
     const tile = document.getElementById(`tile-${participant.identity}`);
     if (tile) updateMuteIndicator(tile, participant);
+    // When our own mic is unmuted (user-initiated or host unmute), sync the button
+    if (participant === room.localParticipant && pub.source === Track.Source.Microphone) {
+      micMuted = false;
+      btnMic?.classList.remove('muted');
+      btnMic?.closest('.device-btn-group')?.classList.remove('muted');
+    }
   });
 
   room.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
@@ -337,7 +367,7 @@ function attachRoomEvents() {
     }
   });
 
-  room.on(RoomEvent.DataReceived, (data) => {
+  room.on(RoomEvent.DataReceived, async (data) => {
     let msg;
     try { msg = JSON.parse(new TextDecoder().decode(data)); } catch (e) { return; }
 
@@ -352,6 +382,7 @@ function attachRoomEvents() {
     if (msg.type === 'recording_stopped' && !IS_HOST && isRecording) {
       setRecordingUI(false);
       stopLocalRecording();
+      waitForUploads();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
       handleSessionEnded();
@@ -380,6 +411,10 @@ function attachRoomEvents() {
     }
     if (msg.type === 'timer_update' && !IS_HOST) {
       applyTimerUpdate(msg);
+    }
+    if (msg.type === 'force_unmute' && msg.identity === identity) {
+      await room.localParticipant.setMicrophoneEnabled(true);
+      // TrackUnmuted event will sync btnMic and micMuted
     }
     if (msg.type === 'hand_cleared') {
       removeFromQueue(msg.identity);
@@ -437,7 +472,11 @@ function renderRemoteParticipant(participant) {
     }
   });
   participant.audioTrackPublications.forEach(pub => {
-    if (pub.track && pub.isSubscribed) pub.track.attach();
+    if (pub.track && pub.isSubscribed) {
+      pub.track.attach();
+      const sid = pub.track.sid || pub.trackSid;
+      if (sid) remoteAudioTrackSids.set(participant.identity, sid);
+    }
   });
 
   stage.appendChild(tile);
@@ -510,6 +549,75 @@ function createTile(tileId, isLocal, labelText) {
   });
   tile.appendChild(pinBtn);
 
+  // Moderation overlay (host only, non-self, non-screen tiles)
+  if (IS_HOST && !isLocal && !tileId.endsWith('-screen')) {
+    const modOverlay = document.createElement('div');
+    modOverlay.className = 'mod-overlay';
+
+    const muteBtn = document.createElement('button');
+    muteBtn.className = 'mod-btn mod-btn-mute';
+    muteBtn.title = 'Mute mic';
+    muteBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
+    muteBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const participantIdentity = tileId;
+      const trackSid = remoteAudioTrackSids.get(participantIdentity);
+      if (!trackSid) { showToast('Audio track not found — participant may not have a mic active'); return; }
+      const newMuted = !muteBtn.classList.contains('active');
+      // Optimistic update so rapid clicks don't double-fire the same state
+      muteBtn.classList.toggle('active', newMuted);
+      muteBtn.title = newMuted ? 'Unmute mic' : 'Mute mic';
+      if (!newMuted) {
+        // Unmuting: ask the participant to unmute themselves via data channel.
+        // LiveKit's server-side unmute requires enable_remote_unmute config;
+        // the data-channel approach works regardless.
+        await broadcastData({ type: 'force_unmute', identity: participantIdentity });
+        showToast(`${labelText} unmuted`);
+      } else {
+        try {
+          const res = await fetch(`/api/session/${SESSION_ID}/mute/${encodeURIComponent(participantIdentity)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host_token: HOST_TOKEN, track_sid: trackSid, muted: true }),
+          });
+          if (res.ok) showToast(`${labelText} muted`);
+          else {
+            muteBtn.classList.remove('active'); // revert on failure
+            muteBtn.title = 'Mute mic';
+            showToast('Mute failed');
+          }
+        } catch (err) {
+          muteBtn.classList.remove('active');
+          muteBtn.title = 'Mute mic';
+          showToast('Mute failed');
+        }
+      }
+    });
+
+    const kickBtn = document.createElement('button');
+    kickBtn.className = 'mod-btn mod-btn-kick';
+    kickBtn.title = 'Kick participant';
+    kickBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+    kickBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const participantIdentity = tileId;
+      if (!confirm(`Remove ${labelText} from the session?`)) return;
+      try {
+        const res = await fetch(`/api/session/${SESSION_ID}/kick/${encodeURIComponent(participantIdentity)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host_token: HOST_TOKEN }),
+        });
+        if (res.ok) showToast(`${labelText} removed`);
+        else showToast('Kick failed');
+      } catch (err) { showToast('Kick failed'); }
+    });
+
+    modOverlay.appendChild(muteBtn);
+    modOverlay.appendChild(kickBtn);
+    tile.appendChild(modOverlay);
+  }
+
   tileOrder.push(tile.id);
   return tile;
 }
@@ -534,6 +642,12 @@ function updateMuteIndicator(tile, participant) {
     .filter(pub => pub.source === Track.Source.Microphone);
   const muted = micPubs.length === 0 || micPubs.every(pub => pub.isMuted);
   muteEl.style.display = muted ? 'flex' : 'none';
+  // Keep the host's force-mute button in sync with the actual track state
+  const modMuteBtn = tile.querySelector('.mod-btn-mute');
+  if (modMuteBtn) {
+    modMuteBtn.classList.toggle('active', muted);
+    modMuteBtn.title = muted ? 'Unmute mic' : 'Mute mic';
+  }
 }
 
 function updateQualityIndicator(tile, quality) {
@@ -677,11 +791,11 @@ async function openDeviceDropdown(kind) {
         closeAllDeviceDropdowns();
         if (kind === 'audioinput') {
           activeMicDeviceId = d.deviceId;
-          await room.switchActiveDevice('audioinput', d.deviceId);
+          try { await room.switchActiveDevice('audioinput', d.deviceId); } catch (err) {}
           if (isRecording && pcmNode) await restartPcmCapture();
         } else {
           activeCamDeviceId = d.deviceId;
-          await room.switchActiveDevice('videoinput', d.deviceId);
+          try { await room.switchActiveDevice('videoinput', d.deviceId); } catch (err) {}
         }
       });
       dropdown.appendChild(btn);
@@ -770,6 +884,7 @@ function setupControls() {
   btnMic?.addEventListener('click', async () => {
     const enabled = room.localParticipant.isMicrophoneEnabled;
     await room.localParticipant.setMicrophoneEnabled(!enabled);
+    micMuted = enabled; // enabled=true → we just muted; false → we just unmuted
     btnMic.classList.toggle('muted', enabled);
     btnMic.closest('.device-btn-group')?.classList.toggle('muted', enabled);
   });
@@ -1018,6 +1133,24 @@ async function toggleRecording() {
     await broadcastData({ type: 'recording_stopped' });
     setRecordingUI(false);
     stopLocalRecording();
+    await waitForUploads();
+  }
+}
+
+async function waitForUploads() {
+  showUploadBanner('uploading');
+  const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
+  window.addEventListener('beforeunload', _unloadGuard);
+  await new Promise(r => setTimeout(r, 100)); // let onstop handlers fire
+  try {
+    await Promise.all(Object.values(uploadQueues));
+    sessionStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
+    showUploadBanner('done');
+    setTimeout(() => hideUploadBanner(), 8000);
+  } catch (e) {
+    showUploadBanner('error');
+  } finally {
+    window.removeEventListener('beforeunload', _unloadGuard);
   }
 }
 
@@ -1107,9 +1240,48 @@ async function startLocalRecording() {
     // Recording may have been stopped while we were waiting for tracks.
     if (!isRecording) return;
 
-    recordingEpoch = Date.now().toString(36); // unique prefix per recording run
-    chunkIndex = { audio: 0, video: 0, screen: 0 };
-    uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+    // ── Resume interrupted upload (Feature 4) ──────────────────────────────
+    const epochKey = `podbooth:epoch:${SESSION_ID}:${identity}`;
+    const savedEpoch = sessionStorage.getItem(epochKey);
+    let resumedEpoch = false;
+    if (savedEpoch) {
+      // Check if any chunks exist for this epoch
+      const trackTypes = ['audio', 'video', 'screen'];
+      const nextChunks = {};
+      let anyChunks = false;
+      for (const tt of trackTypes) {
+        try {
+          const r = await fetch(
+            `/api/upload/chunks?session_id=${encodeURIComponent(SESSION_ID)}&identity=${encodeURIComponent(identity)}&participant=${encodeURIComponent(displayName)}&track_type=${tt}&epoch=${encodeURIComponent(savedEpoch)}`
+          );
+          if (r.ok) {
+            const { next_chunk } = await r.json();
+            nextChunks[tt] = next_chunk;
+            if (next_chunk > 0) anyChunks = true;
+          } else {
+            nextChunks[tt] = 0;
+          }
+        } catch (e) {
+          nextChunks[tt] = 0;
+        }
+      }
+      if (anyChunks) {
+        recordingEpoch = savedEpoch;
+        chunkIndex = { audio: nextChunks.audio || 0, video: nextChunks.video || 0, screen: nextChunks.screen || 0 };
+        uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+        resumedEpoch = true;
+        showToast(`Resuming upload from chunk ${JSON.stringify(chunkIndex)}`);
+      }
+    }
+
+    if (!resumedEpoch) {
+      recordingEpoch = Date.now().toString(36); // unique prefix per recording run
+      chunkIndex = { audio: 0, video: 0, screen: 0 };
+      uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+    }
+
+    // Save epoch to sessionStorage so a page reload can resume
+    sessionStorage.setItem(epochKey, recordingEpoch);
 
     // ── VIDEO first ── start it before audio so a slow/failed microphone
     // capture can never block video from recording.
@@ -1275,6 +1447,7 @@ async function startPcmCapture() {
   audioStartTime = null;
 
   pcmNode.port.onmessage = (e) => {
+    if (micMuted) return;
     const channels = e.data;
     if (!channels || !channels.length) return;
     if (audioStartTime === null) audioStartTime = performance.now();
@@ -1353,6 +1526,7 @@ function startOpusFallback() {
   });
   audioStartTime = null;
   audioRecorder.ondataavailable = e => {
+    if (micMuted) return;
     if (e.data && e.data.size > 0) {
       if (audioStartTime === null) audioStartTime = performance.now();
       enqueueChunk(e.data, 'audio', ext);
@@ -1365,6 +1539,7 @@ function startOpusFallback() {
 }
 
 function stopLocalRecording() {
+  micMuted = false;
   // Video
   if (videoRecorder && videoRecorder.state !== 'inactive') {
     videoRecorder.stop(); // fires final ondataavailable, then onstop → finalize
@@ -1487,13 +1662,16 @@ async function endSession() {
 }
 
 async function handleSessionEnded() {
-  showToast('Session ended — uploading your final chunks…');
   if (isRecording) {
     setRecordingUI(false);
     stopLocalRecording();
   }
-  // Let the upload queues drain before navigating away
+  showUploadBanner('uploading');
+  const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
+  window.addEventListener('beforeunload', _unloadGuard);
+  await new Promise(r => setTimeout(r, 100));
   await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+  window.removeEventListener('beforeunload', _unloadGuard);
   window.location.href = '/';
 }
 
@@ -1582,6 +1760,7 @@ function pollSessionStatus() {
         } else if (isRecording) {
           setRecordingUI(false);
           stopLocalRecording();
+          waitForUploads();
         }
       }
     } catch (e) {}
@@ -1976,6 +2155,35 @@ function fmtTime(sec) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// ── Upload banner (Feature 7) ─────────────────────────────────────────────────
+
+function showUploadBanner(state) {
+  const banner = document.getElementById('upload-banner');
+  if (!banner) return;
+  banner.classList.remove('hidden', 'uploading', 'done', 'error');
+  banner.classList.add(state);
+  if (state === 'uploading') {
+    banner.textContent = '⬆ Uploading recordings…';
+  } else if (state === 'done') {
+    banner.textContent = '✓ Recordings uploaded';
+  } else if (state === 'error') {
+    banner.textContent = '⚠ Some recordings may not have uploaded';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'upload-banner-close';
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', hideUploadBanner);
+    banner.appendChild(closeBtn);
+  }
+}
+
+function hideUploadBanner() {
+  const banner = document.getElementById('upload-banner');
+  if (!banner) return;
+  banner.classList.add('hidden');
+  banner.classList.remove('uploading', 'done', 'error');
+  banner.textContent = '';
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

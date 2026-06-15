@@ -13,13 +13,53 @@
     <a href="/" class="btn-primary">Start your first session</a>
   </div>
   {% else %}
-  <div class="session-list">
+
+  <!-- Search / filter toolbar -->
+  <div class="dash-toolbar">
+    <input type="search" id="dash-search" placeholder="Search title, episode, tags…" class="dash-search-input">
+    <div class="dash-status-btns">
+      <button class="dash-filter-btn active" data-filter="all">All</button>
+      <button class="dash-filter-btn" data-filter="live">Live</button>
+      <button class="dash-filter-btn" data-filter="ended">Ended</button>
+    </div>
+    <select id="dash-sort" class="dash-sort-select">
+      <option value="newest">Newest</option>
+      <option value="oldest">Oldest</option>
+      <option value="title">Title A–Z</option>
+    </select>
+  </div>
+
+  <div class="session-list" id="session-list">
     {% for session in sessions %}
-    <div class="session-card {% if session.ended %}ended{% endif %}" data-session-id="{{ session.id }}" data-has-files="{{ 'true' if session_files[session.id] else 'false' }}" data-video-count="{{ session_video_count[session.id] }}">
+    <div class="session-card {% if session.ended %}ended{% endif %}"
+         id="card-{{ session.id }}"
+         data-session-id="{{ session.id }}"
+         data-host-token="{{ session.host_token }}"
+         data-has-files="{{ 'true' if session_files[session.id] else 'false' }}"
+         data-video-count="{{ session_video_count[session.id] }}"
+         data-title="{{ session.title | lower }}"
+         data-episode="{{ session.episode | lower }}"
+         data-tags="{{ session.tags | join(',') | lower }}"
+         data-description="{{ session.description | lower }}"
+         data-status="{{ 'ended' if session.ended else 'live' }}"
+         data-created="{{ session.created_at.isoformat() }}">
       <div class="session-card-header">
         <div>
           <span class="session-card-title">{{ session.title }}</span>
+          {% if session.episode %}
+          <span class="session-episode-badge">Ep. {{ session.episode }}</span>
+          {% endif %}
           <span class="session-card-date">{{ session.created_at.strftime("%b %d, %Y %H:%M") }}</span>
+          {% if retention_days > 0 %}
+          <span class="session-expiry" data-created="{{ session.created_at.isoformat() }}" data-retention="{{ retention_days }}"></span>
+          {% endif %}
+          {% if session.tags %}
+          <div class="session-tags">
+            {% for tag in session.tags %}
+            <span class="session-tag">{{ tag }}</span>
+            {% endfor %}
+          </div>
+          {% endif %}
         </div>
         <div class="session-card-meta">
           {% if session.ended %}
@@ -29,6 +69,41 @@
           {% else %}
           <span class="badge badge-live">Live</span>
           {% endif %}
+          <button class="btn-edit-meta" onclick="toggleMetaEdit('{{ session.id }}')">Edit</button>
+        </div>
+      </div>
+
+      {% if session.description or session.notes %}
+      <div class="session-notes-wrap">
+        <button class="session-notes-toggle" onclick="this.parentElement.classList.toggle('open')">Notes ▾</button>
+        <div class="session-notes-body">
+          {% if session.description %}<p class="session-desc">{{ session.description }}</p>{% endif %}
+          {% if session.notes %}<pre class="session-note-text">{{ session.notes }}</pre>{% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Inline metadata edit form -->
+      <div class="meta-edit-form" id="meta-form-{{ session.id }}" style="display:none">
+        <div class="meta-edit-row">
+          <label>Episode</label>
+          <input type="text" id="meta-ep-{{ session.id }}" value="{{ session.episode }}" maxlength="100" placeholder="e.g. 42">
+        </div>
+        <div class="meta-edit-row">
+          <label>Description</label>
+          <input type="text" id="meta-desc-{{ session.id }}" value="{{ session.description }}" maxlength="500" placeholder="Short description">
+        </div>
+        <div class="meta-edit-row">
+          <label>Tags (comma-separated)</label>
+          <input type="text" id="meta-tags-{{ session.id }}" value="{{ session.tags | join(', ') }}" maxlength="500" placeholder="podcast, interview, guest">
+        </div>
+        <div class="meta-edit-row">
+          <label>Notes</label>
+          <textarea id="meta-notes-{{ session.id }}" maxlength="2000" rows="3" placeholder="Show notes, talking points…">{{ session.notes }}</textarea>
+        </div>
+        <div class="meta-edit-actions">
+          <button class="btn-secondary" onclick="saveMetadata('{{ session.id }}')">Save</button>
+          <button class="btn-secondary" onclick="toggleMetaEdit('{{ session.id }}')">Cancel</button>
         </div>
       </div>
 
@@ -90,6 +165,156 @@
 </div>
 
 <script>
+// ── Feature 1: Metadata edit ─────────────────────────────────────────────────
+
+function toggleMetaEdit(sessionId) {
+  const form = document.getElementById(`meta-form-${sessionId}`);
+  if (!form) return;
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveMetadata(sessionId) {
+  const card = document.getElementById(`card-${sessionId}`);
+  if (!card) return;
+  const hostToken = card.dataset.hostToken;
+
+  const ep    = document.getElementById(`meta-ep-${sessionId}`)?.value.trim() ?? '';
+  const desc  = document.getElementById(`meta-desc-${sessionId}`)?.value.trim() ?? '';
+  const notes = document.getElementById(`meta-notes-${sessionId}`)?.value.trim() ?? '';
+  const tagsRaw = document.getElementById(`meta-tags-${sessionId}`)?.value ?? '';
+  const tags  = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
+
+  try {
+    const r = await fetch(`/api/session/${sessionId}/metadata`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host_token: hostToken, episode: ep, description: desc, notes, tags }),
+    });
+    if (!r.ok) { alert('Save failed.'); return; }
+
+    // Update card data attributes for filtering
+    card.dataset.episode     = ep.toLowerCase();
+    card.dataset.description = desc.toLowerCase();
+    card.dataset.tags        = tags.join(',').toLowerCase();
+
+    // Update displayed episode badge
+    let epBadge = card.querySelector('.session-episode-badge');
+    if (ep) {
+      if (!epBadge) {
+        epBadge = document.createElement('span');
+        epBadge.className = 'session-episode-badge';
+        card.querySelector('.session-card-title').insertAdjacentElement('afterend', epBadge);
+      }
+      epBadge.textContent = `Ep. ${ep}`;
+    } else if (epBadge) {
+      epBadge.remove();
+    }
+
+    // Update tag pills
+    let tagsDiv = card.querySelector('.session-tags');
+    if (tags.length) {
+      if (!tagsDiv) {
+        tagsDiv = document.createElement('div');
+        tagsDiv.className = 'session-tags';
+        card.querySelector('.session-card-header > div').appendChild(tagsDiv);
+      }
+      tagsDiv.innerHTML = tags.map(t => `<span class="session-tag">${t}</span>`).join('');
+    } else if (tagsDiv) {
+      tagsDiv.remove();
+    }
+
+    // Update notes section
+    let notesWrap = card.querySelector('.session-notes-wrap');
+    if (desc || notes) {
+      if (!notesWrap) {
+        notesWrap = document.createElement('div');
+        notesWrap.className = 'session-notes-wrap';
+        notesWrap.innerHTML = `<button class="session-notes-toggle" onclick="this.parentElement.classList.toggle('open')">Notes ▾</button><div class="session-notes-body"></div>`;
+        card.querySelector('.meta-edit-form').insertAdjacentElement('afterend', notesWrap);
+      }
+      const body = notesWrap.querySelector('.session-notes-body');
+      body.innerHTML = '';
+      if (desc) { const p = document.createElement('p'); p.className = 'session-desc'; p.textContent = desc; body.appendChild(p); }
+      if (notes) { const pre = document.createElement('pre'); pre.className = 'session-note-text'; pre.textContent = notes; body.appendChild(pre); }
+    } else if (notesWrap) {
+      notesWrap.remove();
+    }
+
+    toggleMetaEdit(sessionId);
+  } catch (e) {
+    alert('Save failed.');
+  }
+}
+
+// ── Feature 2: Expiry labels ─────────────────────────────────────────────────
+
+document.querySelectorAll('.session-expiry').forEach(el => {
+  const created    = new Date(el.dataset.created);
+  const retention  = parseInt(el.dataset.retention, 10);
+  const expiry     = new Date(created.getTime() + retention * 86400000);
+  const daysLeft   = Math.ceil((expiry - Date.now()) / 86400000);
+  if (daysLeft <= 7 && daysLeft > 0) {
+    el.textContent = `Expires in ${daysLeft}d`;
+    el.classList.add('session-expiry-warn');
+  }
+});
+
+// ── Feature 3: Search / filter / sort ───────────────────────────────────────
+
+const searchInput   = document.getElementById('dash-search');
+const filterBtns    = document.querySelectorAll('.dash-filter-btn');
+const sortSelect    = document.getElementById('dash-sort');
+const sessionList   = document.getElementById('session-list');
+
+let currentFilter = 'all';
+
+function applyFilters() {
+  if (!sessionList) return;
+  const query  = (searchInput?.value ?? '').toLowerCase().trim();
+  const cards  = [...sessionList.querySelectorAll('.session-card')];
+
+  cards.forEach(card => {
+    const matchSearch = !query ||
+      card.dataset.title?.includes(query) ||
+      card.dataset.episode?.includes(query) ||
+      card.dataset.tags?.includes(query) ||
+      card.dataset.description?.includes(query);
+
+    const status = card.dataset.status; // 'live' or 'ended'
+    const matchFilter = currentFilter === 'all' ||
+      (currentFilter === 'live'  && status === 'live') ||
+      (currentFilter === 'ended' && status === 'ended');
+
+    card.style.display = (matchSearch && matchFilter) ? '' : 'none';
+  });
+
+  // Sort visible cards
+  const sortVal = sortSelect?.value ?? 'newest';
+  const visible = cards.filter(c => c.style.display !== 'none');
+  visible.sort((a, b) => {
+    if (sortVal === 'title') {
+      return (a.dataset.title ?? '').localeCompare(b.dataset.title ?? '');
+    }
+    const da = new Date(a.dataset.created ?? 0);
+    const db = new Date(b.dataset.created ?? 0);
+    return sortVal === 'oldest' ? da - db : db - da;
+  });
+  visible.forEach(c => sessionList.appendChild(c));
+}
+
+searchInput?.addEventListener('input', applyFilters);
+sortSelect?.addEventListener('change', applyFilters);
+filterBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    filterBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.dataset.filter;
+    applyFilters();
+  });
+});
+
+// ── Preview modal ────────────────────────────────────────────────────────────
+
 function openPreview(path, type, participant, filename) {
   const body = document.getElementById('preview-body');
   document.getElementById('preview-participant').textContent = participant;
@@ -143,7 +368,7 @@ function _setExportState(sessionId, status, path, size_mb) {
     btn.textContent = 'Exporting…';
     btn.disabled = true;
     if (reBtn) reBtn.style.display = 'none';
-    setTimeout(() => _pollExport(sessionId), 2500);
+    setTimeout(() => _pollExportProgress(sessionId), 2000);
   } else if (status === 'ready') {
     btn.textContent = `↓ Grid (${size_mb} MB)`;
     btn.disabled = false;
@@ -157,7 +382,30 @@ function _setExportState(sessionId, status, path, size_mb) {
   }
 }
 
-async function _pollExport(sessionId) {
+async function _pollExportProgress(sessionId) {
+  const btn = _exportBtn(sessionId);
+  if (!btn) return;
+
+  try {
+    // Try to get detailed progress first
+    const pr = await fetch(`/api/session/${sessionId}/export-progress`);
+    if (pr.ok) {
+      const prog = await pr.json();
+      if (prog.active) {
+        let label = 'Exporting…';
+        if (prog.pct > 0) {
+          label = `Exporting… ${prog.pct}%`;
+          if (prog.speed > 0) label += ` · ${prog.speed}×`;
+          if (prog.remaining_s != null) label += ` · ~${Math.round(prog.remaining_s)}s left`;
+        }
+        btn.textContent = label;
+        setTimeout(() => _pollExportProgress(sessionId), 2000);
+        return;
+      }
+    }
+  } catch (e) {}
+
+  // Fall back to plain status poll
   try {
     const r = await fetch(`/api/session/${sessionId}/export-status`);
     if (!r.ok) return;
@@ -186,7 +434,8 @@ async function startExport(sessionId) {
 
 // On load, sync export button state for any session that might already have an export
 document.querySelectorAll('.btn-export-grid').forEach(btn => {
-  _pollExport(btn.dataset.sessionId);
+  // Use the progress endpoint first, fall back to status
+  _pollExportProgress(btn.dataset.sessionId);
 });
 
 async function deleteSession(sessionId, hostToken, title) {
