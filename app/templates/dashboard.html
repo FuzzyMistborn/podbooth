@@ -385,7 +385,7 @@ function _setExportState(sessionId, status, path, size_mb) {
     btn.textContent = `↓ Grid (${size_mb} MB)`;
     btn.disabled = false;
     btn.onclick = () => { window.location.href = '/download/' + path; };
-    if (caret) caret.style.display = '';
+    if (caret) caret.style.display = 'flex';
   } else {
     btn.textContent = '⊞ Export Grid';
     btn.disabled = false;
@@ -401,7 +401,7 @@ function toggleExportDropdown(sessionId, event) {
   if (!dropdown) return;
   const isOpen = dropdown.style.display !== 'none';
   document.querySelectorAll('.export-split-dropdown').forEach(d => { d.style.display = 'none'; });
-  if (!isOpen) dropdown.style.display = '';
+  if (!isOpen) dropdown.style.display = 'block';
 }
 
 function closeExportDropdown(sessionId) {

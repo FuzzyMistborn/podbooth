@@ -21,6 +21,7 @@ let identity = '';
 let isRecording = false;
 let isPaused = false;
 let recordingStartTime = null;
+let cumulativeElapsedMs = 0; // total recorded ms before the current segment
 let recTimerInterval = null;
 
 // Video recorder
@@ -89,6 +90,11 @@ const pinnedIds = new Set();
 let activeSpeakerTileId = null;
 // Insertion order of tiles so layout placement stays stable across renders.
 const tileOrder = [];
+
+// Latency tracking: identity → rttMs (reported by each participant)
+const participantLatency = new Map();
+let localRttMs = null;
+let latencyInterval = null;
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 
@@ -225,6 +231,7 @@ async function init() {
     for (const p of room.remoteParticipants.values()) {
       renderRemoteParticipant(p);
     }
+    startLatencyMeasure();
   } catch (e) {
     console.error('LiveKit connection failed:', e);
     if (e?.name === 'NotAllowedError') {
@@ -283,8 +290,8 @@ function attachRoomEvents() {
     // the is_host flag in the participant's token metadata.
     if (!IS_HOST && (isRecording || isPaused) && participantIsHost(p)) {
       showToast('Host disconnected — recording stopped');
-      setRecordingUI(false);
       stopLocalRecording();
+      setRecordingUI(false);
       waitForUploads();
     }
   });
@@ -396,18 +403,17 @@ function attachRoomEvents() {
         });
       }
     }
-    if (msg.type === 'recording_paused' && !IS_HOST && isRecording) {
+    if (msg.type === 'recording_paused' && !IS_HOST) {
       setRecordingUI(false, true);
-      stopLocalRecording();
-      waitForUploads();
+      pauseLocalRecording();
     }
     if (msg.type === 'recording_resumed' && !IS_HOST && isPaused) {
       setRecordingUI(true);
-      startLocalRecording();
+      resumeLocalRecording();
     }
-    if (msg.type === 'recording_stopped' && !IS_HOST && (isRecording || isPaused)) {
+    if (msg.type === 'recording_stopped' && !IS_HOST) {
+      stopLocalRecording();
       setRecordingUI(false);
-      if (isRecording) stopLocalRecording();
       waitForUploads();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
@@ -444,6 +450,15 @@ function attachRoomEvents() {
     }
     if (msg.type === 'alert') {
       showAlertBanner(msg.text);
+    }
+    if (msg.type === 'latency_report') {
+      participantLatency.set(msg.identity, msg.rttMs);
+      const tile = document.getElementById(`tile-${msg.identity}`);
+      updateLatencyBadge(tile, msg.rttMs);
+      if (tile && localRttMs != null) {
+        const badge = tile.querySelector('.latency-ms');
+        if (badge) badge.title = `~${localRttMs + msg.rttMs}ms roundtrip`;
+      }
     }
     if (msg.type === 'hand_cleared') {
       removeFromQueue(msg.identity);
@@ -533,6 +548,11 @@ function createTile(tileId, isLocal, labelText) {
 
   label.appendChild(qualDot);
   label.appendChild(document.createTextNode(labelText));
+  if (!tileId.endsWith('-screen')) {
+    const latencyEl = document.createElement('span');
+    latencyEl.className = 'latency-ms';
+    label.appendChild(latencyEl);
+  }
 
   const muteIcon = document.createElement('div');
   muteIcon.className = 'tile-muted';
@@ -1228,8 +1248,7 @@ async function pauseRecording() {
   await _postRecordingAction('pause');
   await broadcastData({ type: 'recording_paused' });
   setRecordingUI(false, true);
-  stopLocalRecording();
-  await waitForUploads();
+  pauseLocalRecording();
   if (btnPause) btnPause.disabled = false;
 }
 
@@ -1238,7 +1257,7 @@ async function resumeRecording() {
   await _postRecordingAction('resume');
   await broadcastData({ type: 'recording_resumed' });
   setRecordingUI(true);
-  await startLocalRecording();
+  await resumeLocalRecording();
   if (btnResume) btnResume.disabled = false;
 }
 
@@ -1246,8 +1265,8 @@ async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = true;
   await _postRecordingAction('stop');
   await broadcastData({ type: 'recording_stopped' });
+  stopLocalRecording();
   setRecordingUI(false);
-  if (isRecording) stopLocalRecording();
   await waitForUploads();
   if (btnStopRec) btnStopRec.disabled = false;
 }
@@ -1284,14 +1303,22 @@ function setRecordingUI(recording, paused = false) {
   if (recording) {
     recIndicator?.classList.add('active');
     recIndicator?.classList.remove('paused');
+    clearInterval(recTimerInterval);
     recordingStartTime = Date.now();
     recTimerInterval = setInterval(updateRecTimer, 1000);
   } else if (isPaused) {
     recIndicator?.classList.remove('active');
     recIndicator?.classList.add('paused');
+    if (recordingStartTime) {
+      cumulativeElapsedMs += Date.now() - recordingStartTime;
+      recordingStartTime = null;
+    }
     clearInterval(recTimerInterval);
+    recTimerInterval = null;
+    // leave recTime showing the elapsed value so the host sees total time so far
   } else {
     recIndicator?.classList.remove('active', 'paused');
+    cumulativeElapsedMs = 0;
     clearInterval(recTimerInterval);
     if (recTime) recTime.textContent = '00:00';
     startFilesPoll();
@@ -1300,7 +1327,7 @@ function setRecordingUI(recording, paused = false) {
 
 function updateRecTimer() {
   if (!recordingStartTime) return;
-  const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+  const elapsed = Math.floor((Date.now() - recordingStartTime + cumulativeElapsedMs) / 1000);
   const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
   const s = String(elapsed % 60).padStart(2, '0');
   recTime.textContent = `${m}:${s}`;
@@ -1666,6 +1693,19 @@ function startOpusFallback() {
   audioRecorder.start(5000);
 }
 
+function pauseLocalRecording() {
+  // Recorders keep running so stop() reliably fires onstop → finalize.
+  // The pause period will appear in the output file; hosts can trim it in editing.
+}
+
+async function resumeLocalRecording() {
+  if (!hasActiveRecorders()) {
+    // Page was reloaded during a pause — start a fresh take
+    await startLocalRecording();
+  }
+  // Otherwise recorders were never stopped, nothing to do
+}
+
 function stopLocalRecording() {
   micMuted = false;
   // Video
@@ -1785,7 +1825,7 @@ async function leaveSession() {
   if (!confirm('Leave this session?')) return;
 
   if (isRecording || isPaused) {
-    if (isRecording) stopLocalRecording();
+    stopLocalRecording();
     setRecordingUI(false);
   }
 
@@ -1800,7 +1840,7 @@ async function endSession() {
   if (!confirm('End this session for everyone?')) return;
 
   if (isRecording || isPaused) {
-    if (isRecording) stopLocalRecording();
+    stopLocalRecording();
     setRecordingUI(false);
   }
 
@@ -1823,7 +1863,7 @@ async function endSession() {
 
 async function handleSessionEnded() {
   if (isRecording || isPaused) {
-    if (isRecording) stopLocalRecording();
+    stopLocalRecording();
     setRecordingUI(false);
   }
   showUploadBanner('uploading');
@@ -1836,7 +1876,7 @@ async function handleSessionEnded() {
 }
 
 function onBeforeUnload(e) {
-  if (isRecording) {
+  if (isRecording || isPaused) {
     // Best effort: stop recorders so final chunks attempt to flush.
     // Browsers don't guarantee async work completes during unload.
     stopLocalRecording();
@@ -1869,12 +1909,17 @@ function updateWaitroomPanel(guests) {
     li.className = 'waitroom-item';
     const nameSpan = document.createElement('span');
     nameSpan.textContent = name;
-    const btn = document.createElement('button');
-    btn.className = 'waitroom-admit';
-    btn.textContent = 'Admit';
-    btn.addEventListener('click', () => admitGuest(gid, li));
+    const admitBtn = document.createElement('button');
+    admitBtn.className = 'waitroom-admit';
+    admitBtn.textContent = 'Admit';
+    admitBtn.addEventListener('click', () => admitGuest(gid, li));
+    const denyBtn = document.createElement('button');
+    denyBtn.className = 'waitroom-deny';
+    denyBtn.textContent = 'Deny';
+    denyBtn.addEventListener('click', () => denyGuest(gid, li));
     li.appendChild(nameSpan);
-    li.appendChild(btn);
+    li.appendChild(admitBtn);
+    li.appendChild(denyBtn);
     list.appendChild(li);
   });
   panel.style.display = guests.length ? 'flex' : 'none';
@@ -1890,6 +1935,19 @@ async function admitGuest(guestIdentity, li) {
     if (r.ok && li) li.remove();
   } catch (e) {
     showToast('Failed to admit guest');
+  }
+}
+
+async function denyGuest(guestIdentity, li) {
+  try {
+    const r = await fetch(`/api/session/${SESSION_ID}/deny/${encodeURIComponent(guestIdentity)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host_token: HOST_TOKEN }),
+    });
+    if (r.ok && li) li.remove();
+  } catch (e) {
+    showToast('Failed to deny guest');
   }
 }
 
@@ -1920,14 +1978,13 @@ function pollSessionStatus() {
         } else if (data.paused) {
           if (isRecording) {
             setRecordingUI(false, true);
-            stopLocalRecording();
-            waitForUploads();
+            pauseLocalRecording();
           } else if (!isPaused) {
             setRecordingUI(false, true);
           }
         } else if (isRecording || isPaused) {
+          stopLocalRecording();
           setRecordingUI(false);
-          if (isRecording) stopLocalRecording();
           waitForUploads();
         }
       }
@@ -2352,6 +2409,77 @@ function hideUploadBanner() {
   banner.classList.add('hidden');
   banner.classList.remove('uploading', 'done', 'error');
   banner.textContent = '';
+}
+
+// ── Latency measurement ──────────────────────────────────────────────────────
+
+function startLatencyMeasure() {
+  if (latencyInterval) return;
+  setTimeout(measureAndBroadcastLatency, 1500);
+  latencyInterval = setInterval(measureAndBroadcastLatency, 4000);
+}
+
+async function measureAndBroadcastLatency() {
+  if (!room?.localParticipant) return;
+  let rttMs = null;
+
+  // WebRTC candidate-pair stats give true media-path RTT to the SFU
+  try {
+    const pc = room?.engine?.publisher?.pc;
+    if (pc) {
+      const stats = await pc.getStats();
+      for (const stat of stats.values()) {
+        if (stat.type === 'candidate-pair' && stat.nominated && stat.currentRoundTripTime != null) {
+          rttMs = Math.round(stat.currentRoundTripTime * 1000);
+          break;
+        }
+      }
+    }
+  } catch (e) {}
+
+  // Fallback: HTTP round-trip time
+  if (rttMs == null) {
+    try {
+      const t0 = performance.now();
+      await fetch(`/api/session/${SESSION_ID}/status`);
+      rttMs = Math.round(performance.now() - t0);
+    } catch (e) {}
+  }
+
+  if (rttMs == null) return;
+  localRttMs = rttMs;
+
+  updateLatencyBadge(document.getElementById(`tile-${identity}`), rttMs);
+
+  const wrap = document.getElementById('latency-indicator-wrap');
+  const val  = document.getElementById('latency-value');
+  if (wrap && val) {
+    val.textContent = `${rttMs}ms`;
+    wrap.classList.remove('good', 'fair', 'poor');
+    wrap.title = `Your RTT to server: ${rttMs}ms`;
+    if (rttMs < 80)       wrap.classList.add('good');
+    else if (rttMs < 150) wrap.classList.add('fair');
+    else                  wrap.classList.add('poor');
+  }
+
+  // Refresh roundtrip tooltips on all remote tiles
+  for (const [remId, theirRtt] of participantLatency) {
+    const badge = document.getElementById(`tile-${remId}`)?.querySelector('.latency-ms');
+    if (badge) badge.title = `~${rttMs + theirRtt}ms roundtrip`;
+  }
+
+  await broadcastData({ type: 'latency_report', identity, rttMs });
+}
+
+function updateLatencyBadge(tile, rttMs) {
+  if (!tile) return;
+  const badge = tile.querySelector('.latency-ms');
+  if (!badge) return;
+  badge.textContent = `${rttMs}ms`;
+  badge.classList.remove('good', 'fair', 'poor');
+  if (rttMs < 80)       badge.classList.add('good');
+  else if (rttMs < 150) badge.classList.add('fair');
+  else                  badge.classList.add('poor');
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

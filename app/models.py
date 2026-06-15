@@ -30,6 +30,7 @@ class Session:
     participants: dict = field(default_factory=dict)   # display name -> joined_at iso
     pending_guests: dict = field(default_factory=dict) # identity -> {display_name, requested_at}
     admitted_guests: dict = field(default_factory=dict) # identity -> True
+    denied_guests: dict = field(default_factory=dict)   # identity -> True
     description: str = ""
     episode: str = ""
     notes: str = ""
@@ -74,6 +75,7 @@ def load():
             d["created_at"] = datetime.fromisoformat(d["created_at"])
             d.setdefault("pending_guests", {})
             d.setdefault("admitted_guests", {})
+            d.setdefault("denied_guests", {})
             session = Session(**d)
             # Anything that was live when we went down is no longer live
             session.recording = False

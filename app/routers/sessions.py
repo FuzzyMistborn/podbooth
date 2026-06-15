@@ -243,6 +243,13 @@ async def session_status(session_id: str):
 
 # ── Green room / host admit ──────────────────────────────────────────────────
 
+@router.get("/join-denied", response_class=HTMLResponse)
+async def join_denied(request: Request):
+    return templates.TemplateResponse(
+        request, "error.html",
+        {"message": "Your request to join was not approved by the host.", "show_home_link": False},
+    )
+
 @router.get("/lobby/{session_id}", response_class=HTMLResponse)
 async def lobby_page(
     request: Request,
@@ -296,6 +303,7 @@ async def check_admission(session_id: str, identity: str):
         raise HTTPException(status_code=404, detail="Session not found")
     return JSONResponse({
         "admitted": identity in session.admitted_guests,
+        "denied": identity in session.denied_guests,
         "ended": session.ended,
     })
 
@@ -310,7 +318,7 @@ async def pending_guests_list(session_id: str, host_token: str = ""):
     guests = [
         {"identity": ident, "display_name": info["display_name"]}
         for ident, info in session.pending_guests.items()
-        if ident not in session.admitted_guests
+        if ident not in session.admitted_guests and ident not in session.denied_guests
     ]
     return JSONResponse({"guests": guests})
 
@@ -325,6 +333,20 @@ async def admit_guest(session_id: str, identity: str, request: Request):
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
     session.admitted_guests[identity] = True
+    touch(session_id)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/api/session/{session_id}/deny/{identity}")
+async def deny_guest(session_id: str, identity: str, request: Request):
+    data = await request.json()
+    host_token = data.get("host_token", "")
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not _is_host(host_token, session):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    session.denied_guests[identity] = True
     touch(session_id)
     return JSONResponse({"ok": True})
 

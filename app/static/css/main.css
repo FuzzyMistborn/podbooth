@@ -776,6 +776,36 @@ input::placeholder { color: var(--text-3); }
 .quality-dot.poor    { background: var(--red); }
 .quality-dot.unknown { background: var(--text-3); }
 
+/* ── Latency badges ──────────────────────────────────────────── */
+.latency-ms {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+  margin-left: 2px;
+  cursor: default;
+  transition: color 0.3s;
+}
+.latency-ms:empty { display: none; }
+.latency-ms.good { color: var(--green); }
+.latency-ms.fair { color: var(--yellow); }
+.latency-ms.poor { color: var(--red); }
+
+.latency-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  cursor: default;
+  white-space: nowrap;
+  transition: color 0.3s;
+}
+.latency-indicator svg { width: 12px; height: 12px; flex-shrink: 0; }
+.latency-indicator.good { color: var(--green); }
+.latency-indicator.fair { color: var(--yellow); }
+.latency-indicator.poor { color: var(--red); }
+
 /* ── Controls bar ────────────────────────────────────────────── */
 .controls-bar {
   display: flex;
@@ -1249,6 +1279,20 @@ input::placeholder { color: var(--text-3); }
   flex-shrink: 0;
 }
 .waitroom-admit:hover { filter: brightness(1.15); }
+.waitroom-deny {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.waitroom-deny:hover { background: var(--red); color: #fff; }
 
 /* ── Lobby waiting page ──────────────────────────────────────── */
 .lobby-spinner {

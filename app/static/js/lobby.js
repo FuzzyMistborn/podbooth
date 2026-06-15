@@ -11,6 +11,11 @@ async function checkAdmission() {
       return;
     }
 
+    if (data.denied) {
+      window.location.href = '/join-denied';
+      return;
+    }
+
     if (data.admitted && !wasAdmitted) {
       wasAdmitted = true;
       document.getElementById('lobby-status').textContent = 'Joining session…';
