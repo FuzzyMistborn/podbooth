@@ -107,6 +107,13 @@ const recIndicator = document.getElementById('rec-indicator');
 const recTime      = document.getElementById('rec-time');
 const btnEnd       = document.getElementById('btn-end');
 const btnLeave     = document.getElementById('btn-leave');
+const btnAlert     = document.getElementById('btn-alert');
+const alertPanel   = document.getElementById('alert-panel');
+const alertCustom  = document.getElementById('alert-custom-input');
+const btnAlertSend = document.getElementById('btn-alert-send');
+const alertBanner  = document.getElementById('alert-banner');
+const alertBannerText = document.getElementById('alert-banner-text');
+const btnAlertDismiss = document.getElementById('btn-alert-dismiss');
 const btnShowShare = document.getElementById('btn-show-share');
 const shareWrap    = document.getElementById('share-wrap');
 const shareLink    = document.getElementById('share-link');
@@ -416,6 +423,9 @@ function attachRoomEvents() {
     if (msg.type === 'force_unmute' && msg.identity === identity) {
       await room.localParticipant.setMicrophoneEnabled(true);
       // TrackUnmuted event will sync btnMic and micMuted
+    }
+    if (msg.type === 'alert') {
+      showAlertBanner(msg.text);
     }
     if (msg.type === 'hand_cleared') {
       removeFromQueue(msg.identity);
@@ -926,8 +936,26 @@ function setupControls() {
   });
 
   btnLeave?.addEventListener('click', leaveSession);
+  btnAlertDismiss?.addEventListener('click', () => alertBanner?.classList.add('hidden'));
 
   if (IS_HOST) {
+    btnAlert?.addEventListener('click', e => {
+      e.stopPropagation();
+      const open = alertPanel?.style.display !== 'none';
+      if (alertPanel) alertPanel.style.display = open ? 'none' : 'flex';
+      btnAlert?.classList.toggle('active', !open);
+    });
+    btnAlertSend?.addEventListener('click', () => {
+      const text = alertCustom?.value.trim();
+      if (text) { sendAlert(text); alertCustom.value = ''; }
+    });
+    alertCustom?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const text = alertCustom.value.trim();
+        if (text) { sendAlert(text); alertCustom.value = ''; }
+      }
+    });
+
     btnRecord?.addEventListener('click', toggleRecording);
     btnEnd?.addEventListener('click', endSession);
     btnShowShare?.addEventListener('click', () => {
@@ -1638,6 +1666,23 @@ function finalizeTrack(trackType, meta) {
 }
 
 // ── Session end ──────────────────────────────────────────────────────────────
+
+async function sendAlert(text) {
+  if (!text) return;
+  await broadcastData({ type: 'alert', text });
+  showAlertBanner(text);
+  if (alertPanel) alertPanel.style.display = 'none';
+  btnAlert?.classList.remove('active');
+}
+
+let alertBannerTimer = null;
+function showAlertBanner(text) {
+  if (!alertBanner || !alertBannerText) return;
+  alertBannerText.textContent = text;
+  alertBanner.classList.remove('hidden');
+  clearTimeout(alertBannerTimer);
+  alertBannerTimer = setTimeout(() => alertBanner?.classList.add('hidden'), 8000);
+}
 
 async function leaveSession() {
   if (!confirm('Leave this session?')) return;

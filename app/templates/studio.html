@@ -101,6 +101,20 @@
     <ol class="hand-queue-list" id="hand-queue-list"></ol>
   </div>
 
+  <!-- Alert panel (host only) -->
+  {% if is_host %}
+  <div class="alert-panel" id="alert-panel" style="display:none">
+    <div class="alert-panel-header">Send Alert</div>
+    <div class="alert-presets">
+      <button class="alert-preset-btn" onclick="sendAlert('Let\'s wrap this up')">Let's wrap this up</button>
+    </div>
+    <div class="alert-custom-row">
+      <input type="text" id="alert-custom-input" placeholder="Custom message…" maxlength="100" />
+      <button id="btn-alert-send">Send</button>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Controls bar -->
   <div class="controls-bar">
     <div class="controls-left">
@@ -147,6 +161,12 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="10"/>
           <polyline points="12 6 12 12 16 14"/>
+        </svg>
+      </button>
+      <button class="ctrl-btn" id="btn-alert" title="Send alert to all participants">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
         </svg>
       </button>
       {% endif %}
@@ -198,6 +218,12 @@
 </div>
 
 <div class="upload-banner hidden" id="upload-banner"></div>
+
+<div class="alert-banner hidden" id="alert-banner">
+  <svg class="alert-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+  <span class="alert-banner-text" id="alert-banner-text"></span>
+  <button class="alert-banner-close" id="btn-alert-dismiss">✕</button>
+</div>
 
 <div class="toast" id="toast"></div>
 
