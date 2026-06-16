@@ -1283,7 +1283,6 @@ async function waitForUploads() {
   showUploadBanner('uploading');
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
-  await new Promise(r => setTimeout(r, 100)); // let onstop handlers fire
   try {
     await Promise.all(Object.values(uploadQueues));
     sessionStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
@@ -1697,11 +1696,42 @@ async function resumeLocalRecording() {
 
 async function stopLocalRecording() {
   micMuted = false;
+
+  // For each MediaRecorder, wrap its onstop so we get an explicit signal that
+  // the final ondataavailable (and thus the finalize enqueue) has completed.
+  // Without this we're racing against the 100ms delay in waitForUploads, which
+  // is fragile when the browser is under load (e.g. two browsers on one machine).
+  function stoppedPromise(rec) {
+    return new Promise(resolve => {
+      const prev = rec.onstop;
+      rec.onstop = e => { prev?.call(rec, e); resolve(); };
+    });
+  }
+
+  const stopPromises = [];
+
   // Video
   if (videoRecorder && videoRecorder.state !== 'inactive') {
-    videoRecorder.stop(); // fires final ondataavailable, then onstop → finalize
+    stopPromises.push(stoppedPromise(videoRecorder));
+    videoRecorder.stop();
   }
   videoRecorder = null;
+
+  // Screen share
+  if (screenRecorder && screenRecorder.state !== 'inactive') {
+    stopPromises.push(stoppedPromise(screenRecorder));
+    screenRecorder.stop();
+  }
+  screenRecorder = null;
+
+  // Opus fallback
+  if (audioRecorder && audioRecorder.state !== 'inactive') {
+    stopPromises.push(stoppedPromise(audioRecorder));
+    audioRecorder.stop();
+  }
+  audioRecorder = null;
+  opusCtx?.close();
+  opusCtx = null;
 
   // PCM audio — stop the source so no new audio enters the worklet, then
   // synchronize with it via a drain handshake before flushing. The worklet
@@ -1727,19 +1757,14 @@ async function stopLocalRecording() {
     pcmCtx = pcmNode = pcmSource = pcmStream = null;
   }
 
-  // Opus fallback
-  if (audioRecorder && audioRecorder.state !== 'inactive') {
-    audioRecorder.stop();
-  }
-  audioRecorder = null;
-  opusCtx?.close();
-  opusCtx = null;
-
-  // Screen share
-  if (screenRecorder && screenRecorder.state !== 'inactive') {
-    screenRecorder.stop(); // fires final ondataavailable, then onstop → finalize
-  }
-  screenRecorder = null;
+  // Wait for all MediaRecorder onstop events. By the time each onstop fires,
+  // the final ondataavailable chunk is already in the upload queue and
+  // finalizeTrack has been called, so the queue is fully populated before
+  // waitForUploads sees it.
+  await Promise.race([
+    Promise.all(stopPromises),
+    new Promise(r => setTimeout(r, 5000)),
+  ]);
 }
 
 // ── Upload pipeline ──────────────────────────────────────────────────────────
