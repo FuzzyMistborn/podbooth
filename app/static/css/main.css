@@ -1040,6 +1040,7 @@ input::placeholder { color: var(--text-3); }
 .file-type.audio  { background: rgba(34,197,94,0.1);  color: var(--green); }
 .file-type.video  { background: rgba(232,93,0,0.1);   color: var(--accent); }
 .file-type.screen { background: rgba(99,102,241,0.1); color: #818cf8; }
+.file-take { color: var(--text-3); font-size: 11px; background: rgba(255,255,255,0.06); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .file-size { color: var(--text-3); font-size: 12px; min-width: 60px; text-align: right; }
 .no-files { color: var(--text-3); font-size: 13px; font-style: italic; padding: 4px 0; }
 .session-card-actions {

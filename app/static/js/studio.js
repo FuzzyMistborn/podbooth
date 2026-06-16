@@ -219,6 +219,13 @@ async function init() {
   pollPendingGuests();
   window.addEventListener('beforeunload', onBeforeUnload);
 
+  // Pre-warm the PCM worklet module so it's in the browser cache before
+  // recording starts. audioWorklet.addModule() fetches the script; a cold
+  // fetch blocks the first PCM capture startup.
+  if ('AudioWorklet' in window) {
+    fetch(`/static/js/pcm-worklet.js?v=${ASSET_V}`).catch(() => {});
+  }
+
   attachRoomEvents();
 
   setupDeviceButtons(micDeviceId, camDeviceId);
@@ -880,7 +887,6 @@ async function restartPcmCapture() {
   try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
   if (pcmFrames > 0) flushPcm(false); // upload buffered audio without finalizing
   pcmCtx?.close();
-  pcmStream?.getTracks().forEach(t => t.stop());
   pcmCtx = pcmNode = pcmSource = pcmStream = null;
   try {
     await startPcmCapture();
@@ -1564,27 +1570,10 @@ async function startPcmCapture() {
   const micTrack = getLocalTrack('audio');
   if (!micTrack) throw new Error('No local microphone track');
 
-  // Open a dedicated UNPROCESSED stream from the same device for recording.
-  // The call keeps echo cancellation / noise suppression; the recording
-  // captures the clean source (this is what Riverside-style tools do).
-  const deviceId = micTrack.mediaStreamTrack.getSettings().deviceId;
-  // Race against a timeout: a second getUserMedia on a device already in use
-  // can hang in some browsers, which would otherwise stall the whole start.
-  pcmStream = await Promise.race([
-    navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 1,
-        sampleRate: { ideal: 48000 },
-      },
-    }),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('PCM getUserMedia timed out')), 6000)
-    ),
-  ]);
+  // Re-use LiveKit's existing track instead of opening a second getUserMedia.
+  // A second getUserMedia on an already-in-use device can hang for 2+ seconds,
+  // causing the PCM capture to start late and the WAV to be shorter than the video.
+  pcmStream = new MediaStream([micTrack.mediaStreamTrack]);
 
   pcmCtx = new AudioContext({ sampleRate: 48000 });
   await pcmCtx.audioWorklet.addModule(`/static/js/pcm-worklet.js?v=${ASSET_V}`);
@@ -1720,7 +1709,6 @@ function stopLocalRecording() {
     try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
     flushPcm(true);
     pcmCtx?.close();
-    pcmStream?.getTracks().forEach(t => t.stop());
     pcmCtx = pcmNode = pcmSource = pcmStream = null;
   }
 

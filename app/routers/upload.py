@@ -38,6 +38,12 @@ _tasks: set[asyncio.Task] = set()
 # Per-directory+epoch locks so the merge step runs at most once per epoch.
 _merge_locks: dict[str, asyncio.Lock] = {}
 
+# Take-number assignment: maps (dir, epoch) → (slug, take) so all tracks for
+# the same recording run share a consistent take number.
+_epoch_take_map: dict[tuple[str, str], tuple[str, int]] = {}
+_dir_take_counter: dict[tuple[str, str], int] = {}  # (dir, slug) → last assigned take
+_take_lock = asyncio.Lock()
+
 # Epoch is client-supplied and ends up in filenames and glob patterns, so it
 # must never contain path separators or glob metacharacters.
 _EPOCH_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
@@ -66,16 +72,57 @@ def _oname(base: str, epoch: str, ext: str, mid: str = "") -> str:
     return f"{base}{mid}.{ext}"
 
 
+def _display_slug(name: str) -> str:
+    """Sanitize a display name for use in filenames (e.g. 'Alice Smith' → 'Alice_Smith')."""
+    slug = re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_')
+    return slug[:40] or 'participant'
+
+
+async def _assign_take(directory: Path, epoch: str, participant: str) -> tuple[str, int] | None:
+    """Return (slug, take_number) for this (directory, epoch), or None if no participant.
+
+    All tracks in the same recording run share an epoch, so they always get the
+    same take number.  The counter is seeded from the filesystem on first use so
+    a server restart doesn't re-use take numbers.
+    """
+    if not participant:
+        return None
+    async with _take_lock:
+        key = (str(directory), epoch)
+        if key in _epoch_take_map:
+            return _epoch_take_map[key]
+
+        slug = _display_slug(participant)
+        dir_slug = (str(directory), slug)
+
+        if dir_slug not in _dir_take_counter:
+            # Seed from disk: count completed output files for any track type.
+            existing = max(
+                len(list(directory.glob(f"{slug}_*.wav"))),
+                len(list(directory.glob(f"{slug}_*_video.mp4"))),
+                len(list(directory.glob(f"{slug}_*_screen.mp4"))),
+            )
+            _dir_take_counter[dir_slug] = existing
+
+        take = _dir_take_counter[dir_slug] + 1
+        _dir_take_counter[dir_slug] = take
+        _epoch_take_map[key] = (slug, take)
+        return slug, take
+
+
+def _final_name(track_type: str, slug: str, take: int, ext: str) -> str:
+    """Build the final output filename: '{slug}_{take}.ext' for audio, '{slug}_{take}_{type}.ext' for video/screen."""
+    if track_type == "audio":
+        return f"{slug}_{take}.{ext}"
+    return f"{slug}_{take}_{track_type}.{ext}"
+
+
 def _safe_name(value: str) -> str:
     return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
 
 
 def participant_dir(session, participant: str, identity: str = "") -> Path:
-    # Prefer identity (unique per LiveKit connection) to avoid directory collisions
-    # when two display names sanitize to the same string (e.g. "John?" and "John*"
-    # both become "John_"). Identity already embeds the display name as a prefix.
-    raw = identity if identity else participant
-    name = _safe_name(raw)
+    name = _display_slug(participant) if participant else _safe_name(identity or "")
     if not name:
         raise HTTPException(status_code=400, detail="Invalid participant name")
     path = Path(settings.recordings_dir) / session.dir_name / name
@@ -209,6 +256,8 @@ async def assemble_track(
     session_id: str = "",
     participant: str = "",
 ):
+    nametake = await _assign_take(directory, epoch, participant)
+
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
     chunks = sorted(directory.glob(f"{prefix}chunk_*"))
     if not chunks:
@@ -225,7 +274,10 @@ async def assemble_track(
                 await out.write(await f.read())
 
     if track_type == "audio":
-        output = directory / _oname("audio", epoch, "wav")
+        if nametake:
+            output = directory / _final_name("audio", *nametake, "wav")
+        else:
+            output = directory / _oname("audio", epoch, "wav")
         if fmt == "pcm":
             cmd = [
                 "ffmpeg", "-y",
@@ -251,9 +303,10 @@ async def assemble_track(
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
-            await _try_merge_av(directory, epoch)
+            await _try_merge_av(directory, epoch, nametake)
 
     elif track_type == "video":
+        # Keep epoch-based name for the intermediate (no-audio) file.
         noaudio = directory / _oname("video", epoch, "mp4", "_noaudio")
         codec = await _probe_video_codec(source)
         if codec == "h264":
@@ -281,10 +334,13 @@ async def assemble_track(
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
-            await _try_merge_av(directory, epoch)
+            await _try_merge_av(directory, epoch, nametake)
 
     else:  # screen
-        output = directory / _oname("screen", epoch, "mp4")
+        if nametake:
+            output = directory / _final_name("screen", *nametake, "mp4")
+        else:
+            output = directory / _oname("screen", epoch, "mp4")
         codec = await _probe_video_codec(source)
         if codec == "h264":
             cmd = [
@@ -313,16 +369,20 @@ async def assemble_track(
             source.unlink(missing_ok=True)
 
 
-async def _try_merge_av(directory: Path, epoch: str = ""):
+async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
     """Merge epoch-matched video_noaudio + audio → video once both are ready."""
     key = f"{directory}|{epoch}"
     if key not in _merge_locks:
         _merge_locks[key] = asyncio.Lock()
 
     async with _merge_locks[key]:
-        audio = directory / _oname("audio", epoch, "wav")
+        if nametake:
+            audio = directory / _final_name("audio", *nametake, "wav")
+            video_out = directory / _final_name("video", *nametake, "mp4")
+        else:
+            audio = directory / _oname("audio", epoch, "wav")
+            video_out = directory / _oname("video", epoch, "mp4")
         video_noaudio = directory / _oname("video", epoch, "mp4", "_noaudio")
-        video_out = directory / _oname("video", epoch, "mp4")
 
         if not audio.exists() or not video_noaudio.exists():
             return
@@ -335,7 +395,6 @@ async def _try_merge_av(directory: Path, epoch: str = ""):
             "-i", str(audio),
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "320k",
-            "-shortest",
             "-movflags", "+faststart",
             str(video_out),
         ]

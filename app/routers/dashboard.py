@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION
 from app.auth import require_host
 
-_VALID_MEDIA_RE = re.compile(r"^(audio|video|screen)[_a-z0-9]*\.(wav|mp4)$")
+_VALID_MEDIA_RE = re.compile(r"^[A-Za-z0-9_]+\.(wav|mp4)$")
 
 _export_tasks: set[str] = set()          # session IDs currently exporting
 _export_task_refs: set[asyncio.Task] = set()  # keep tasks alive
@@ -53,7 +53,7 @@ def _collect_video_groups(session) -> list[list[Path]]:
             f for f in pdir.iterdir()
             if f.is_file()
             and f.suffix == ".mp4"
-            and (f.stem == "video" or f.stem.startswith("video_"))
+            and (f.stem == "video" or f.stem.startswith("video_") or f.stem.endswith("_video"))
             and "_noaudio" not in f.stem
             and "_source" not in f.stem
         ])
@@ -343,6 +343,24 @@ async def grid_export_status(session_id: str, _: None = Depends(require_host)):
     return JSONResponse({"status": "idle"})
 
 
+def _parse_take(stem: str, ftype: str) -> int | None:
+    """Extract take number from a slug-based filename stem, e.g. Alice_1 → 1, Alice_1_video → 1."""
+    try:
+        base = stem
+        if ftype in ("video", "screen"):
+            suffix = f"_{ftype}"
+            if stem.endswith(suffix):
+                base = stem[: -len(suffix)]
+            else:
+                return None
+        parts = base.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
 def _get_session_files(session) -> list[dict]:
     """Find assembled files for a session — includes epoch-named files from reconnection runs."""
     recordings_path = Path(settings.recordings_dir)
@@ -362,11 +380,13 @@ def _get_session_files(session) -> list[dict]:
             # Skip intermediate and raw files
             if "_noaudio" in stem or "_source" in stem or "_chunk_" in fpath.name:
                 continue
-            if stem == "audio" or stem.startswith("audio_"):
+            # Old epoch names: audio_<epoch>.wav, video_<epoch>.mp4, screen_<epoch>.mp4
+            # New slug names:  <Slug>_<take>.wav, <Slug>_<take>_video.mp4, <Slug>_<take>_screen.mp4
+            if fpath.suffix == ".wav":
                 ftype = "audio"
-            elif stem == "video" or stem.startswith("video_"):
+            elif stem == "video" or stem.startswith("video_") or stem.endswith("_video"):
                 ftype = "video"
-            elif stem == "screen" or stem.startswith("screen_"):
+            elif stem == "screen" or stem.startswith("screen_") or stem.endswith("_screen"):
                 ftype = "screen"
             else:
                 continue
@@ -374,6 +394,7 @@ def _get_session_files(session) -> list[dict]:
             files.append({
                 "participant": participant_dir.name,
                 "type": ftype,
+                "take": _parse_take(stem, ftype),
                 "filename": fpath.name,
                 "path": str(fpath.relative_to(recordings_path)),
                 "size_mb": round(size_mb, 1),

@@ -113,6 +113,7 @@
         {% for f in files %}
         <div class="file-row">
           <span class="file-participant">{{ f.participant }}</span>
+          {% if f.take %}<span class="file-take">Take {{ f.take }}</span>{% endif %}
           <span class="file-type {{ f.type }}">{{ f.type }}</span>
           <span class="file-size">{{ f.size_mb }} MB</span>
           <button class="btn-play" onclick="openPreview('/download/{{ f.path }}', '{{ f.type }}', '{{ f.participant }}', '{{ f.filename }}')">▶ Play</button>
