@@ -38,6 +38,10 @@ _tasks: set[asyncio.Task] = set()
 # Per-directory+epoch locks so the merge step runs at most once per epoch.
 _merge_locks: dict[str, asyncio.Lock] = {}
 
+# Tracks (str(directory), track_type, epoch) tuples currently being assembled.
+# Prevents recover_orphaned_chunks from queuing duplicate tasks while ffmpeg runs.
+_assembly_in_progress: set[tuple[str, str, str]] = set()
+
 # Take-number assignment: maps (dir, epoch) → (slug, take) so all tracks for
 # the same recording run share a consistent take number.
 _epoch_take_map: dict[tuple[str, str], tuple[str, int]] = {}
@@ -198,6 +202,7 @@ async def upload_chunk(
 
     content = await file.read()
     if len(content) == 0:
+        logger.info("chunk skip empty: %s/%s #%d", track_type, participant, chunk_index)
         return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
 
     directory = participant_dir(session, participant, identity)
@@ -207,6 +212,7 @@ async def upload_chunk(
     async with aiofiles.open(chunk_path, "wb") as f:
         await f.write(content)
 
+    logger.info("chunk saved: %s/%s #%d size=%d epoch=%r", track_type, participant, chunk_index, len(content), epoch)
     return JSONResponse({"ok": True, "chunk": chunk_index})
 
 
@@ -237,11 +243,16 @@ async def finalize_track(request: Request):
 
     directory = participant_dir(session, participant, identity)
 
-    task = asyncio.create_task(
-        assemble_track(directory, track_type, fmt, sample_rate, channels, epoch, session_id, participant)
-    )
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+    logger.info("finalize: %s/%s epoch=%r fmt=%s", track_type, participant, epoch, fmt)
+    in_progress_key = (str(directory), track_type, epoch)
+    if in_progress_key not in _assembly_in_progress:
+        _assembly_in_progress.add(in_progress_key)
+        task = asyncio.create_task(
+            assemble_track(directory, track_type, fmt, sample_rate, channels, epoch, session_id, participant)
+        )
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
 
     return JSONResponse({"ok": True, "assembling": True})
 
@@ -261,8 +272,13 @@ async def assemble_track(
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
     chunks = sorted(directory.glob(f"{prefix}chunk_*"))
     if not chunks:
-        logger.warning("No chunks to assemble in %s for %s", directory, track_type)
+        logger.warning("assemble: no chunks found in %s for %s epoch=%r", directory, track_type, epoch)
         return
+
+    total_bytes = sum(c.stat().st_size for c in chunks)
+    logger.info("assemble: %s/%s epoch=%r chunks=%d total_bytes=%d files=%s",
+                track_type, directory.name, epoch, len(chunks), total_bytes,
+                [c.name for c in chunks])
 
     # Byte-concatenate chunks in index order into one source file.
     source_ext = chunks[0].suffix  # .raw / .webm / .mp4
@@ -300,10 +316,13 @@ async def assemble_track(
             ]
         ok = await _run_ffmpeg(cmd, directory, track_type)
         if ok:
+            logger.info("assemble: audio output %s size=%d", output.name, output.stat().st_size)
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
             await _try_merge_av(directory, epoch, nametake)
+        else:
+            logger.error("assemble: audio ffmpeg failed for %s/%s", directory.name, epoch)
 
     elif track_type == "video":
         # Keep epoch-based name for the intermediate (no-audio) file.
@@ -331,10 +350,13 @@ async def assemble_track(
             ]
         ok = await _run_ffmpeg(cmd, directory, track_type)
         if ok:
+            logger.info("assemble: video noaudio %s size=%d", noaudio.name, noaudio.stat().st_size)
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
             await _try_merge_av(directory, epoch, nametake)
+        else:
+            logger.error("assemble: video ffmpeg failed for %s/%s", directory.name, epoch)
 
     else:  # screen
         if nametake:
@@ -364,6 +386,7 @@ async def assemble_track(
             ]
         ok = await _run_ffmpeg(cmd, directory, track_type)
         if ok:
+            logger.info("assemble: screen output %s size=%d", output.name, output.stat().st_size)
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
@@ -385,9 +408,12 @@ async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
         video_noaudio = directory / _oname("video", epoch, "mp4", "_noaudio")
 
         if not audio.exists() or not video_noaudio.exists():
+            logger.info("merge_av: skipping — audio=%s video_noaudio=%s",
+                        audio.exists(), video_noaudio.exists())
             return
         if video_out.exists():
             return
+        logger.info("merge_av: merging %s + %s → %s", audio.name, video_noaudio.name, video_out.name)
 
         cmd = [
             "ffmpeg", "-y",
@@ -400,8 +426,11 @@ async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
         ]
         ok = await _run_ffmpeg(cmd, directory, "merge")
         if ok:
+            logger.info("merge_av: done %s size=%d", video_out.name, video_out.stat().st_size)
             video_noaudio.unlink(missing_ok=True)
             _merge_locks.pop(key, None)
+        else:
+            logger.error("merge_av: ffmpeg failed for %s", video_out.name)
 
 
 async def recover_orphaned_chunks(session) -> int:
@@ -434,16 +463,21 @@ async def recover_orphaned_chunks(session) -> int:
             pending.setdefault((track_type, epoch), ext)
 
         for (track_type, epoch), ext in pending.items():
+            in_progress_key = (str(pdir), track_type, epoch)
+            if in_progress_key in _assembly_in_progress:
+                continue
             fmt = "pcm" if ext == "raw" else "container"
             logger.info(
                 "Recovering orphaned %s chunks in %s/%s (epoch=%r)",
                 track_type, session.dir_name, pdir.name, epoch,
             )
+            _assembly_in_progress.add(in_progress_key)
             task = asyncio.create_task(
                 assemble_track(pdir, track_type, fmt, 48000, 2, epoch, session.id, "")
             )
             _tasks.add(task)
             task.add_done_callback(_tasks.discard)
+            task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
             queued += 1
 
     return queued

@@ -37,14 +37,39 @@ let pcmCtx = null;
 let pcmNode = null;
 let pcmSource = null;
 let pcmStream = null;
+let pcmCloneTrack = null; // independent clone() of the mic track; see _clonePcmInputStream
 let pcmBuffers = [];
 let pcmFrames = 0;
 let pcmFramesWritten = 0;  // cumulative frames across all flushed chunks
 let pcmChannels = 2;
+let pcmCapturing = false;  // true once recording has actually started on the (possibly pre-built) graph
 let opusCtx = null;
 let audioFormat = 'pcm';   // 'pcm' or 'container' (Opus fallback)
 let audioRecorder = null;  // fallback only
 let micMuted = false;      // true while local mic is muted; gates PCM/Opus capture
+
+// Pre-warmed AudioContext + addModule promise. Created at init() time so that
+// the worklet module is compiled before recording starts — addModule can take
+// 10+ seconds on Firefox under load, causing truncated audio if called lazily.
+let _warmCtx = null;
+let _warmModuleReady = null;
+
+// Firefox creates AudioContexts in a 'suspended' state when there is no
+// preceding user-activation on the page (the "Join Session" click happened on
+// the prejoin page, a separate navigation, so it doesn't carry over here).
+// resume() calls made outside of a real gesture (e.g. from the status poll)
+// silently no-op on Firefox, which is why pre-warming alone didn't fix
+// truncated audio. Resuming synchronously from inside a real gesture handler
+// is the only thing Firefox honors, so listen for the first interaction
+// anywhere on the page and resume whichever audio contexts exist at that time.
+function _resumeAudioContextsOnGesture() {
+  for (const ctx of [_warmCtx, pcmCtx, opusCtx]) {
+    if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
+  }
+}
+['pointerdown', 'keydown', 'touchstart'].forEach((evt) => {
+  document.addEventListener(evt, _resumeAudioContextsOnGesture, { capture: true, passive: true });
+});
 
 // Per-track wall-clock start times (performance.now()) sent in finalize so
 // post-processing can align tracks that started at slightly different times.
@@ -167,6 +192,16 @@ const btnTimerStop  = document.getElementById('btn-timer-stop');
 const timerYellowIn = document.getElementById('timer-yellow');
 const timerRedIn    = document.getElementById('timer-red');
 
+// ── Debug logging ─────────────────────────────────────────────────────────────
+// Prefixes every log line with the participant identity and a ms-precision
+// timestamp so logs from two browser tabs on the same machine are easy to
+// distinguish and correlate. Filter in DevTools with "[rec".
+
+function recLog(fmt, ...args) {
+  const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+  console.log(`[rec ${identity || '?'}] ${ts} ${fmt}`, ...args);
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -202,7 +237,7 @@ async function init() {
   const { token } = await resp.json();
 
   room = new Room({
-    adaptiveStream: true,
+    adaptiveStream: false,
     dynacast: true,
     videoCaptureDefaults: {
       deviceId: camDeviceId || undefined,
@@ -226,11 +261,19 @@ async function init() {
   pollPendingGuests();
   window.addEventListener('beforeunload', onBeforeUnload);
 
-  // Pre-warm the PCM worklet module so it's in the browser cache before
-  // recording starts. audioWorklet.addModule() fetches the script; a cold
-  // fetch blocks the first PCM capture startup.
+  // Pre-warm the PCM worklet module so addModule() is already complete before
+  // recording starts. On Firefox, addModule() can take 10+ seconds to compile
+  // the worklet, causing only ~2s of audio to be captured when recording is
+  // triggered by the status poll. We start the compile here, at init time, and
+  // reuse the same context+module in startPcmCapture().
   if ('AudioWorklet' in window) {
-    fetch(`/static/js/pcm-worklet.js?v=${ASSET_V}`).catch(() => {});
+    try {
+      _warmCtx = new AudioContext({ sampleRate: 48000 });
+      _warmModuleReady = _warmCtx.audioWorklet.addModule(`/static/js/pcm-worklet.js?v=${ASSET_V}`);
+      _warmModuleReady.catch(() => { _warmCtx = null; _warmModuleReady = null; });
+    } catch (e) {
+      _warmCtx = null; _warmModuleReady = null;
+    }
   }
 
   attachRoomEvents();
@@ -240,6 +283,17 @@ async function init() {
   try {
     await room.connect(LIVEKIT_URL, token);
     await room.localParticipant.enableCameraAndMicrophone();
+
+    // Build the PCM source→worklet graph now, as soon as the mic track
+    // exists, instead of waiting until recording actually starts. On
+    // Firefox, MediaStreamAudioSourceNode can take 10+ seconds after
+    // creation before it starts delivering real (non-empty) audio frames —
+    // independent of the AudioContext's own state — which is what was
+    // truncating recordings to just their last few seconds. Building the
+    // graph here lets that warm-up happen during idle time so it's already
+    // flowing by the time startPcmCapture() wants frames. Fire-and-forget:
+    // if it's not ready yet, startPcmCapture() falls back to building fresh.
+    prewarmPcmGraph();
 
     renderLocalParticipant();
     for (const p of room.remoteParticipants.values()) {
@@ -894,7 +948,9 @@ async function restartPcmCapture() {
   try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
   if (pcmFrames > 0) flushPcm(false); // upload buffered audio without finalizing
   pcmCtx?.close();
-  pcmCtx = pcmNode = pcmSource = pcmStream = null;
+  pcmCloneTrack?.stop();
+  pcmCtx = pcmNode = pcmSource = pcmStream = pcmCloneTrack = null;
+  pcmCapturing = false;
   try {
     await startPcmCapture();
   } catch (e) {
@@ -1409,7 +1465,7 @@ async function waitForLocalTracks(timeoutMs = 15000) {
 // capturing (a previous start attempt failed), it retries startLocalRecording.
 function hasActiveRecorders() {
   return !!(
-    pcmNode ||
+    pcmCapturing || // pcmNode can exist pre-warmed-but-idle; pcmCapturing is the real "recording" signal
     (audioRecorder && audioRecorder.state !== 'inactive') ||
     (videoRecorder && videoRecorder.state !== 'inactive') ||
     (screenRecorder && screenRecorder.state !== 'inactive')
@@ -1421,15 +1477,17 @@ async function startLocalRecording() {
   // and don't restart if we're already capturing.
   if (recordingStarting || hasActiveRecorders()) return;
   recordingStarting = true;
+  recLog('startLocalRecording: begin');
   try {
     // Don't start capturing until the local tracks exist, or we'd record
     // nothing. The status poll can fire before LiveKit finishes connecting.
     if (!(await waitForLocalTracks())) {
+      recLog('startLocalRecording: no tracks found after timeout');
       showToast('Could not start recording — no microphone or camera');
       return;
     }
     // Recording may have been stopped while we were waiting for tracks.
-    if (!isRecording) return;
+    if (!isRecording) { recLog('startLocalRecording: aborted — recording stopped while waiting for tracks'); return; }
 
     // ── Resume interrupted upload (Feature 4) ──────────────────────────────
     const epochKey = `podbooth:epoch:${SESSION_ID}:${identity}`;
@@ -1474,6 +1532,8 @@ async function startLocalRecording() {
     // Save epoch to sessionStorage so a page reload can resume
     sessionStorage.setItem(epochKey, recordingEpoch);
 
+    recLog('startLocalRecording: epoch=%s resumedEpoch=%s chunkIndex=%o', recordingEpoch, resumedEpoch, chunkIndex);
+
     // ── VIDEO first ── start it before audio so a slow/failed microphone
     // capture can never block video from recording.
     startVideoRecording();
@@ -1482,16 +1542,19 @@ async function startLocalRecording() {
     try {
       await startPcmCapture();
       audioFormat = 'pcm';
+      recLog('startLocalRecording: audio=pcm');
     } catch (e) {
       console.warn('PCM capture unavailable, falling back to Opus:', e);
       audioFormat = 'container';
       startOpusFallback();
+      recLog('startLocalRecording: audio=opus-fallback');
     }
 
     // ── SCREEN: record screen share if it's already active ──
     if (getScreenTrack()) {
       startScreenRecording();
     }
+    recLog('startLocalRecording: all recorders started');
   } finally {
     recordingStarting = false;
   }
@@ -1534,16 +1597,22 @@ function startVideoRecording() {
   videoRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
       if (videoStartTime === null) videoStartTime = performance.now();
+      const idx = chunkIndex.video;
+      recLog('video ondataavailable: chunk=%d size=%d bytes', idx, e.data.size);
       enqueueChunk(e.data, 'video', videoExt);
+    } else {
+      recLog('video ondataavailable: empty chunk (skipped)');
     }
   };
   videoRecorder.onstop = () => {
+    recLog('video onstop: finalizing, startTime=%s hasAudioSync=%s', videoStartTime, hasAudioSync);
     finalizeTrack('video', {
       format: 'container',
       start_time_ms: videoStartTime,
       has_audio_sync: hasAudioSync,
     });
   };
+  recLog('video recorder started: mime=%s', mime);
   videoRecorder.start(5000);
 }
 
@@ -1594,19 +1663,148 @@ function startScreenRecording() {
   screenRecorder.start(5000);
 }
 
+// Route the worklet's (silent) output through an explicit zero-gain node
+// rather than straight to destination. The worklet never writes to its
+// output buffer so this is silence either way, but Firefox has reportedly
+// been more reliable about continuing to schedule a worklet when its output
+// actually reaches a rendering destination through a "real" node, vs. a
+// node that processes audio but never produces non-zero samples.
+function _connectPcmKeepAlive(node, ctx) {
+  const gain = ctx.createGain();
+  gain.gain.value = 0;
+  node.connect(gain);
+  gain.connect(ctx.destination);
+}
+
+// Shared message handler for the PCM worklet port — used by both the
+// pre-built graph (prewarmPcmGraph) and the fallback build-fresh path in
+// startPcmCapture. Buffering is gated on pcmCapturing so the pre-built graph
+// can sit connected and "warming up" on Firefox without accumulating audio
+// before a recording has actually been requested.
+function _onPcmMessage(e) {
+  const channels = e.data;
+  if (e.data?.type === 'drained') return; // handled by drain handshake
+  if (!pcmCapturing) return;
+  if (!channels || !channels.length) return;
+  if (audioStartTime === null) audioStartTime = performance.now();
+  pcmChannels = 2; // always stereo; interleave duplicates mono source if needed
+  // Found it: muting goes through room.localParticipant.setMicrophoneEnabled(),
+  // which disables the underlying MediaStreamTrack. Chrome keeps delivering
+  // silent (zeroed) frames from a disabled track, so the timeline stays
+  // correct; Firefox stops delivering ANY frames at all, so every muted
+  // second was silently missing from the recording — that's the actual
+  // truncation bug, not a worklet-scheduling or warm-up issue. Our PCM tap
+  // now runs off an independent clone() that's never disabled (see
+  // _clonePcmInputStream), so frames keep arriving in every browser
+  // regardless of mute state; we silence them ourselves here so muted
+  // periods are real silence (not real audio, not a gap) consistently
+  // across browsers instead of depending on browser-specific behavior.
+  pcmBuffers.push(micMuted ? channels.map(ch => new Float32Array(ch.length)) : channels);
+  pcmFrames += channels[0].length;
+  if (pcmFrames >= pcmCtx.sampleRate * 5) {
+    flushPcm(false);
+  }
+}
+
+// Clone the mic track for our own PCM tap instead of sharing LiveKit's
+// published track directly. clone() reuses the same underlying capture
+// session (no second device open, so no echo-cancellation contention like
+// the independent-getUserMedia attempt had) but gives us a track with its
+// own independent `enabled` flag — muting the original (via
+// setMicrophoneEnabled) leaves our clone untouched, so it keeps delivering
+// real frames continuously. We silence them ourselves in _onPcmMessage
+// while micMuted is true.
+function _clonePcmInputStream(micTrack) {
+  pcmCloneTrack = micTrack.mediaStreamTrack.clone();
+  return new MediaStream([pcmCloneTrack]);
+}
+
+// Build the PCM source→worklet graph ahead of time (called from init() once
+// the local mic track exists) so it's already flowing real audio by the time
+// a recording starts.
+async function prewarmPcmGraph() {
+  if (!('AudioWorkletNode' in window)) return;
+  if (!_warmCtx || !_warmModuleReady) return;
+  const micTrack = getLocalTrack('audio');
+  if (!micTrack) return;
+
+  try {
+    const ctx = _warmCtx;
+    await _warmModuleReady;
+    _warmCtx = null;
+    _warmModuleReady = null;
+
+    pcmCtx = ctx;
+    pcmStream = _clonePcmInputStream(micTrack);
+    pcmSource = pcmCtx.createMediaStreamSource(pcmStream);
+    pcmNode = new AudioWorkletNode(pcmCtx, 'pcm-capture', {
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+    });
+    pcmNode.port.onmessage = _onPcmMessage;
+    pcmSource.connect(pcmNode);
+    _connectPcmKeepAlive(pcmNode, pcmCtx);
+    recLog('prewarmPcmGraph: PCM graph pre-built, ctx.state=%s', pcmCtx.state);
+  } catch (e) {
+    recLog('prewarmPcmGraph: failed: %s', e);
+    try { pcmCtx?.close(); } catch (_e) {}
+    pcmCloneTrack?.stop();
+    pcmCtx = pcmNode = pcmSource = pcmStream = pcmCloneTrack = null;
+  }
+}
+
 async function startPcmCapture() {
   if (!('AudioWorkletNode' in window)) throw new Error('AudioWorklet not supported');
 
+  // Common case: prewarmPcmGraph() already built the graph in the background
+  // after enableCameraAndMicrophone(), giving Firefox's
+  // MediaStreamAudioSourceNode time to start flowing real audio before
+  // recording starts. Just reset the counters and flip the capture flag.
+  if (pcmCtx && pcmNode && pcmSource) {
+    recLog('startPcmCapture: using pre-built graph (ctx.state=%s)', pcmCtx.state);
+    if (pcmCtx.state !== 'running') {
+      recLog('startPcmCapture: ctx.state=%s — resuming', pcmCtx.state);
+      try { await pcmCtx.resume(); } catch (e) { recLog('startPcmCapture: resume() threw: %s', e); }
+    }
+    pcmBuffers = [];
+    pcmFrames = 0;
+    pcmFramesWritten = 0;
+    audioStartTime = null;
+    pcmCapturing = true;
+    recLog('PCM capture started (pre-built graph): sampleRate=%d', pcmCtx.sampleRate);
+    return;
+  }
+
+  // Fallback: prewarm didn't run (e.g. AudioWorklet unsupported at init time)
+  // or this is a restart after a mic-device switch — build everything fresh.
   const micTrack = getLocalTrack('audio');
   if (!micTrack) throw new Error('No local microphone track');
 
-  // Re-use LiveKit's existing track instead of opening a second getUserMedia.
-  // A second getUserMedia on an already-in-use device can hang for 2+ seconds,
-  // causing the PCM capture to start late and the WAV to be shorter than the video.
-  pcmStream = new MediaStream([micTrack.mediaStreamTrack]);
+  pcmStream = _clonePcmInputStream(micTrack);
 
-  pcmCtx = new AudioContext({ sampleRate: 48000 });
-  await pcmCtx.audioWorklet.addModule(`/static/js/pcm-worklet.js?v=${ASSET_V}`);
+  // Reuse the pre-warmed context if available (addModule already ran at init
+  // time); otherwise create fresh and pay the compile cost now.
+  if (_warmCtx && _warmModuleReady) {
+    pcmCtx = _warmCtx;
+    const ready = _warmModuleReady;
+    _warmCtx = null;
+    _warmModuleReady = null;
+    recLog('startPcmCapture: using pre-warmed ctx (state=%s)', pcmCtx.state);
+    await ready; // no-op if already resolved; waits if still compiling
+  } else {
+    recLog('startPcmCapture: no pre-warm, calling addModule now');
+    pcmCtx = new AudioContext({ sampleRate: 48000 });
+    await pcmCtx.audioWorklet.addModule(`/static/js/pcm-worklet.js?v=${ASSET_V}`);
+  }
+
+  // Resume if the context started suspended (can happen when triggered without
+  // a direct user gesture, e.g. status-poll path for a late joiner).
+  if (pcmCtx.state !== 'running') {
+    recLog('startPcmCapture: ctx.state=%s — resuming', pcmCtx.state);
+    try { await pcmCtx.resume(); } catch (e) { recLog('startPcmCapture: resume() threw: %s', e); }
+  }
+  recLog('startPcmCapture: ready, ctx.state=%s', pcmCtx.state);
 
   pcmSource = pcmCtx.createMediaStreamSource(pcmStream);
   pcmNode = new AudioWorkletNode(pcmCtx, 'pcm-capture', {
@@ -1619,21 +1817,13 @@ async function startPcmCapture() {
   pcmFrames = 0;
   pcmFramesWritten = 0;
   audioStartTime = null;
+  pcmCapturing = true;
 
-  pcmNode.port.onmessage = (e) => {
-    const channels = e.data;
-    if (!channels || !channels.length) return;
-    if (audioStartTime === null) audioStartTime = performance.now();
-    pcmChannels = 2; // always stereo; interleave duplicates mono source if needed
-    pcmBuffers.push(channels);
-    pcmFrames += channels[0].length;
-    if (pcmFrames >= pcmCtx.sampleRate * 5) {
-      flushPcm(false);
-    }
-  };
+  pcmNode.port.onmessage = _onPcmMessage;
+  recLog('PCM capture started: sampleRate=%d', pcmCtx.sampleRate);
 
   pcmSource.connect(pcmNode);
-  pcmNode.connect(pcmCtx.destination); // worklet outputs silence; needed to keep graph active
+  _connectPcmKeepAlive(pcmNode, pcmCtx);
 }
 
 function flushPcm(isLast) {
@@ -1645,6 +1835,7 @@ function flushPcm(isLast) {
     // and detect clock-rate drift by comparing cumulative frame counts to
     // wall-clock timestamps.
     const chunkOffsetS = pcmFramesWritten / (pcmCtx?.sampleRate ?? 48000);
+    const durationS = frames / (pcmCtx?.sampleRate ?? 48000);
     const interleaved = new Float32Array(frames * ch);
     let offset = 0;
     for (const block of pcmBuffers) {
@@ -1659,10 +1850,16 @@ function flushPcm(isLast) {
     pcmBuffers = [];
     pcmFrames = 0;
     pcmFramesWritten += frames;
+    const audioIdx = chunkIndex.audio;
+    recLog('flushPcm: chunk=%d offsetS=%.2f durationS=%.2f isLast=%s', audioIdx, chunkOffsetS, durationS, isLast);
     enqueueChunk(new Blob([interleaved.buffer]), 'audio', 'raw', { chunk_offset_s: chunkOffsetS });
+  } else if (isLast) {
+    recLog('flushPcm(last): pcmFrames=0, nothing to flush');
   }
 
   if (isLast) {
+    const totalS = pcmFramesWritten / (pcmCtx?.sampleRate ?? 48000);
+    recLog('flushPcm: finalizing audio, totalDurationS=%.2f', totalS);
     finalizeTrack('audio', {
       format: 'pcm',
       sample_rate: pcmCtx ? pcmCtx.sampleRate : 48000,
@@ -1725,15 +1922,16 @@ async function resumeLocalRecording() {
 
 async function stopLocalRecording() {
   micMuted = false;
+  recLog('stopLocalRecording: begin');
 
   // For each MediaRecorder, wrap its onstop so we get an explicit signal that
   // the final ondataavailable (and thus the finalize enqueue) has completed.
   // Without this we're racing against the 100ms delay in waitForUploads, which
   // is fragile when the browser is under load (e.g. two browsers on one machine).
-  function stoppedPromise(rec) {
+  function stoppedPromise(rec, label) {
     return new Promise(resolve => {
       const prev = rec.onstop;
-      rec.onstop = e => { prev?.call(rec, e); resolve(); };
+      rec.onstop = e => { prev?.call(rec, e); recLog('stopLocalRecording: %s onstop resolved', label); resolve(); };
     });
   }
 
@@ -1741,21 +1939,26 @@ async function stopLocalRecording() {
 
   // Video
   if (videoRecorder && videoRecorder.state !== 'inactive') {
-    stopPromises.push(stoppedPromise(videoRecorder));
+    recLog('stopLocalRecording: stopping video recorder (state=%s)', videoRecorder.state);
+    stopPromises.push(stoppedPromise(videoRecorder, 'video'));
     videoRecorder.stop();
+  } else {
+    recLog('stopLocalRecording: video recorder not active (videoRecorder=%s)', videoRecorder ? videoRecorder.state : 'null');
   }
   videoRecorder = null;
 
   // Screen share
   if (screenRecorder && screenRecorder.state !== 'inactive') {
-    stopPromises.push(stoppedPromise(screenRecorder));
+    recLog('stopLocalRecording: stopping screen recorder');
+    stopPromises.push(stoppedPromise(screenRecorder, 'screen'));
     screenRecorder.stop();
   }
   screenRecorder = null;
 
   // Opus fallback
   if (audioRecorder && audioRecorder.state !== 'inactive') {
-    stopPromises.push(stoppedPromise(audioRecorder));
+    recLog('stopLocalRecording: stopping opus recorder');
+    stopPromises.push(stoppedPromise(audioRecorder, 'opus'));
     audioRecorder.stop();
   }
   audioRecorder = null;
@@ -1769,31 +1972,39 @@ async function stopLocalRecording() {
   // then null the handler, so any stray frames that squeezed in before the
   // echo still land in pcmBuffers rather than being discarded.
   if (pcmNode) {
+    recLog('stopLocalRecording: PCM drain start (pcmFrames=%d pcmFramesWritten=%d)', pcmFrames, pcmFramesWritten);
     try { pcmSource.disconnect(); } catch (e) {}
     const drainAck = new Promise(resolve => {
       const prev = pcmNode.port.onmessage;
       pcmNode.port.onmessage = e => {
-        if (e.data?.type === 'drained') { resolve(); return; }
+        if (e.data?.type === 'drained') { recLog('stopLocalRecording: worklet drain ack received'); resolve(); return; }
         if (prev) prev(e);
       };
       pcmNode.port.postMessage({ type: 'drain' });
     });
-    await Promise.race([drainAck, new Promise(r => setTimeout(r, 500))]);
+    const drained = await Promise.race([drainAck, new Promise(r => setTimeout(r, 500, 'timeout'))]);
+    if (drained === 'timeout') recLog('stopLocalRecording: PCM drain timed out — flushing what we have');
     flushPcm(true);
     pcmNode.port.onmessage = null;
     try { pcmNode.disconnect(); } catch (e) {}
     pcmCtx?.close();
-    pcmCtx = pcmNode = pcmSource = pcmStream = null;
+    pcmCloneTrack?.stop();
+    pcmCtx = pcmNode = pcmSource = pcmStream = pcmCloneTrack = null;
+    pcmCapturing = false;
+  } else {
+    recLog('stopLocalRecording: no PCM node (audioFormat=%s)', audioFormat);
   }
 
   // Wait for all MediaRecorder onstop events. By the time each onstop fires,
   // the final ondataavailable chunk is already in the upload queue and
   // finalizeTrack has been called, so the queue is fully populated before
   // waitForUploads sees it.
+  recLog('stopLocalRecording: waiting for %d recorder onstop(s)', stopPromises.length);
   await Promise.race([
     Promise.all(stopPromises),
     new Promise(r => setTimeout(r, 5000)),
   ]);
+  recLog('stopLocalRecording: done');
 }
 
 // ── Upload pipeline ──────────────────────────────────────────────────────────
@@ -1808,6 +2019,7 @@ function enqueueChunk(blob, trackType, ext, meta = {}) {
 }
 
 async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, attempts = 3) {
+  recLog('uploadChunk: %s #%d size=%d', trackType, index, blob.size);
   for (let i = 0; i < attempts; i++) {
     try {
       const form = new FormData();
@@ -1824,7 +2036,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       form.append('file', blob, `chunk_${index}.${ext}`);
 
       const r = await fetch('/api/upload/chunk', { method: 'POST', body: form });
-      if (r.ok) return;
+      if (r.ok) { recLog('uploadChunk: %s #%d ok', trackType, index); return; }
       throw new Error(`HTTP ${r.status}`);
     } catch (err) {
       console.warn(`Chunk upload failed (${trackType} #${index}), attempt ${i + 1}:`, err);
@@ -1836,11 +2048,13 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
 
 function finalizeTrack(trackType, meta) {
   const epoch = recordingEpoch;
+  recLog('finalizeTrack: %s epoch=%s meta=%o', trackType, epoch, meta);
   // Chain finalize onto the upload queue so it only fires after every
   // chunk for this track has been flushed to the server.
   uploadQueues[trackType] = uploadQueues[trackType].then(async () => {
+    recLog('finalizeTrack: sending /finalize for %s', trackType);
     try {
-      await fetch('/api/upload/finalize', {
+      const r = await fetch('/api/upload/finalize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1852,6 +2066,7 @@ function finalizeTrack(trackType, meta) {
           ...meta,
         }),
       });
+      recLog('finalizeTrack: /finalize %s responded %d', trackType, r.status);
     } catch (e) {
       console.error(`Finalize failed for ${trackType}:`, e);
     }
@@ -2587,55 +2802,71 @@ async function updateStatsPanel() {
   const content = document.getElementById('stats-content');
   if (!content) return;
 
-  const pubPc = room?.engine?.publisher?.pc;
-  const subPc = room?.engine?.subscriber?.pc;
-  if (!pubPc && !subPc) {
-    content.innerHTML = '<div class="stats-empty">Not connected</div>';
-    return;
+  // pcManager is the correct path in LiveKit v2; fall back to top-level for older builds.
+  function resolvePc(transport) {
+    if (!transport) return null;
+    const candidate = transport.pc ?? transport.peerConnection ?? transport._pc;
+    return (candidate && typeof candidate.getStats === 'function') ? candidate : null;
   }
+  const engine = room?.engine;
+  const pubPc = resolvePc(engine?.pcManager?.publisher) ?? resolvePc(engine?.publisher);
+  const subPc = resolvePc(engine?.pcManager?.subscriber) ?? resolvePc(engine?.subscriber);
 
   const now = performance.now();
   const allStats = new Map();
-  async function collectPc(pc) {
+  // Namespace each PC's stats to prevent ID collisions (pub vs sub generate independent IDs).
+  async function collectPc(pc, prefix) {
     if (!pc) return;
-    try { (await pc.getStats()).forEach((v, k) => allStats.set(k, v)); } catch (e) {}
+    try {
+      (await pc.getStats()).forEach((v, k) => {
+        const id = prefix + k;
+        allStats.set(id, { ...v, id, codecId: v.codecId ? prefix + v.codecId : undefined });
+      });
+    } catch (e) {}
   }
-  await Promise.all([collectPc(pubPc), collectPc(subPc)]);
+  await Promise.all([collectPc(pubPc, 'p:'), collectPc(subPc, 's:')]);
 
   function codecMime(codecId) {
     const c = allStats.get(codecId);
     return c ? (c.mimeType || '').split('/')[1] || '' : '';
   }
 
-  function bitrateDelta(statId, bytes) {
+  function trackDeltas(statId, bytes, frames) {
     const prev = prevRtcStats[statId];
     const dt = prev?.ts ? (now - prev.ts) / 1000 : null;
-    const rate = (dt && prev.bytes != null && bytes != null)
-      ? Math.round((bytes - prev.bytes) * 8 / dt / 1000)
-      : null;
-    prevRtcStats[statId] = { ts: now, bytes };
-    return rate; // kbps
+    const bitrate = (dt && dt > 0 && prev.bytes != null && bytes != null)
+      ? Math.round((bytes - prev.bytes) * 8 / dt / 1000) : null;
+    const fps = (dt && dt > 0 && prev.frames != null && frames != null)
+      ? Math.round((frames - prev.frames) / dt) : null;
+    prevRtcStats[statId] = { ts: now, bytes, frames };
+    return { bitrate, fps };
   }
 
   function fmtKbps(kbps) {
-    if (kbps == null || kbps < 0) return '—';
+    if (kbps == null || kbps <= 0) return '—';
     return kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbps' : kbps + ' kbps';
   }
 
   // ── Outbound (what we send) ──
-  const sendVideo = [], sendAudio = [];
+  // LiveKit simulcast produces multiple outbound-rtp video entries (one per layer).
+  // Aggregate: sum bitrates, pick resolution/fps from the highest-bitrate active layer.
+  const sendVideoLayers = [], sendAudio = [];
   for (const stat of allStats.values()) {
     if (stat.type !== 'outbound-rtp') continue;
-    const bitrate = bitrateDelta(stat.id, stat.bytesSent);
+    const { bitrate, fps } = trackDeltas(stat.id, stat.bytesSent, stat.framesEncoded ?? null);
     if (stat.kind === 'video') {
-      sendVideo.push({
-        width: stat.frameWidth, height: stat.frameHeight,
-        fps: stat.framesPerSecond != null ? Math.round(stat.framesPerSecond) : null,
-        bitrate, codec: codecMime(stat.codecId),
-      });
+      sendVideoLayers.push({ width: stat.frameWidth, height: stat.frameHeight, fps, bitrate, codec: codecMime(stat.codecId) });
     } else {
       sendAudio.push({ bitrate, codec: codecMime(stat.codecId) });
     }
+  }
+  const sendVideo = [];
+  if (sendVideoLayers.length) {
+    const totalBitrate = sendVideoLayers.some(v => v.bitrate != null)
+      ? sendVideoLayers.reduce((s, v) => s + (v.bitrate || 0), 0) : null;
+    const best = sendVideoLayers.reduce((a, b) => (b.bitrate || 0) > (a.bitrate || 0) ? b : a, sendVideoLayers[0]);
+    const maxFps = sendVideoLayers.reduce((m, v) => Math.max(m, v.fps || 0), 0);
+    sendVideo.push({ width: best.width, height: best.height, fps: maxFps || null, bitrate: totalBitrate, codec: best.codec });
   }
 
   // ── Remote-inbound (server feedback: loss on our outgoing streams) ──
@@ -2651,15 +2882,14 @@ async function updateStatsPanel() {
   const recvVideo = [], recvAudio = [];
   for (const stat of allStats.values()) {
     if (stat.type !== 'inbound-rtp') continue;
-    const bitrate = bitrateDelta(stat.id, stat.bytesReceived);
+    const { bitrate, fps } = trackDeltas(stat.id, stat.bytesReceived, stat.framesDecoded ?? null);
     const total = (stat.packetsReceived || 0) + (stat.packetsLost || 0);
     const loss = total > 10 ? ((stat.packetsLost || 0) / total * 100).toFixed(1) : null;
     const jitter = stat.jitter != null ? Math.round(stat.jitter * 1000) : null;
     if (stat.kind === 'video') {
       recvVideo.push({
         width: stat.frameWidth, height: stat.frameHeight,
-        fps: stat.framesPerSecond != null ? Math.round(stat.framesPerSecond) : null,
-        bitrate, codec: codecMime(stat.codecId), loss, jitter,
+        fps, bitrate, codec: codecMime(stat.codecId), loss, jitter,
       });
     } else {
       recvAudio.push({ bitrate, codec: codecMime(stat.codecId), loss, jitter });
@@ -2696,7 +2926,7 @@ async function updateStatsPanel() {
     for (const v of sendVideo) {
       const parts = [];
       if (v.width && v.height) parts.push(`${v.width}×${v.height}`);
-      if (v.fps != null) parts.push(`${v.fps} fps`);
+      if (v.fps != null && v.fps > 0) parts.push(`${v.fps} fps`);
       parts.push(fmtKbps(v.bitrate));
       if (v.codec) parts.push(v.codec.toUpperCase());
       html += row('Video', parts.join(' &middot; '));
@@ -2714,7 +2944,7 @@ async function updateStatsPanel() {
       const v = recvVideo[i];
       const parts = [];
       if (v.width && v.height) parts.push(`${v.width}×${v.height}`);
-      if (v.fps != null) parts.push(`${v.fps} fps`);
+      if (v.fps != null && v.fps > 0) parts.push(`${v.fps} fps`);
       parts.push(fmtKbps(v.bitrate));
       if (v.codec) parts.push(v.codec.toUpperCase());
       if (v.loss != null) parts.push(`${v.loss}% loss`);
@@ -2738,11 +2968,11 @@ async function updateStatsPanel() {
   if (connType) html += row('Path', connProto ? `${connType} &middot; ${connProto}` : connType);
   html += row('Capture', audioFormat === 'pcm' ? 'PCM (lossless)' : 'Opus (fallback)');
 
-  if (!sendVideo.length && !sendAudio.length && !recvVideo.length && !recvAudio.length) {
-    html = '<div class="stats-empty">Waiting for stream data…</div>' + html;
+  if (!sendVideo.length && !sendAudio.length && !recvVideo.length && !recvAudio.length && !pubPc && !subPc) {
+    html = '<div class="stats-empty">WebRTC stats unavailable in this browser/version</div>' + html;
   }
 
-  content.innerHTML = html;
+  content.innerHTML = html || '<div class="stats-empty">Gathering stats…</div>';
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────
