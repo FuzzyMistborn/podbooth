@@ -915,6 +915,7 @@ function setupControls() {
   btnChat?.addEventListener('click', () => {
     const open = chatPanel?.classList.toggle('open');
     btnChat.classList.toggle('active', open);
+    document.querySelector('.studio-layout')?.classList.toggle('chat-open', open);
     if (open) {
       chatInput?.focus();
       btnChat.classList.remove('chat-unread');
@@ -1888,6 +1889,30 @@ function onBeforeUnload(e) {
 
 // ── Waiting room (host only) ─────────────────────────────────────────────────
 
+let _waitroomIdentities = new Set();
+
+function playAdmitChime() {
+  try {
+    const ctx = new AudioContext();
+    const freqs = [880, 1100, 1320];
+    freqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'sine';
+      const t = ctx.currentTime + i * 0.12;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.25, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+      osc.start(t);
+      osc.stop(t + 0.35);
+    });
+    setTimeout(() => ctx.close(), 1500);
+  } catch (e) {}
+}
+
 function pollPendingGuests() {
   if (!IS_HOST) return;
   setInterval(async () => {
@@ -1904,6 +1929,12 @@ function updateWaitroomPanel(guests) {
   const panel = document.getElementById('waitroom-panel');
   const list  = document.getElementById('waitroom-list');
   if (!panel || !list) return;
+
+  const newIdentities = new Set(guests.map(g => g.identity));
+  const hasNew = [...newIdentities].some(id => !_waitroomIdentities.has(id));
+  if (hasNew) playAdmitChime();
+  _waitroomIdentities = newIdentities;
+
   list.innerHTML = '';
   guests.forEach(({ identity: gid, display_name: name }) => {
     const li = document.createElement('li');
