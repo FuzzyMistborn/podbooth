@@ -97,6 +97,10 @@ const participantLatency = new Map();
 let localRttMs = null;
 let latencyInterval = null;
 
+// Stats panel
+let statsInterval = null;
+let prevRtcStats = {}; // statId → { ts, bytes }
+
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 
 const grid         = document.getElementById('video-grid');
@@ -138,6 +142,8 @@ const btnChatSend  = document.getElementById('btn-chat-send');
 const btnFiles     = document.getElementById('btn-files');
 const filesPanel   = document.getElementById('files-panel');
 const filesList    = document.getElementById('files-list');
+const btnStats     = document.getElementById('btn-stats');
+const statsPanel   = document.getElementById('stats-panel');
 
 // Timer DOM refs (host-only elements are null for non-hosts)
 const timerBar        = document.getElementById('timer-bar');
@@ -935,6 +941,29 @@ function setupControls() {
   document.addEventListener('click', () => {
     if (filesPanel && filesPanel.style.display !== 'none') {
       filesPanel.style.display = 'none';
+    }
+  });
+
+  btnStats?.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = statsPanel?.style.display !== 'none';
+    if (statsPanel) statsPanel.style.display = open ? 'none' : 'flex';
+    btnStats.classList.toggle('active', !open);
+    if (!open) {
+      updateStatsPanel();
+      statsInterval = setInterval(updateStatsPanel, 2000);
+    } else {
+      clearInterval(statsInterval);
+      statsInterval = null;
+    }
+  });
+  statsPanel?.addEventListener('click', e => e.stopPropagation());
+  document.addEventListener('click', () => {
+    if (statsPanel && statsPanel.style.display !== 'none') {
+      statsPanel.style.display = 'none';
+      btnStats?.classList.remove('active');
+      clearInterval(statsInterval);
+      statsInterval = null;
     }
   });
 
@@ -2550,6 +2579,170 @@ function updateLatencyBadge(tile, rttMs) {
   if (rttMs < 80)       badge.classList.add('good');
   else if (rttMs < 150) badge.classList.add('fair');
   else                  badge.classList.add('poor');
+}
+
+// ── Stats panel ──────────────────────────────────────────────────────────────
+
+async function updateStatsPanel() {
+  const content = document.getElementById('stats-content');
+  if (!content) return;
+
+  const pubPc = room?.engine?.publisher?.pc;
+  const subPc = room?.engine?.subscriber?.pc;
+  if (!pubPc && !subPc) {
+    content.innerHTML = '<div class="stats-empty">Not connected</div>';
+    return;
+  }
+
+  const now = performance.now();
+  const allStats = new Map();
+  async function collectPc(pc) {
+    if (!pc) return;
+    try { (await pc.getStats()).forEach((v, k) => allStats.set(k, v)); } catch (e) {}
+  }
+  await Promise.all([collectPc(pubPc), collectPc(subPc)]);
+
+  function codecMime(codecId) {
+    const c = allStats.get(codecId);
+    return c ? (c.mimeType || '').split('/')[1] || '' : '';
+  }
+
+  function bitrateDelta(statId, bytes) {
+    const prev = prevRtcStats[statId];
+    const dt = prev?.ts ? (now - prev.ts) / 1000 : null;
+    const rate = (dt && prev.bytes != null && bytes != null)
+      ? Math.round((bytes - prev.bytes) * 8 / dt / 1000)
+      : null;
+    prevRtcStats[statId] = { ts: now, bytes };
+    return rate; // kbps
+  }
+
+  function fmtKbps(kbps) {
+    if (kbps == null || kbps < 0) return '—';
+    return kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbps' : kbps + ' kbps';
+  }
+
+  // ── Outbound (what we send) ──
+  const sendVideo = [], sendAudio = [];
+  for (const stat of allStats.values()) {
+    if (stat.type !== 'outbound-rtp') continue;
+    const bitrate = bitrateDelta(stat.id, stat.bytesSent);
+    if (stat.kind === 'video') {
+      sendVideo.push({
+        width: stat.frameWidth, height: stat.frameHeight,
+        fps: stat.framesPerSecond != null ? Math.round(stat.framesPerSecond) : null,
+        bitrate, codec: codecMime(stat.codecId),
+      });
+    } else {
+      sendAudio.push({ bitrate, codec: codecMime(stat.codecId) });
+    }
+  }
+
+  // ── Remote-inbound (server feedback: loss on our outgoing streams) ──
+  let outLossPct = null;
+  for (const stat of allStats.values()) {
+    if (stat.type !== 'remote-inbound-rtp') continue;
+    if (stat.fractionLost != null && outLossPct == null) {
+      outLossPct = (stat.fractionLost * 100).toFixed(1);
+    }
+  }
+
+  // ── Inbound (what we receive) ──
+  const recvVideo = [], recvAudio = [];
+  for (const stat of allStats.values()) {
+    if (stat.type !== 'inbound-rtp') continue;
+    const bitrate = bitrateDelta(stat.id, stat.bytesReceived);
+    const total = (stat.packetsReceived || 0) + (stat.packetsLost || 0);
+    const loss = total > 10 ? ((stat.packetsLost || 0) / total * 100).toFixed(1) : null;
+    const jitter = stat.jitter != null ? Math.round(stat.jitter * 1000) : null;
+    if (stat.kind === 'video') {
+      recvVideo.push({
+        width: stat.frameWidth, height: stat.frameHeight,
+        fps: stat.framesPerSecond != null ? Math.round(stat.framesPerSecond) : null,
+        bitrate, codec: codecMime(stat.codecId), loss, jitter,
+      });
+    } else {
+      recvAudio.push({ bitrate, codec: codecMime(stat.codecId), loss, jitter });
+    }
+  }
+
+  // ── Connection path info ──
+  let connType = null, connProto = null;
+  for (const stat of allStats.values()) {
+    if (stat.type === 'candidate-pair' && stat.nominated) {
+      const local = allStats.get(stat.localCandidateId);
+      if (local) {
+        connType = local.candidateType === 'relay' ? 'TURN relay'
+                 : local.candidateType === 'srflx' ? 'STUN (srflx)'
+                 : 'direct';
+        connProto = (local.protocol || '').toUpperCase();
+      }
+      break;
+    }
+  }
+
+  // ── Build HTML ──
+  function row(label, val) {
+    return `<div class="stats-row"><span class="stats-label">${label}</span><span class="stats-val">${val}</span></div>`;
+  }
+  function section(title) {
+    return `<div class="stats-section-title">${title}</div>`;
+  }
+
+  let html = '';
+
+  if (sendVideo.length || sendAudio.length) {
+    html += section('Send');
+    for (const v of sendVideo) {
+      const parts = [];
+      if (v.width && v.height) parts.push(`${v.width}×${v.height}`);
+      if (v.fps != null) parts.push(`${v.fps} fps`);
+      parts.push(fmtKbps(v.bitrate));
+      if (v.codec) parts.push(v.codec.toUpperCase());
+      html += row('Video', parts.join(' &middot; '));
+    }
+    for (const a of sendAudio) {
+      const codec = a.codec || (audioFormat === 'pcm' ? 'PCM' : 'Opus');
+      html += row('Audio', `${fmtKbps(a.bitrate)} &middot; ${codec.toUpperCase()}`);
+    }
+    if (outLossPct != null) html += row('Loss', `${outLossPct}%`);
+  }
+
+  if (recvVideo.length || recvAudio.length) {
+    html += section('Receive');
+    for (let i = 0; i < recvVideo.length; i++) {
+      const v = recvVideo[i];
+      const parts = [];
+      if (v.width && v.height) parts.push(`${v.width}×${v.height}`);
+      if (v.fps != null) parts.push(`${v.fps} fps`);
+      parts.push(fmtKbps(v.bitrate));
+      if (v.codec) parts.push(v.codec.toUpperCase());
+      if (v.loss != null) parts.push(`${v.loss}% loss`);
+      if (v.jitter != null) parts.push(`${v.jitter}ms jitter`);
+      const label = recvVideo.length > 1 ? `Video ${i + 1}` : 'Video';
+      html += row(label, parts.join(' &middot; '));
+    }
+    for (let i = 0; i < recvAudio.length; i++) {
+      const a = recvAudio[i];
+      const parts = [fmtKbps(a.bitrate)];
+      if (a.codec) parts.push(a.codec.toUpperCase());
+      if (a.loss != null) parts.push(`${a.loss}% loss`);
+      if (a.jitter != null) parts.push(`${a.jitter}ms jitter`);
+      const label = recvAudio.length > 1 ? `Audio ${i + 1}` : 'Audio';
+      html += row(label, parts.join(' &middot; '));
+    }
+  }
+
+  html += section('Connection');
+  html += row('RTT', localRttMs != null ? `${localRttMs} ms` : '—');
+  if (connType) html += row('Path', connProto ? `${connType} &middot; ${connProto}` : connType);
+  html += row('Capture', audioFormat === 'pcm' ? 'PCM (lossless)' : 'Opus (fallback)');
+
+  if (!sendVideo.length && !sendAudio.length && !recvVideo.length && !recvAudio.length) {
+    html = '<div class="stats-empty">Waiting for stream data…</div>' + html;
+  }
+
+  content.innerHTML = html;
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────
