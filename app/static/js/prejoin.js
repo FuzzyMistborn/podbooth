@@ -16,18 +16,24 @@ const levelFill   = document.getElementById('level-fill');
 const nameInput   = document.getElementById('participant-name');
 const joinBtn     = document.getElementById('join-btn');
 
+function updateJoinButton() {
+  joinBtn.disabled = nameInput.value.trim().length === 0;
+}
+
 async function init() {
   await populateDevices();
   await startPreview();
   micSelect.addEventListener('change', startPreview);
   camSelect.addEventListener('change', startPreview);
-  nameInput.addEventListener('input', () => {
-    joinBtn.disabled = nameInput.value.trim().length < 1;
-  });
+  nameInput.addEventListener('input', updateJoinButton);
+  nameInput.addEventListener('change', updateJoinButton);
   nameInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !joinBtn.disabled) joinSession();
   });
   joinBtn.addEventListener('click', joinSession);
+  updateJoinButton();
+  requestAnimationFrame(updateJoinButton);
+  setTimeout(updateJoinButton, 100);
 }
 
 async function populateDevices() {

@@ -284,7 +284,7 @@ function attachRoomEvents() {
     }
   });
 
-  room.on(RoomEvent.ParticipantDisconnected, p => {
+  room.on(RoomEvent.ParticipantDisconnected, async p => {
     showToast(`${labelFor(p)} left`);
     removeTile(`tile-${p.identity}`);
     removeTile(`tile-${p.identity}-screen`);
@@ -297,9 +297,9 @@ function attachRoomEvents() {
     // the is_host flag in the participant's token metadata.
     if (!IS_HOST && (isRecording || isPaused) && participantIsHost(p)) {
       showToast('Host disconnected — recording stopped');
-      stopLocalRecording();
+      await stopLocalRecording();
       setRecordingUI(false);
-      waitForUploads();
+      await waitForUploads();
     }
   });
 
@@ -419,9 +419,9 @@ function attachRoomEvents() {
       resumeLocalRecording();
     }
     if (msg.type === 'recording_stopped' && !IS_HOST) {
-      stopLocalRecording();
+      await stopLocalRecording();
       setRecordingUI(false);
-      waitForUploads();
+      await waitForUploads();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
       handleSessionEnded();
@@ -1271,7 +1271,7 @@ async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = true;
   await _postRecordingAction('stop');
   await broadcastData({ type: 'recording_stopped' });
-  stopLocalRecording();
+  await stopLocalRecording();
   setRecordingUI(false);
   await waitForUploads();
   if (btnStopRec) btnStopRec.disabled = false;
@@ -1591,7 +1591,6 @@ async function startPcmCapture() {
   audioStartTime = null;
 
   pcmNode.port.onmessage = (e) => {
-    if (micMuted) return;
     const channels = e.data;
     if (!channels || !channels.length) return;
     if (audioStartTime === null) audioStartTime = performance.now();
@@ -1670,7 +1669,6 @@ function startOpusFallback() {
   });
   audioStartTime = null;
   audioRecorder.ondataavailable = e => {
-    if (micMuted) return;
     if (e.data && e.data.size > 0) {
       if (audioStartTime === null) audioStartTime = performance.now();
       enqueueChunk(e.data, 'audio', ext);
@@ -1695,7 +1693,7 @@ async function resumeLocalRecording() {
   // Otherwise recorders were never stopped, nothing to do
 }
 
-function stopLocalRecording() {
+async function stopLocalRecording() {
   micMuted = false;
   // Video
   if (videoRecorder && videoRecorder.state !== 'inactive') {
@@ -1703,11 +1701,26 @@ function stopLocalRecording() {
   }
   videoRecorder = null;
 
-  // PCM audio
+  // PCM audio — stop the source so no new audio enters the worklet, then
+  // synchronize with it via a drain handshake before flushing. The worklet
+  // echoes "drained" only after posting all prior audio-frame messages, so
+  // by the time the promise resolves pcmBuffers is complete. We flush first,
+  // then null the handler, so any stray frames that squeezed in before the
+  // echo still land in pcmBuffers rather than being discarded.
   if (pcmNode) {
-    pcmNode.port.onmessage = null;
-    try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
+    try { pcmSource.disconnect(); } catch (e) {}
+    const drainAck = new Promise(resolve => {
+      const prev = pcmNode.port.onmessage;
+      pcmNode.port.onmessage = e => {
+        if (e.data?.type === 'drained') { resolve(); return; }
+        if (prev) prev(e);
+      };
+      pcmNode.port.postMessage({ type: 'drain' });
+    });
+    await Promise.race([drainAck, new Promise(r => setTimeout(r, 500))]);
     flushPcm(true);
+    pcmNode.port.onmessage = null;
+    try { pcmNode.disconnect(); } catch (e) {}
     pcmCtx?.close();
     pcmCtx = pcmNode = pcmSource = pcmStream = null;
   }
@@ -1813,7 +1826,7 @@ async function leaveSession() {
   if (!confirm('Leave this session?')) return;
 
   if (isRecording || isPaused) {
-    stopLocalRecording();
+    await stopLocalRecording();
     setRecordingUI(false);
   }
 
@@ -1828,7 +1841,7 @@ async function endSession() {
   if (!confirm('End this session for everyone?')) return;
 
   if (isRecording || isPaused) {
-    stopLocalRecording();
+    await stopLocalRecording();
     setRecordingUI(false);
   }
 
@@ -1851,7 +1864,7 @@ async function endSession() {
 
 async function handleSessionEnded() {
   if (isRecording || isPaused) {
-    stopLocalRecording();
+    await stopLocalRecording();
     setRecordingUI(false);
   }
   showUploadBanner('uploading');
@@ -1971,9 +1984,9 @@ function pollSessionStatus() {
             setRecordingUI(false, true);
           }
         } else if (isRecording || isPaused) {
-          stopLocalRecording();
+          await stopLocalRecording();
           setRecordingUI(false);
-          waitForUploads();
+          await waitForUploads();
         }
       }
     } catch (e) {}

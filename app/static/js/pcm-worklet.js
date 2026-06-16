@@ -3,6 +3,17 @@
  * channel buffers to the main thread. Output is silence (we only tap the signal).
  */
 class PCMCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.port.onmessage = e => {
+      if (e.data?.type === 'drain') {
+        // Echo back so the main thread knows all prior audio-frame messages
+        // have been posted and are ahead of this reply in the port queue.
+        this.port.postMessage({ type: 'drained' });
+      }
+    };
+  }
+
   process(inputs) {
     const input = inputs[0];
     if (input && input.length > 0 && input[0].length > 0) {
