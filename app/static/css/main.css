@@ -2017,45 +2017,57 @@ input::placeholder { color: var(--text-3); }
 /* ── Upload banner (Feature 7) ───────────────────────────────── */
 .upload-banner {
   position: fixed;
-  bottom: 64px; /* above controls bar */
-  left: 0;
-  right: 0;
+  bottom: 80px;
+  left: 20px;
   z-index: 200;
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 10px;
-  padding: 10px 20px;
+  padding: 9px 14px;
+  border-radius: var(--radius);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   letter-spacing: 0.04em;
   pointer-events: none;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
-.upload-banner.hidden { display: none; }
-.upload-banner.uploading {
-  background: var(--accent);
-  color: #fff;
+.upload-banner:not(.hidden) {
+  opacity: 1;
+  transform: translateY(0);
   pointer-events: auto;
-  animation: pulse-border 2s infinite;
+}
+.upload-banner.hidden {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+.upload-banner.uploading {
+  background: var(--bg-2);
+  border: 1px solid var(--accent);
+  color: var(--accent);
 }
 .upload-banner.done {
-  background: var(--green);
-  color: #000;
-  pointer-events: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--green);
+  color: var(--green);
 }
 .upload-banner.error {
-  background: var(--yellow);
-  color: #000;
-  pointer-events: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
 }
 .upload-banner-close {
   background: none;
   border: none;
   color: inherit;
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  padding: 0 4px;
-  opacity: 0.7;
+  padding: 0 2px;
+  opacity: 0.6;
+  flex-shrink: 0;
 }
 .upload-banner-close:hover { opacity: 1; }

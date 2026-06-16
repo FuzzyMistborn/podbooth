@@ -55,6 +55,7 @@ let audioStartTime = null;
 // finalize only fires after everything is flushed.
 let chunkIndex = { audio: 0, video: 0, screen: 0 };
 let uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+let uploadPending = false;
 // Epoch string prefix per recording run so chunk files from different
 // recordings never collide even if the session directory isn't clean.
 let recordingEpoch = '';
@@ -1884,6 +1885,11 @@ function onBeforeUnload(e) {
     stopLocalRecording();
     e.preventDefault();
     e.returnValue = '';
+    return;
+  }
+  if (uploadPending) {
+    e.preventDefault();
+    e.returnValue = 'Recordings are still uploading. Leave anyway?';
   }
 }
 
@@ -2417,30 +2423,37 @@ function fmtTime(sec) {
 // ── Upload banner (Feature 7) ─────────────────────────────────────────────────
 
 function showUploadBanner(state) {
+  uploadPending = (state === 'uploading');
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
   banner.classList.remove('hidden', 'uploading', 'done', 'error');
   banner.classList.add(state);
+  banner.innerHTML = '';
+
+  const label = document.createElement('span');
   if (state === 'uploading') {
-    banner.textContent = '⬆ Uploading recordings…';
+    label.textContent = '⬆ Uploading recordings…';
   } else if (state === 'done') {
-    banner.textContent = '✓ Recordings uploaded';
-  } else if (state === 'error') {
-    banner.textContent = '⚠ Some recordings may not have uploaded';
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'upload-banner-close';
-    closeBtn.textContent = '×';
-    closeBtn.addEventListener('click', hideUploadBanner);
-    banner.appendChild(closeBtn);
+    label.textContent = '✓ Recordings uploaded';
+  } else {
+    label.textContent = '⚠ Upload may be incomplete';
   }
+  banner.appendChild(label);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'upload-banner-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Dismiss';
+  closeBtn.addEventListener('click', hideUploadBanner);
+  banner.appendChild(closeBtn);
 }
 
 function hideUploadBanner() {
+  uploadPending = false;
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
   banner.classList.add('hidden');
   banner.classList.remove('uploading', 'done', 'error');
-  banner.textContent = '';
 }
 
 // ── Latency measurement ──────────────────────────────────────────────────────
