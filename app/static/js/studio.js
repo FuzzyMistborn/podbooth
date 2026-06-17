@@ -167,7 +167,7 @@ const btnChatSend  = document.getElementById('btn-chat-send');
 const btnFiles     = document.getElementById('btn-files');
 const filesPanel   = document.getElementById('files-panel');
 const filesList    = document.getElementById('files-list');
-const btnStats     = document.getElementById('btn-stats');
+const latencyWrap  = document.getElementById('latency-indicator-wrap');
 const statsPanel   = document.getElementById('stats-panel');
 
 // Timer DOM refs (host-only elements are null for non-hosts)
@@ -1000,11 +1000,11 @@ function setupControls() {
     }
   });
 
-  btnStats?.addEventListener('click', e => {
+  latencyWrap?.addEventListener('click', e => {
     e.stopPropagation();
     const open = statsPanel?.style.display !== 'none';
     if (statsPanel) statsPanel.style.display = open ? 'none' : 'flex';
-    btnStats.classList.toggle('active', !open);
+    latencyWrap.classList.toggle('active', !open);
     if (!open) {
       updateStatsPanel();
       statsInterval = setInterval(updateStatsPanel, 2000);
@@ -1017,7 +1017,7 @@ function setupControls() {
   document.addEventListener('click', () => {
     if (statsPanel && statsPanel.style.display !== 'none') {
       statsPanel.style.display = 'none';
-      btnStats?.classList.remove('active');
+      latencyWrap?.classList.remove('active');
       clearInterval(statsInterval);
       statsInterval = null;
     }
@@ -2783,15 +2783,14 @@ async function measureAndBroadcastLatency() {
 
   updateLatencyBadge(document.getElementById(`tile-${identity}`), rttMs);
 
-  const wrap = document.getElementById('latency-indicator-wrap');
-  const val  = document.getElementById('latency-value');
-  if (wrap && val) {
+  const val = document.getElementById('latency-value');
+  if (latencyWrap && val) {
     val.textContent = `${rttMs}ms`;
-    wrap.classList.remove('good', 'fair', 'poor');
-    wrap.title = `Your RTT to server: ${rttMs}ms`;
-    if (rttMs < 80)       wrap.classList.add('good');
-    else if (rttMs < 150) wrap.classList.add('fair');
-    else                  wrap.classList.add('poor');
+    latencyWrap.classList.remove('good', 'fair', 'poor');
+    latencyWrap.title = `Your RTT to server: ${rttMs}ms — click for details`;
+    if (rttMs < 80)       latencyWrap.classList.add('good');
+    else if (rttMs < 150) latencyWrap.classList.add('fair');
+    else                  latencyWrap.classList.add('poor');
   }
 
   // Refresh roundtrip tooltips on all remote tiles
