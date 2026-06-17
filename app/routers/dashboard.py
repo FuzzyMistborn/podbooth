@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION
 from app.auth import require_host
 
-_VALID_MEDIA_RE = re.compile(r"^[A-Za-z0-9_]+\.(wav|mp4)$")
+_VALID_MEDIA_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(wav|mp4|txt)$")
 
 _export_tasks: set[str] = set()          # session IDs currently exporting
 _export_task_refs: set[asyncio.Task] = set()  # keep tasks alive
@@ -370,6 +370,19 @@ def _get_session_files(session) -> list[dict]:
     if not session_path.is_dir():
         return files
 
+    # Topic marker .txt files live directly in the session root (not per-participant)
+    for fpath in sorted(session_path.glob("*.txt")):
+        if not fpath.is_file():
+            continue
+        files.append({
+            "participant": "",
+            "type": "marker",
+            "take": None,
+            "filename": fpath.name,
+            "path": str(fpath.relative_to(recordings_path)),
+            "size_mb": None,
+        })
+
     for participant_dir in sorted(session_path.iterdir()):
         if not participant_dir.is_dir():
             continue
@@ -436,7 +449,9 @@ async def download_session_zip(session_id: str, _: None = Depends(require_host))
         base = Path(settings.recordings_dir)
         with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
             for f in files:
-                zf.write(str(base / f["path"]), f"{f['participant']}/{f['filename']}")
+                # Markers have no participant subdirectory — put them at the zip root
+                arc_name = f["filename"] if f["type"] == "marker" else f"{f['participant']}/{f['filename']}"
+                zf.write(str(base / f["path"]), arc_name)
 
     try:
         await asyncio.to_thread(_write)

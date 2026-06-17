@@ -88,6 +88,20 @@ let recordingEpoch = '';
 // status poll) can't kick off two concurrent startLocalRecording() runs.
 let recordingStarting = false;
 
+// Upload progress tracking
+let uploadStats = { queued: 0, completed: 0 };
+
+// Audio level meter
+let levelAnalyser = null;
+let levelBuffer   = null;
+let levelRafId    = null;
+
+// Persistent device preferences
+const DEVICE_KEY_MIC = 'podbooth:mic-device';
+const DEVICE_KEY_CAM = 'podbooth:cam-device';
+const DEVICE_KEY_SPK = 'podbooth:spk-device';
+let activeSpkDeviceId = '';
+
 // Timer
 const TIMER_SHOW_KEY = 'podbooth:timer-show-time';
 const timerQueue = []; // [{name, duration (s), notes}]
@@ -138,6 +152,9 @@ const btnCam       = document.getElementById('btn-cam');
 const btnScreen    = document.getElementById('btn-screen');
 let activeMicDeviceId = '';
 let activeCamDeviceId = '';
+const btnNewTopic  = document.getElementById('btn-new-topic');
+const topicGroup   = document.getElementById('topic-group');
+const topicInput   = document.getElementById('topic-input');
 const btnRaiseHand = document.getElementById('btn-raise-hand');
 const btnRecord    = document.getElementById('btn-record');
 const btnPause     = document.getElementById('btn-pause');
@@ -208,8 +225,14 @@ function recLog(fmt, ...args) {
 async function init() {
   const params = new URLSearchParams(window.location.search);
   displayName = (params.get('participant_name') || '').trim();
-  const micDeviceId = params.get('mic_device_id') || '';
-  const camDeviceId = params.get('cam_device_id') || '';
+  let micDeviceId = params.get('mic_device_id') || '';
+  let camDeviceId = params.get('cam_device_id') || '';
+  // Fall back to localStorage if URL params aren't present (e.g. direct navigation)
+  try {
+    if (!micDeviceId) micDeviceId = localStorage.getItem(DEVICE_KEY_MIC) || '';
+    if (!camDeviceId) camDeviceId = localStorage.getItem(DEVICE_KEY_CAM) || '';
+    activeSpkDeviceId = localStorage.getItem(DEVICE_KEY_SPK) || '';
+  } catch (e) {}
 
   if (!displayName) {
     // Everyone (host included) goes through pre-join to pick a name
@@ -391,7 +414,12 @@ function attachRoomEvents() {
     const tile = document.getElementById(`tile-${participant.identity}`);
     if (!tile) return;
     if (track.kind === Track.Kind.Video) attachVideoToTile(tile, track);
-    if (track.kind === Track.Kind.Audio) track.attach(); // play remote audio
+    if (track.kind === Track.Kind.Audio) {
+      const audioEl = track.attach();
+      if (audioEl && activeSpkDeviceId && typeof audioEl.setSinkId === 'function') {
+        audioEl.setSinkId(activeSpkDeviceId).catch(() => {});
+      }
+    }
     updateMuteIndicator(tile, participant);
   });
 
@@ -520,6 +548,14 @@ function attachRoomEvents() {
     if (msg.type === 'alert') {
       showAlertBanner(msg.text);
     }
+    if (msg.type === 'marker' && !IS_HOST) {
+      const t = msg.recording_time_s ?? 0;
+      const m = Math.floor(t / 60);
+      const s = String(t % 60).padStart(2, '0');
+      const timeStr = `${m}:${s}`;
+      const text = msg.label ? `New topic at ${timeStr}: "${msg.label}"` : `New topic marked at ${timeStr}`;
+      showToast(text, 5000);
+    }
     if (msg.type === 'latency_report') {
       participantLatency.set(msg.identity, msg.rttMs);
       const tile = document.getElementById(`tile-${msg.identity}`);
@@ -586,7 +622,10 @@ function renderRemoteParticipant(participant) {
   });
   participant.audioTrackPublications.forEach(pub => {
     if (pub.track && pub.isSubscribed) {
-      pub.track.attach();
+      const audioEl = pub.track.attach();
+      if (audioEl && activeSpkDeviceId && typeof audioEl.setSinkId === 'function') {
+        audioEl.setSinkId(activeSpkDeviceId).catch(() => {});
+      }
       const sid = pub.track.sid || pub.trackSid;
       if (sid) remoteAudioTrackSids.set(participant.identity, sid);
     }
@@ -875,8 +914,10 @@ function setViewMode(mode) {
 function closeAllDeviceDropdowns() {
   document.getElementById('mic-dropdown')?.classList.remove('open');
   document.getElementById('cam-dropdown')?.classList.remove('open');
+  document.getElementById('spk-dropdown')?.classList.remove('open');
   document.getElementById('btn-mic-caret')?.classList.remove('open');
   document.getElementById('btn-cam-caret')?.classList.remove('open');
+  document.getElementById('btn-spk-caret')?.classList.remove('open');
 }
 
 async function openDeviceDropdown(kind) {
@@ -909,10 +950,12 @@ async function openDeviceDropdown(kind) {
         closeAllDeviceDropdowns();
         if (kind === 'audioinput') {
           activeMicDeviceId = d.deviceId;
+          try { localStorage.setItem(DEVICE_KEY_MIC, d.deviceId); } catch (_e) {}
           try { await room.switchActiveDevice('audioinput', d.deviceId); } catch (err) {}
           if (isRecording && pcmNode) await restartPcmCapture();
         } else {
           activeCamDeviceId = d.deviceId;
+          try { localStorage.setItem(DEVICE_KEY_CAM, d.deviceId); } catch (_e) {}
           try { await room.switchActiveDevice('videoinput', d.deviceId); } catch (err) {}
         }
       });
@@ -924,6 +967,51 @@ async function openDeviceDropdown(kind) {
 
   dropdown.classList.add('open');
   document.getElementById(caretId)?.classList.add('open');
+}
+
+async function openSpeakerDropdown() {
+  const dropdown = document.getElementById('spk-dropdown');
+  if (!dropdown) return;
+  dropdown.innerHTML = '';
+  const label = document.createElement('div');
+  label.className = 'device-dropdown-label';
+  label.textContent = 'Speaker / Headphones';
+  dropdown.appendChild(label);
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    let idx = 0;
+    devices.filter(d => d.kind === 'audiooutput').forEach(d => {
+      const btn = document.createElement('button');
+      btn.className = 'device-dropdown-item' + (d.deviceId === activeSpkDeviceId ? ' active' : '');
+      const check = document.createElement('span');
+      check.className = 'check';
+      check.textContent = d.deviceId === activeSpkDeviceId ? '✓' : '';
+      btn.appendChild(check);
+      btn.appendChild(document.createTextNode(d.label || `Speaker ${++idx}`));
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        closeAllDeviceDropdowns();
+        updateSpeakerOutput(d.deviceId);
+      });
+      dropdown.appendChild(btn);
+    });
+  } catch (e) {
+    console.warn('Could not enumerate output devices:', e);
+  }
+
+  dropdown.classList.add('open');
+  document.getElementById('btn-spk-caret')?.classList.add('open');
+}
+
+function updateSpeakerOutput(deviceId) {
+  activeSpkDeviceId = deviceId;
+  try { localStorage.setItem(DEVICE_KEY_SPK, deviceId); } catch (_e) {}
+  document.querySelectorAll('audio').forEach(el => {
+    if (typeof el.setSinkId === 'function') {
+      el.setSinkId(deviceId).catch(() => {});
+    }
+  });
 }
 
 function setupDeviceButtons(micDeviceId, camDeviceId) {
@@ -942,9 +1030,29 @@ function setupDeviceButtons(micDeviceId, camDeviceId) {
     closeAllDeviceDropdowns();
     if (!isOpen) await openDeviceDropdown('videoinput');
   });
+
+  // Show speaker dropdown only when setSinkId is supported
+  if (typeof HTMLMediaElement.prototype.setSinkId === 'function') {
+    document.getElementById('spk-btn-group')?.style.setProperty('display', '');
+    document.getElementById('btn-spk')?.addEventListener('click', async e => {
+      e.stopPropagation();
+      const isOpen = document.getElementById('spk-dropdown')?.classList.contains('open');
+      closeAllDeviceDropdowns();
+      if (!isOpen) await openSpeakerDropdown();
+    });
+    document.getElementById('btn-spk-caret')?.addEventListener('click', async e => {
+      e.stopPropagation();
+      const isOpen = document.getElementById('spk-dropdown')?.classList.contains('open');
+      closeAllDeviceDropdowns();
+      if (!isOpen) await openSpeakerDropdown();
+    });
+    // Apply saved speaker preference to any future audio elements
+    if (activeSpkDeviceId) updateSpeakerOutput(activeSpkDeviceId);
+  }
 }
 
 async function restartPcmCapture() {
+  stopLevelMeter();
   pcmNode.port.onmessage = null;
   try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
   if (pcmFrames > 0) flushPcm(false); // upload buffered audio without finalizing
@@ -954,6 +1062,7 @@ async function restartPcmCapture() {
   pcmCapturing = false;
   try {
     await startPcmCapture();
+    startLevelMeter();
   } catch (e) {
     console.warn('Could not restart PCM after mic switch:', e);
     startOpusFallback();
@@ -1131,6 +1240,8 @@ function setupControls() {
     btnPause?.addEventListener('click', pauseRecording);
     btnResume?.addEventListener('click', resumeRecording);
     btnStopRec?.addEventListener('click', stopRecording);
+    btnNewTopic?.addEventListener('click', createMarker);
+    topicInput?.addEventListener('keydown', e => { if (e.key === 'Enter') createMarker(); });
     btnEnd?.addEventListener('click', endSession);
     btnShowShare?.addEventListener('click', () => {
       shareWrap.style.display = shareWrap.style.display === 'none' ? 'flex' : 'none';
@@ -1313,16 +1424,23 @@ async function fetchFiles() {
       files.forEach(f => {
         const row = document.createElement('div');
         row.className = 'files-row';
-        const p = document.createElement('span'); p.className = 'files-participant'; p.textContent = f.participant;
-        const t = document.createElement('span'); t.className = `files-type ${f.type}`; t.textContent = f.type;
-        const s = document.createElement('span'); s.className = 'files-size'; s.textContent = `${f.size_mb} MB`;
-        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓';
-        const children = [p];
+        const children = [];
+        if (f.participant) {
+          const p = document.createElement('span'); p.className = 'files-participant'; p.textContent = f.participant;
+          children.push(p);
+        }
         if (f.take != null) {
           const tk = document.createElement('span'); tk.className = 'files-take'; tk.textContent = `T${f.take}`;
           children.push(tk);
         }
-        children.push(t, s, a);
+        const t = document.createElement('span'); t.className = `files-type ${f.type}`; t.textContent = f.type;
+        children.push(t);
+        if (f.size_mb != null) {
+          const s = document.createElement('span'); s.className = 'files-size'; s.textContent = `${f.size_mb} MB`;
+          children.push(s);
+        }
+        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓';
+        children.push(a);
         row.append(...children);
         filesList.appendChild(row);
       });
@@ -1417,6 +1535,17 @@ async function waitForUploads() {
   try {
     await Promise.all(Object.values(uploadQueues));
     sessionStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
+
+    // Wait for server-side assembly to complete
+    showUploadBanner('assembling');
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const r = await fetch(`/api/session/${SESSION_ID}/assembly-status`);
+        if (r.ok && !(await r.json()).assembling) break;
+      } catch (e) {}
+    }
+
     showUploadBanner('done');
     setTimeout(() => hideUploadBanner(), 8000);
   } catch (e) {
@@ -1436,7 +1565,11 @@ function setRecordingUI(recording, paused = false) {
     btnPause   && (btnPause.style.display    = recording  ? '' : 'none');
     btnResume  && (btnResume.style.display   = isPaused   ? '' : 'none');
     btnStopRec && (btnStopRec.style.display  = !idle      ? '' : 'none');
+    topicGroup && (topicGroup.style.display  = !idle      ? '' : 'none');
   }
+
+  const meterEl = document.getElementById('audio-meter');
+  if (meterEl) meterEl.style.display = recording ? 'flex' : 'none';
 
   if (recording) {
     recIndicator?.classList.add('active');
@@ -1573,6 +1706,7 @@ async function startLocalRecording() {
       recordingEpoch = Date.now().toString(36); // unique prefix per recording run
       chunkIndex = { audio: 0, video: 0, screen: 0 };
       uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+      uploadStats = { queued: 0, completed: 0 };
     }
 
     // Save epoch to sessionStorage so a page reload can resume
@@ -1588,6 +1722,7 @@ async function startLocalRecording() {
     try {
       await startPcmCapture();
       audioFormat = 'pcm';
+      startLevelMeter();
       recLog('startLocalRecording: audio=pcm');
     } catch (e) {
       console.warn('PCM capture unavailable, falling back to Opus:', e);
@@ -1968,6 +2103,7 @@ async function resumeLocalRecording() {
 
 async function stopLocalRecording() {
   micMuted = false;
+  stopLevelMeter();
   recLog('stopLocalRecording: begin');
 
   // For each MediaRecorder, wrap its onstop so we get an explicit signal that
@@ -2058,9 +2194,11 @@ async function stopLocalRecording() {
 function enqueueChunk(blob, trackType, ext, meta = {}) {
   const index = chunkIndex[trackType]++;
   const epoch = recordingEpoch;
-  uploadQueues[trackType] = uploadQueues[trackType].then(() =>
-    uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta)
-  );
+  uploadStats.queued++;
+  refreshUploadBanner();
+  uploadQueues[trackType] = uploadQueues[trackType]
+    .then(() => uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta))
+    .then(() => { uploadStats.completed++; refreshUploadBanner(); });
   return uploadQueues[trackType];
 }
 
@@ -2747,26 +2885,42 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// ── Upload banner (Feature 7) ─────────────────────────────────────────────────
+// ── Upload banner ─────────────────────────────────────────────────────────────
 
-function showUploadBanner(state) {
-  uploadPending = (state === 'uploading');
-  const banner = document.getElementById('upload-banner');
-  if (!banner) return;
-  banner.classList.remove('hidden', 'uploading', 'done', 'error');
-  banner.classList.add(state);
+function _buildUploadBanner(banner, state) {
   banner.innerHTML = '';
+  const main = document.createElement('div');
+  main.className = 'upload-banner-main';
 
-  const label = document.createElement('span');
+  const lbl = document.createElement('span');
+  lbl.className = 'upload-banner-label';
+
   if (state === 'uploading') {
-    label.textContent = '⬆ Uploading recordings…';
+    const n = uploadStats.completed, t = uploadStats.queued;
+    lbl.textContent = t > 0 ? `Uploading ${n}/${t} chunks` : 'Uploading recordings…';
+    main.appendChild(lbl);
+    const track = document.createElement('div');
+    track.className = 'upload-progress-track';
+    const fill = document.createElement('div');
+    fill.className = 'upload-progress-fill';
+    fill.style.width = (t > 0 ? Math.round(n / t * 100) : 0) + '%';
+    track.appendChild(fill);
+    main.appendChild(track);
+  } else if (state === 'assembling') {
+    lbl.textContent = 'Assembling recordings…';
+    main.appendChild(lbl);
+    const spin = document.createElement('span');
+    spin.className = 'upload-spinner';
+    main.appendChild(spin);
   } else if (state === 'done') {
-    label.textContent = '✓ Recordings uploaded';
+    lbl.textContent = '✓ Recordings ready';
+    main.appendChild(lbl);
   } else {
-    label.textContent = '⚠ Upload may be incomplete';
+    lbl.textContent = '⚠ Upload may be incomplete';
+    main.appendChild(lbl);
   }
-  banner.appendChild(label);
 
+  banner.appendChild(main);
   const closeBtn = document.createElement('button');
   closeBtn.className = 'upload-banner-close';
   closeBtn.textContent = '×';
@@ -2775,12 +2929,111 @@ function showUploadBanner(state) {
   banner.appendChild(closeBtn);
 }
 
+function showUploadBanner(state) {
+  uploadPending = (state === 'uploading');
+  const banner = document.getElementById('upload-banner');
+  if (!banner) return;
+  banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling');
+  banner.classList.add(state);
+  _buildUploadBanner(banner, state);
+}
+
+function refreshUploadBanner() {
+  const banner = document.getElementById('upload-banner');
+  if (!banner || banner.classList.contains('hidden') || !banner.classList.contains('uploading')) return;
+  const fill = banner.querySelector('.upload-progress-fill');
+  const lbl  = banner.querySelector('.upload-banner-label');
+  const { completed: n, queued: t } = uploadStats;
+  if (fill && t > 0) fill.style.width = Math.round(n / t * 100) + '%';
+  if (lbl)  lbl.textContent = t > 0 ? `Uploading ${n}/${t} chunks` : 'Uploading recordings…';
+}
+
 function hideUploadBanner() {
   uploadPending = false;
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
   banner.classList.add('hidden');
-  banner.classList.remove('uploading', 'done', 'error');
+  banner.classList.remove('uploading', 'done', 'error', 'assembling');
+}
+
+// ── Audio level meter ────────────────────────────────────────────────────────
+
+function startLevelMeter() {
+  if (!pcmCtx || !pcmSource || levelAnalyser) return;
+  try {
+    levelAnalyser = pcmCtx.createAnalyser();
+    levelAnalyser.fftSize = 1024;
+    levelAnalyser.smoothingTimeConstant = 0.85;
+    pcmSource.connect(levelAnalyser);
+    levelBuffer = new Float32Array(levelAnalyser.fftSize);
+
+    function tick() {
+      if (!levelAnalyser || !levelBuffer) return;
+      levelAnalyser.getFloatTimeDomainData(levelBuffer);
+      let peak = 0;
+      for (const s of levelBuffer) {
+        const v = Math.abs(s);
+        if (v > peak) peak = v;
+      }
+      const fill  = document.getElementById('audio-meter-fill');
+      const badge = document.getElementById('clip-badge');
+      if (fill) {
+        const pct = Math.min(100, peak * 150); // scale for visibility
+        fill.style.width = pct + '%';
+        fill.classList.toggle('warn', pct > 85);
+      }
+      if (badge && peak > 0.95) {
+        badge.classList.add('active');
+        clearTimeout(badge._clipTimer);
+        badge._clipTimer = setTimeout(() => badge.classList.remove('active'), 1500);
+      }
+      levelRafId = requestAnimationFrame(tick);
+    }
+    levelRafId = requestAnimationFrame(tick);
+  } catch (e) {
+    console.warn('Level meter start failed:', e);
+  }
+}
+
+function stopLevelMeter() {
+  if (levelRafId) { cancelAnimationFrame(levelRafId); levelRafId = null; }
+  if (levelAnalyser) {
+    try { levelAnalyser.disconnect(); } catch (e) {}
+    levelAnalyser = null;
+  }
+  levelBuffer = null;
+  const fill = document.getElementById('audio-meter-fill');
+  if (fill) fill.style.width = '0%';
+}
+
+// ── Topic markers ─────────────────────────────────────────────────────────────
+
+async function createMarker() {
+  const label = (topicInput?.value || '').trim();
+  const elapsedMs = recordingStartTime
+    ? (Date.now() - recordingStartTime + cumulativeElapsedMs)
+    : cumulativeElapsedMs;
+
+  try {
+    const r = await fetch(`/api/session/${SESSION_ID}/marker`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host_token: HOST_TOKEN,
+        label,
+        recording_time_s: Math.floor(elapsedMs / 1000),
+      }),
+    });
+    if (r.ok) {
+      if (topicInput) topicInput.value = '';
+      showToast(label ? `Topic marked: "${label}"` : 'Topic marker saved');
+      await broadcastData({ type: 'marker', label, recording_time_s: Math.floor(elapsedMs / 1000) });
+    } else {
+      showToast('Failed to save marker');
+    }
+  } catch (e) {
+    showToast('Failed to save marker');
+  }
 }
 
 // ── Latency measurement ──────────────────────────────────────────────────────

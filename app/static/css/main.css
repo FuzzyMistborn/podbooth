@@ -767,6 +767,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .files-type.audio  { background: rgba(34,197,94,0.12);  color: var(--green); }
 .files-type.video  { background: rgba(232,93,0,0.12);   color: var(--accent); }
 .files-type.screen { background: rgba(99,102,241,0.12); color: #818cf8; }
+.files-type.marker { background: rgba(234,179,8,0.12);  color: var(--yellow); }
 .files-size { font-size: 11px; color: var(--text-2); white-space: nowrap; flex-shrink: 0; }
 .files-row a { font-size: 13px; white-space: nowrap; flex-shrink: 0; }
 .files-empty { font-size: 13px; color: var(--text-2); font-style: italic; }
@@ -1056,6 +1057,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .file-type.audio  { background: rgba(34,197,94,0.1);  color: var(--green); }
 .file-type.video  { background: rgba(232,93,0,0.1);   color: var(--accent); }
 .file-type.screen { background: rgba(99,102,241,0.1); color: #818cf8; }
+.file-type.marker { background: rgba(234,179,8,0.1);  color: var(--yellow); }
 .file-take { color: var(--text-3); font-size: 11px; background: rgba(255,255,255,0.06); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .file-size { color: var(--text-3); font-size: 12px; min-width: 60px; text-align: right; }
 .no-files { color: var(--text-2); font-size: 13px; font-style: italic; padding: 4px 0; }
@@ -2018,7 +2020,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .mod-btn-kick { border-color: rgba(239, 68, 68, 0.5); }
 .mod-btn-kick:hover { background: rgba(239, 68, 68, 0.25); border-color: var(--red); }
 
-/* ── Upload banner (Feature 7) ───────────────────────────────── */
+/* ── Upload banner ───────────────────────────────────────────── */
 .upload-banner {
   position: fixed;
   bottom: 80px;
@@ -2027,7 +2029,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 14px;
+  padding: 10px 14px;
   border-radius: var(--radius);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -2036,7 +2038,8 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  min-width: 220px;
 }
 .upload-banner:not(.hidden) {
   opacity: 1;
@@ -2053,6 +2056,11 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   border: 1px solid var(--accent);
   color: var(--accent);
 }
+.upload-banner.assembling {
+  background: var(--bg-2);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+}
 .upload-banner.done {
   background: var(--bg-2);
   border: 1px solid var(--green);
@@ -2063,6 +2071,41 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   border: 1px solid var(--yellow);
   color: var(--yellow);
 }
+.upload-banner-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.upload-banner-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.upload-progress-track {
+  height: 4px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.upload-progress-fill {
+  height: 100%;
+  background: currentColor;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+.upload-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 .upload-banner-close {
   background: none;
   border: none;
@@ -2073,8 +2116,79 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   padding: 0 2px;
   opacity: 0.6;
   flex-shrink: 0;
+  align-self: flex-start;
 }
 .upload-banner-close:hover { opacity: 1; }
+
+/* ── Audio level meter ───────────────────────────────────────── */
+.audio-meter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.audio-meter-track {
+  width: 72px;
+  height: 6px;
+  background: var(--bg-3);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.audio-meter-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--green);
+  border-radius: 3px;
+  transition: width 0.05s;
+}
+.audio-meter-fill.warn {
+  background: var(--yellow);
+}
+.clip-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  border: 1px solid var(--text-3);
+  border-radius: 3px;
+  padding: 1px 4px;
+  transition: color 0.1s, border-color 0.1s;
+  flex-shrink: 0;
+}
+.clip-badge.active {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+/* ── New topic group ─────────────────────────────────────────── */
+.topic-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.topic-group input {
+  width: 130px;
+  height: 44px;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: var(--radius);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.topic-group input:focus { border-color: var(--accent); }
+.topic-btn {
+  width: auto;
+  padding: 0 12px;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+  border-color: var(--border);
+  flex-shrink: 0;
+}
+.topic-btn:hover { border-color: var(--text-2); color: var(--text); }
 
 /* ── Stats panel ─────────────────────────────────────────────── */
 .stats-panel {
@@ -2227,6 +2341,8 @@ body.is-fullscreen.controls-peek .controls-bar {
   .btn-share, .btn-danger { padding: 6px 9px; font-size: 11px; }
   .record-btn, .pause-btn, .resume-btn, .stop-btn { padding: 0 8px; font-size: 10px; gap: 4px; }
   #record-label { display: none; }
+  .topic-group input { width: 80px; }
+  .audio-meter { display: none; }
 
   /* Video area */
   .video-grid { padding: 8px; gap: 5px; }

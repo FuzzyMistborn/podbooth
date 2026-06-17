@@ -112,11 +112,13 @@
       <div class="file-list" id="files-{{ session.id }}">
         {% for f in files %}
         <div class="file-row">
-          <span class="file-participant">{{ f.participant }}</span>
+          {% if f.participant %}<span class="file-participant">{{ f.participant }}</span>{% endif %}
           {% if f.take %}<span class="file-take">Take {{ f.take }}</span>{% endif %}
           <span class="file-type {{ f.type }}">{{ f.type }}</span>
-          <span class="file-size">{{ f.size_mb }} MB</span>
+          {% if f.size_mb is not none %}<span class="file-size">{{ f.size_mb }} MB</span>{% endif %}
+          {% if f.type != 'marker' %}
           <button class="btn-play" onclick="openPreview('/download/{{ f.path }}', '{{ f.type }}', '{{ f.participant }}', '{{ f.filename }}')">▶ Play</button>
+          {% endif %}
           <a class="btn-download" href="/download/{{ f.path }}">↓ Download</a>
         </div>
         {% endfor %}

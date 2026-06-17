@@ -3,6 +3,10 @@
  * Forwards host_token through to the studio if present.
  */
 
+const DEVICE_KEY_MIC = 'podbooth:mic-device';
+const DEVICE_KEY_CAM = 'podbooth:cam-device';
+const DEVICE_KEY_SPK = 'podbooth:spk-device';
+
 let stream = null;
 let audioContext = null;
 let analyser = null;
@@ -12,6 +16,8 @@ const preview     = document.getElementById('preview');
 const overlay     = document.getElementById('preview-overlay');
 const micSelect   = document.getElementById('mic-select');
 const camSelect   = document.getElementById('cam-select');
+const spkSelect   = document.getElementById('spk-select');
+const spkGroup    = document.getElementById('spk-select-group');
 const levelFill   = document.getElementById('level-fill');
 const nameInput   = document.getElementById('participant-name');
 const joinBtn     = document.getElementById('join-btn');
@@ -59,6 +65,43 @@ async function populateDevices() {
     opt.value = d.deviceId;
     opt.textContent = d.label || `Camera ${camSelect.options.length + 1}`;
     camSelect.appendChild(opt);
+  });
+
+  // Restore saved selections
+  try {
+    const savedMic = localStorage.getItem(DEVICE_KEY_MIC);
+    const savedCam = localStorage.getItem(DEVICE_KEY_CAM);
+    if (savedMic && [...micSelect.options].some(o => o.value === savedMic)) micSelect.value = savedMic;
+    if (savedCam && [...camSelect.options].some(o => o.value === savedCam)) camSelect.value = savedCam;
+  } catch (e) {}
+
+  // Speaker output (Chrome / Edge only — setSinkId not universally supported)
+  if (typeof HTMLMediaElement.prototype.setSinkId === 'function' && spkGroup && spkSelect) {
+    spkSelect.innerHTML = '';
+    devices.filter(d => d.kind === 'audiooutput').forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Speaker ${spkSelect.options.length + 1}`;
+      spkSelect.appendChild(opt);
+    });
+    if (spkSelect.options.length > 0) {
+      spkGroup.style.display = '';
+      try {
+        const savedSpk = localStorage.getItem(DEVICE_KEY_SPK);
+        if (savedSpk && [...spkSelect.options].some(o => o.value === savedSpk)) spkSelect.value = savedSpk;
+      } catch (e) {}
+      spkSelect.addEventListener('change', () => {
+        try { localStorage.setItem(DEVICE_KEY_SPK, spkSelect.value); } catch (e) {}
+      });
+    }
+  }
+
+  // Save on change
+  micSelect.addEventListener('change', () => {
+    try { localStorage.setItem(DEVICE_KEY_MIC, micSelect.value); } catch (e) {}
+  });
+  camSelect.addEventListener('change', () => {
+    try { localStorage.setItem(DEVICE_KEY_CAM, camSelect.value); } catch (e) {}
   });
 }
 

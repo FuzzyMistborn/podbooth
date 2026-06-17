@@ -225,6 +225,18 @@ async def get_recordings(session_id: str):
     session_path = recordings_path / session.dir_name
     files = []
     if session_path.is_dir():
+        # Topic marker files live in the session root
+        for fpath in sorted(session_path.glob("*.txt")):
+            if fpath.is_file():
+                files.append({
+                    "participant": "",
+                    "type": "marker",
+                    "take": None,
+                    "filename": fpath.name,
+                    "path": str(fpath.relative_to(recordings_path)),
+                    "size_mb": None,
+                })
+
         for pdir in sorted(session_path.iterdir()):
             if not pdir.is_dir():
                 continue
@@ -461,6 +473,46 @@ async def mute_participant(session_id: str, p_identity: str, request: Request):
         logging.error("LiveKit mute_published_track failed for %s (track %s): %s", p_identity, track_sid, e)
         raise HTTPException(status_code=500, detail=f"LiveKit error: {e}")
     return JSONResponse({"ok": True})
+
+
+# ── Topic markers ────────────────────────────────────────────────────────────
+
+@router.post("/api/session/{session_id}/marker")
+async def create_marker(session_id: str, request: Request):
+    data = await request.json()
+    label = str(data.get("label", "")).strip()[:100]
+    recording_time_s = data.get("recording_time_s")
+
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    recordings_path = Path(settings.recordings_dir)
+    session_path = recordings_path / session.dir_name
+    session_path.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.utcnow()
+    ts_str = ts.strftime("%Y-%m-%dT%H-%M-%S")
+    if label:
+        safe = "".join(c if c.isalnum() or c in "-_. " else "_" for c in label).strip()
+        safe = safe.replace(" ", "_")[:40]
+        filename = f"{ts_str}_{safe}.txt"
+    else:
+        filename = f"{ts_str}_marker.txt"
+
+    lines = [f"Wall clock: {ts.isoformat()}Z"]
+    if label:
+        lines.append(f"Label: {label}")
+    if recording_time_s is not None:
+        try:
+            t = int(recording_time_s)
+            m, s = divmod(t, 60)
+            lines.append(f"Recording time: {m}:{s:02d}")
+        except (TypeError, ValueError):
+            pass
+
+    (session_path / filename).write_text("\n".join(lines) + "\n")
+    return JSONResponse({"ok": True, "filename": filename})
 
 
 # ── Assembly status ──────────────────────────────────────────────────────────

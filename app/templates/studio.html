@@ -148,6 +148,15 @@
         </button>
         <div class="device-dropdown" id="cam-dropdown"></div>
       </div>
+      <div class="device-btn-group" id="spk-btn-group" style="display:none">
+        <button class="ctrl-btn" id="btn-spk" title="Speaker output">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+        </button>
+        <button class="device-caret" id="btn-spk-caret" title="Select speaker / headphones">
+          <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="0,0 5,6 10,0"/></svg>
+        </button>
+        <div class="device-dropdown" id="spk-dropdown"></div>
+      </div>
       <button class="ctrl-btn" id="btn-fullscreen" title="Fullscreen">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
       </button>
@@ -196,6 +205,13 @@
         <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16"/></svg>
         <span>STOP</span>
       </button>
+      <div class="topic-group" id="topic-group" style="display:none">
+        <input type="text" id="topic-input" placeholder="Topic name…" maxlength="80" title="Optional label for this topic marker" />
+        <button class="ctrl-btn topic-btn" id="btn-new-topic" title="Save a topic marker with current timestamp">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          <span>Mark</span>
+        </button>
+      </div>
       {% endif %}
     </div>
 
@@ -209,6 +225,12 @@
       <div class="rec-indicator" id="rec-indicator">
         <span class="rec-dot"></span>
         <span id="rec-time">00:00</span>
+      </div>
+      <div class="audio-meter" id="audio-meter" style="display:none" title="Input level">
+        <div class="audio-meter-track">
+          <div class="audio-meter-fill" id="audio-meter-fill"></div>
+        </div>
+        <span class="clip-badge" id="clip-badge">CLIP</span>
       </div>
 
       <div class="share-wrap" id="share-wrap" style="display:none">
