@@ -42,23 +42,6 @@ async function startRecording() {
   await startLocalRecording();
 }
 
-async function pauseRecording() {
-  if (btnPause) btnPause.disabled = true;
-  await _postRecordingAction('pause');
-  await broadcastData({ type: 'recording_paused' });
-  setRecordingUI(false, true);
-  pauseLocalRecording();
-  if (btnPause) btnPause.disabled = false;
-}
-
-async function resumeRecording() {
-  if (btnResume) btnResume.disabled = true;
-  await _postRecordingAction('resume');
-  await broadcastData({ type: 'recording_resumed' });
-  setRecordingUI(true);
-  await resumeLocalRecording();
-  if (btnResume) btnResume.disabled = false;
-}
 
 async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = true;
@@ -70,13 +53,11 @@ async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = false;
 }
 
-function setRecordingUI(recording, paused = false) {
+function setRecordingUI(recording) {
   isRecording = recording;
-  isPaused = !recording && paused;
 
-  const idle = !recording && !isPaused;
-  topicGroup && (topicGroup.style.display = !idle ? '' : 'none');
-  if (!idle) {
+  topicGroup && (topicGroup.style.display = recording ? '' : 'none');
+  if (!recording) {
     const popover = document.getElementById('topic-popover');
     if (popover?.classList.contains('open')) {
       popover.classList.remove('open');
@@ -84,31 +65,18 @@ function setRecordingUI(recording, paused = false) {
     }
   }
   if (IS_HOST) {
-    btnRecord  && (btnRecord.style.display   = idle       ? '' : 'none');
-    btnPause   && (btnPause.style.display    = recording  ? '' : 'none');
-    btnResume  && (btnResume.style.display   = isPaused   ? '' : 'none');
-    btnStopRec && (btnStopRec.style.display  = !idle      ? '' : 'none');
+    btnRecord  && (btnRecord.style.display   = recording ? 'none' : '');
+    btnStopRec && (btnStopRec.style.display  = recording ? '' : 'none');
   }
 
   if (recording) {
     recIndicator?.classList.add('active');
-    recIndicator?.classList.remove('paused');
     clearInterval(recTimerInterval);
     recordingStartTime = Date.now();
     recTimerInterval = setInterval(updateRecTimer, 1000);
     startRecStatus();
-  } else if (isPaused) {
-    recIndicator?.classList.remove('active');
-    recIndicator?.classList.add('paused');
-    if (recordingStartTime) {
-      cumulativeElapsedMs += Date.now() - recordingStartTime;
-      recordingStartTime = null;
-    }
-    clearInterval(recTimerInterval);
-    recTimerInterval = null;
-    // leave recTime showing the elapsed value so the host sees total time so far
   } else {
-    recIndicator?.classList.remove('active', 'paused');
+    recIndicator?.classList.remove('active');
     cumulativeElapsedMs = 0;
     clearInterval(recTimerInterval);
     if (recTime) recTime.textContent = '00:00';
@@ -608,18 +576,6 @@ function startOpusFallback() {
   audioRecorder.start(5000);
 }
 
-function pauseLocalRecording() {
-  // Recorders keep running so stop() reliably fires onstop → finalize.
-  // The pause period will appear in the output file; hosts can trim it in editing.
-}
-
-async function resumeLocalRecording() {
-  if (!hasActiveRecorders()) {
-    // Page was reloaded during a pause — start a fresh take
-    await startLocalRecording();
-  }
-  // Otherwise recorders were never stopped, nothing to do
-}
 
 async function stopLocalRecording() {
   micMuted = false;

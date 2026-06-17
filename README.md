@@ -159,7 +159,6 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 4. Guests open the link, check their devices (mic/camera selections are saved for future sessions), enter their name, and join
 5. Host clicks **REC** to start — all participants record locally and upload in real time; a live input level meter and clip indicator appear on each tile during recording
 6. While recording, the host can:
-   - Click **PAUSE** to suspend recording (guests stop capturing; click **RESUME** to start a new take)
    - Click **STOP** to end recording entirely
    - Click **PAUSE** on a participant tile to force-mute them, or **KICK** to remove them
    - Click the bell icon to send a text alert to all participants
@@ -180,18 +179,19 @@ Per participant, per session:
 recordings/
   2025-01-15-Episode 42/
     Alice/
-      audio_lz4abc.wav    ← 48kHz 24-bit PCM, lossless (one file per take)
-      video_lz4abc.mp4    ← H.264, with mic audio mixed in
-      audio_lz4def.wav    ← second take (after a pause/resume)
-      video_lz4def.mp4
+      Alice_1.wav           ← 48kHz 24-bit PCM, lossless
+      Alice_1_video.mp4     ← H.264 video + AAC 320kbps audio
+      Alice_1_screen.mp4    ← optional: screen share (H.264, no audio)
+      Alice_2.wav           ← second take (new recording run after STOP → REC)
+      Alice_2_video.mp4
     Bob/
-      audio_lz4abc.wav
-      video_lz4abc.mp4
-    video_grid.mp4        ← optional: all participants composited side-by-side
-    topics.txt            ← optional: timestamped topic markers stamped by the host
+      Bob_1.wav
+      Bob_1_video.mp4
+    video_grid.mp4          ← optional: all participants composited side-by-side
+    markers.txt             ← optional: timestamped topic markers stamped by the host
 ```
 
-Each recording take gets a unique epoch tag in the filename. A single uninterrupted session produces one `audio_<epoch>.wav` and `video_<epoch>.mp4` per participant; pause/resume produces additional pairs. `video.mp4` has the participant's mic audio mixed in so it can be used directly in an editor without needing to manually sync tracks.
+Files are named `{slug}_{take}.wav` for audio and `{slug}_{take}_video.mp4` for video, where slug is the participant's display name sanitized for use in filenames. Each press of **REC** after a **STOP** produces a new take number. **Pause/resume does not create a new take** — recording continues through the pause so the pause period appears in the file for editors to trim. `{slug}_{take}_video.mp4` has the participant's mic audio (AAC 320kbps) mixed in so it can be used directly in an editor without needing to manually sync tracks.
 
 The **grid export** (available from the dashboard) composites all participants into a single `video_grid.mp4` with an xstack layout. If a participant has multiple takes, they are spliced together automatically before compositing.
 
@@ -208,10 +208,10 @@ The **grid export** (available from the dashboard) composites all participants i
 - **Resumable uploads**: Each recording run gets a unique epoch tag stored in `sessionStorage`. If the page reloads mid-session, the client queries the server for the last received chunk and resumes from there rather than re-uploading. The upload banner tracks per-chunk progress and transitions to an "assembling" state once all chunks have landed.
 - **Device persistence**: Mic and camera selections are saved to `localStorage` on the pre-join page and restored automatically on the next visit, so participants don't have to re-select their devices each session.
 - **Input level meter**: During recording, each participant tile displays a live audio level bar sourced from the same AudioWorklet stream used for capture. A clip indicator lights when the signal saturates.
-- **Topic markers**: The host can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `topics.txt` file in the session folder and shown in the Files panel for immediate download.
+- **Topic markers**: The host can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `markers.txt` file in the session folder and shown in the Files panel for immediate download.
 - **Nerd stats panel**: A collapsible panel exposes live WebRTC statistics (inbound/outbound bitrate, packet loss, jitter, round-trip time) polled from `RTCPeerConnection.getStats()` every second.
 - **Host moderation**: Force-mute and kick are issued via the LiveKit server API. Force-unmute is sent as a `force_unmute` data-channel message so the guest's browser re-enables its mic track client-side.
-- **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes from pause/resume, they are stream-copied (no re-encode) into a single temp file before compositing.
+- **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes, they are stream-copied (no re-encode) into a single temp file before compositing.
 - **Persistence**: Sessions survive container restarts via `.sessions.json`. Optional `RETENTION_DAYS` purges old sessions and their recordings on startup.
 
 ---
@@ -251,4 +251,3 @@ The prebuilt image at `ghcr.io/fuzzymistborn/podbooth` tracks the `main` branch.
 ## Roadmap
 
 - Automatic transcription via WhisperX
-- Preview/replay in dashboard

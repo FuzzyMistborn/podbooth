@@ -23,7 +23,6 @@ let displayName = '';
 let identity = '';
 
 let isRecording = false;
-let isPaused = false;
 let recordingStartTime = null;
 let cumulativeElapsedMs = 0;
 let recTimerInterval = null;
@@ -130,8 +129,6 @@ const topicGroup   = document.getElementById('topic-group');
 const topicInput   = document.getElementById('topic-input');
 const btnRaiseHand = document.getElementById('btn-raise-hand');
 const btnRecord    = document.getElementById('btn-record');
-const btnPause     = document.getElementById('btn-pause');
-const btnResume    = document.getElementById('btn-resume');
 const btnStopRec   = document.getElementById('btn-stop-rec');
 const recIndicator = document.getElementById('rec-indicator');
 const recTime      = document.getElementById('rec-time');
@@ -296,9 +293,6 @@ async function init() {
       setRecordingUI(true);
       await startLocalRecording();
       showToast('Recording in progress — your track is being captured');
-    } else if (s.paused && !isPaused) {
-      setRecordingUI(false, true);
-      showToast('Recording is paused');
     }
   } catch (e) {}
 }
@@ -314,8 +308,6 @@ function attachRoomEvents() {
     }
     if (IS_HOST && isRecording) {
       broadcastData({ type: 'recording_started' });
-    } else if (IS_HOST && isPaused) {
-      broadcastData({ type: 'recording_paused' });
     }
     if (IS_HOST && timerState.active) {
       broadcastTimerState();
@@ -333,7 +325,7 @@ function attachRoomEvents() {
 
     // Spec: if the host drops, recording stops. Guests detect this via
     // the is_host flag in the participant's token metadata.
-    if (!IS_HOST && (isRecording || isPaused) && participantIsHost(p)) {
+    if (!IS_HOST && isRecording && participantIsHost(p)) {
       showToast('Host disconnected — recording stopped');
       await stopLocalRecording();
       setRecordingUI(false);
@@ -444,14 +436,7 @@ function attachRoomEvents() {
         });
       }
     }
-    if (msg.type === 'recording_paused' && !IS_HOST) {
-      setRecordingUI(false, true);
-      pauseLocalRecording();
-    }
-    if (msg.type === 'recording_resumed' && !IS_HOST && isPaused) {
-      setRecordingUI(true);
-      resumeLocalRecording();
-    }
+
     if (msg.type === 'recording_stopped' && !IS_HOST) {
       await stopLocalRecording();
       setRecordingUI(false);
@@ -561,14 +546,7 @@ function pollSessionStatus() {
           if (!hasActiveRecorders() && !recordingStarting) {
             await startLocalRecording();
           }
-        } else if (data.paused) {
-          if (isRecording) {
-            setRecordingUI(false, true);
-            pauseLocalRecording();
-          } else if (!isPaused) {
-            setRecordingUI(false, true);
-          }
-        } else if (isRecording || isPaused) {
+        } else if (isRecording) {
           await stopLocalRecording();
           setRecordingUI(false);
           await waitForUploads();
@@ -597,7 +575,7 @@ function showToast(msg, duration = 3000) {
 }
 
 function onBeforeUnload(e) {
-  if (isRecording || isPaused) {
+  if (isRecording) {
     stopLocalRecording();
     e.preventDefault();
     e.returnValue = '';

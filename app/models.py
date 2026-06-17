@@ -25,7 +25,6 @@ class Session:
     created_at: datetime
     dir_name: str            # filesystem directory for this session's recordings
     recording: bool = False
-    paused: bool = False
     ended: bool = False
     participants: dict = field(default_factory=dict)   # display name -> joined_at iso
     pending_guests: dict = field(default_factory=dict) # identity -> {display_name, requested_at}
@@ -76,10 +75,9 @@ def load():
             d.setdefault("pending_guests", {})
             d.setdefault("admitted_guests", {})
             d.setdefault("denied_guests", {})
+            d.pop("paused", None)  # removed field; old sessions.json may still have it
             session = Session(**d)
-            # Anything that was live when we went down is no longer live
             session.recording = False
-            session.paused = False
             _sessions[session.id] = session
     except Exception as e:
         logger.error("Failed to load sessions: %s", e)
@@ -129,7 +127,6 @@ def end_session(session_id: str):
         if session:
             session.ended = True
             session.recording = False
-            session.paused = False
             _save()
 
 

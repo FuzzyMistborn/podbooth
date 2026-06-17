@@ -637,8 +637,6 @@ function setupControls() {
 
   if (IS_HOST) {
     btnRecord?.addEventListener('click', startRecording);
-    btnPause?.addEventListener('click', pauseRecording);
-    btnResume?.addEventListener('click', resumeRecording);
     btnStopRec?.addEventListener('click', stopRecording);
     btnEnd?.addEventListener('click', endSession);
     btnShowShare?.addEventListener('click', () => {
@@ -676,13 +674,13 @@ function showAlertBanner(text) {
 // ── Session end ──────────────────────────────────────────────────────────────
 
 async function leaveSession() {
-  const busy = uploadPending || isRecording || isPaused;
+  const busy = uploadPending || isRecording;
   const msg = busy
     ? 'Recordings are still uploading — leaving now may lose data.\n\nLeave anyway?'
     : 'Leave this session?';
   if (!confirm(msg)) return;
 
-  if (isRecording || isPaused) {
+  if (isRecording) {
     await stopLocalRecording();
     setRecordingUI(false);
   }
@@ -697,13 +695,13 @@ async function leaveSession() {
 }
 
 async function endSession() {
-  const busy = uploadPending || isRecording || isPaused;
+  const busy = uploadPending || isRecording;
   const msg = busy
     ? 'End this session for everyone? Recordings will finish uploading before you are redirected.'
     : 'End this session for everyone?';
   if (!confirm(msg)) return;
 
-  if (isRecording || isPaused) {
+  if (isRecording) {
     await stopLocalRecording();
     setRecordingUI(false);
   }
@@ -728,7 +726,7 @@ async function endSession() {
 }
 
 async function handleSessionEnded() {
-  if (isRecording || isPaused) {
+  if (isRecording) {
     await stopLocalRecording();
     setRecordingUI(false);
   }
