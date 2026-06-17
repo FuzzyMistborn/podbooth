@@ -194,6 +194,24 @@ async def delete_session_route(session_id: str, request: Request):
     return JSONResponse({"deleted": True})
 
 
+def _parse_take(stem: str, ftype: str) -> int | None:
+    """Extract take number from a slug filename, e.g. Alice_1 → 1, Alice_1_video → 1."""
+    try:
+        base = stem
+        if ftype in ("video", "screen"):
+            suffix = f"_{ftype}"
+            if stem.endswith(suffix):
+                base = stem[: -len(suffix)]
+            else:
+                return None
+        parts = base.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
 @router.get("/api/session/{session_id}/recordings")
 async def get_recordings(session_id: str):
     session = get_session(session_id)
@@ -225,6 +243,7 @@ async def get_recordings(session_id: str):
                     entry = {
                         "participant": pdir.name,
                         "type": ftype,
+                        "take": _parse_take(fpath.stem, ftype),
                         "filename": fpath.name,
                         "path": str(fpath.relative_to(recordings_path)),
                         "size_mb": round(fpath.stat().st_size / (1024 * 1024), 1),

@@ -1274,10 +1274,16 @@ async function fetchFiles() {
         const row = document.createElement('div');
         row.className = 'files-row';
         const p = document.createElement('span'); p.className = 'files-participant'; p.textContent = f.participant;
-        const t = document.createElement('span'); t.className = 'files-type'; t.textContent = f.type;
+        const t = document.createElement('span'); t.className = `files-type ${f.type}`; t.textContent = f.type;
         const s = document.createElement('span'); s.className = 'files-size'; s.textContent = `${f.size_mb} MB`;
-        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓ Download';
-        row.append(p, t, s, a);
+        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓';
+        const children = [p];
+        if (f.take != null) {
+          const tk = document.createElement('span'); tk.className = 'files-take'; tk.textContent = `T${f.take}`;
+          children.push(tk);
+        }
+        children.push(t, s, a);
+        row.append(...children);
         filesList.appendChild(row);
       });
       if (assembling) {
@@ -2094,7 +2100,11 @@ function showAlertBanner(text) {
 }
 
 async function leaveSession() {
-  if (!confirm('Leave this session?')) return;
+  const busy = uploadPending || isRecording || isPaused;
+  const msg = busy
+    ? 'Recordings are still uploading — leaving now may lose data.\n\nLeave anyway?'
+    : 'Leave this session?';
+  if (!confirm(msg)) return;
 
   if (isRecording || isPaused) {
     await stopLocalRecording();
@@ -2103,13 +2113,19 @@ async function leaveSession() {
 
   showUploadBanner('uploading');
   await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+  // Clear flag so onBeforeUnload doesn't fire a second confirmation on navigation
+  uploadPending = false;
 
   try { await room?.disconnect(); } catch (e) {}
   window.location.href = '/';
 }
 
 async function endSession() {
-  if (!confirm('End this session for everyone?')) return;
+  const busy = uploadPending || isRecording || isPaused;
+  const msg = busy
+    ? 'End this session for everyone? Recordings will finish uploading before you are redirected.'
+    : 'End this session for everyone?';
+  if (!confirm(msg)) return;
 
   if (isRecording || isPaused) {
     await stopLocalRecording();
@@ -2126,8 +2142,10 @@ async function endSession() {
     });
   } catch (e) { console.warn('End session API failed:', e); }
 
-  showToast('Ending session…');
+  showUploadBanner('uploading');
   await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+  // Clear flag so onBeforeUnload doesn't fire a second confirmation on navigation
+  uploadPending = false;
 
   try { await room?.disconnect(); } catch (e) {}
   window.location.href = '/dashboard';
