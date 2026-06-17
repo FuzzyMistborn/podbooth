@@ -17,6 +17,7 @@ How assembly works:
 """
 
 import asyncio
+import json
 import logging
 import re
 from pathlib import Path
@@ -47,6 +48,7 @@ _assembly_in_progress: set[tuple[str, str, str]] = set()
 _epoch_take_map: dict[tuple[str, str], tuple[str, int]] = {}
 _dir_take_counter: dict[tuple[str, str], int] = {}  # (dir, slug) → last assigned take
 _take_lock = asyncio.Lock()
+_metadata_lock = asyncio.Lock()
 
 # Epoch is client-supplied and ends up in filenames and glob patterns, so it
 # must never contain path separators or glob metacharacters.
@@ -123,6 +125,46 @@ def _final_name(track_type: str, slug: str, take: int, ext: str) -> str:
 
 def _safe_name(value: str) -> str:
     return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
+
+
+def _decode_epoch_ms(epoch: str) -> int | None:
+    """Decode a base-36 JS Date.now() epoch string to milliseconds."""
+    try:
+        return int(epoch, 36)
+    except Exception:
+        return None
+
+
+async def _save_run_metadata(
+    part_dir: Path,
+    epoch_ms: int,
+    nametake: tuple[str, int],
+    track_type: str,
+    filename: str,
+):
+    """Append/update recording start-time metadata in the session directory."""
+    session_dir = part_dir.parent
+    metadata_path = session_dir / "recording_metadata.json"
+    slug, take = nametake
+    participant = part_dir.name
+
+    async with _metadata_lock:
+        data: dict = {}
+        if metadata_path.exists():
+            try:
+                data = json.loads(metadata_path.read_text())
+            except Exception:
+                data = {}
+
+        runs: list = data.setdefault("runs", [])
+        run = next((r for r in runs if r["slug"] == slug and r["take"] == take), None)
+        if run is None:
+            run = {"participant": participant, "slug": slug, "take": take,
+                   "start_ms": epoch_ms, "tracks": {}}
+            runs.append(run)
+
+        run["tracks"][track_type] = filename
+        metadata_path.write_text(json.dumps(data, indent=2))
 
 
 def participant_dir(session, participant: str, identity: str = "") -> Path:
@@ -321,6 +363,10 @@ async def assemble_track(
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
             await _try_merge_av(directory, epoch, nametake)
+            if epoch and nametake:
+                epoch_ms = _decode_epoch_ms(epoch)
+                if epoch_ms is not None:
+                    await _save_run_metadata(directory, epoch_ms, nametake, "audio", output.name)
         else:
             logger.error("assemble: audio ffmpeg failed for %s/%s", directory.name, epoch)
 
@@ -355,6 +401,11 @@ async def assemble_track(
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
             await _try_merge_av(directory, epoch, nametake)
+            if epoch and nametake:
+                epoch_ms = _decode_epoch_ms(epoch)
+                if epoch_ms is not None:
+                    final_video = _final_name("video", nametake[0], nametake[1], "mp4") if nametake else _oname("video", epoch, "mp4")
+                    await _save_run_metadata(directory, epoch_ms, nametake, "video", final_video)
         else:
             logger.error("assemble: video ffmpeg failed for %s/%s", directory.name, epoch)
 
@@ -390,6 +441,10 @@ async def assemble_track(
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
+            if epoch and nametake:
+                epoch_ms = _decode_epoch_ms(epoch)
+                if epoch_ms is not None:
+                    await _save_run_metadata(directory, epoch_ms, nametake, "screen", output.name)
 
 
 async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):

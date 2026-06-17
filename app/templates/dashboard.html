@@ -135,6 +135,19 @@
       <div class="session-card-actions">
         {% if files %}
         <a href="/download-zip/{{ session.id }}" class="btn-secondary">↓ Download All</a>
+        <div class="export-split-btn">
+          <div class="export-split-group">
+            <span class="btn-export-grid" style="cursor:default">Export for Editing</span>
+            <button class="export-split-caret" style="display:flex" onclick="toggleNleDropdown('{{ session.id }}', event)">
+              <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="0,0 5,6 10,0"/></svg>
+            </button>
+          </div>
+          <div class="export-split-dropdown" id="nle-dd-{{ session.id }}" style="display:none">
+            <a class="export-dropdown-item" href="/api/session/{{ session.id }}/export-otio">OpenTimelineIO (.otio)</a>
+            <a class="export-dropdown-item" href="/api/session/{{ session.id }}/export-fcpxml">Final Cut Pro (.fcpxml)</a>
+            <a class="export-dropdown-item" href="/api/session/{{ session.id }}/export-reaper">Reaper (.rpp)</a>
+          </div>
+        </div>
         {% endif %}
         {% if session_video_count[session.id] >= 2 %}
         <div class="export-split-btn" data-session-id="{{ session.id }}">
@@ -405,6 +418,15 @@ function toggleExportDropdown(sessionId, event) {
   const isOpen = dropdown.style.display !== 'none';
   document.querySelectorAll('.export-split-dropdown').forEach(d => { d.style.display = 'none'; });
   if (!isOpen) dropdown.style.display = 'block';
+}
+
+function toggleNleDropdown(sessionId, event) {
+  event.stopPropagation();
+  const dd = document.getElementById(`nle-dd-${sessionId}`);
+  if (!dd) return;
+  const isOpen = dd.style.display !== 'none';
+  document.querySelectorAll('.export-split-dropdown').forEach(d => { d.style.display = 'none'; });
+  if (!isOpen) dd.style.display = 'block';
 }
 
 function closeExportDropdown(sessionId) {
