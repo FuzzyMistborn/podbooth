@@ -7,9 +7,6 @@
 <div class="studio-header-right">
   <span class="session-title-label">{{ session.title }}</span>
   {% if is_host %}<span class="host-badge">HOST</span>{% endif %}
-  <button class="ctrl-btn btn-header-icon" id="btn-fullscreen" title="Fullscreen">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-  </button>
 </div>
 {% endblock %}
 {% block content %}
@@ -151,6 +148,9 @@
         </button>
         <div class="device-dropdown" id="cam-dropdown"></div>
       </div>
+      <button class="ctrl-btn" id="btn-fullscreen" title="Fullscreen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+      </button>
       <button class="ctrl-btn" id="btn-screen" title="Share screen">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
       </button>

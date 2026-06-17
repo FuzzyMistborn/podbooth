@@ -33,7 +33,7 @@ html, body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { color: #ff7722; }
 
-input, select {
+input, select, textarea {
   background: var(--bg-2);
   border: 1px solid var(--border);
   color: var(--text);
@@ -44,11 +44,11 @@ input, select {
   width: 100%;
   transition: border-color 0.15s;
 }
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
-input::placeholder { color: var(--text-3); }
+input::placeholder, textarea::placeholder { color: var(--text-3); }
 
 /* ── Site header ─────────────────────────────────────────────── */
 .site-header {
@@ -356,7 +356,7 @@ input::placeholder { color: var(--text-3); }
   position: relative;
   transition: margin-right 0.2s ease;
 }
-.studio-layout.chat-open {
+.studio-layout.chat-open .video-grid {
   margin-right: 300px;
 }
 
@@ -864,14 +864,6 @@ input::placeholder { color: var(--text-3); }
   border-radius: 3px;
   padding: 2px 6px;
 }
-.btn-header-icon {
-  width: 32px;
-  height: 32px;
-  background: transparent;
-  border-color: transparent;
-}
-.btn-header-icon svg { width: 16px; height: 16px; }
-.btn-header-icon:hover { background: var(--bg-3); border-color: var(--border); }
 .ctrl-btn {
   background: var(--bg-3);
   border: 1px solid var(--border);
@@ -2251,7 +2243,7 @@ body.is-fullscreen.controls-peek .controls-bar {
   .device-selects { grid-template-columns: 1fr; }
 
   /* Chat: full-width overlay instead of push */
-  .studio-layout.chat-open { margin-right: 0; }
+  .studio-layout.chat-open .video-grid { margin-right: 0; }
   .chat-panel { width: min(100%, 340px); }
 
   /* Dashboard */
