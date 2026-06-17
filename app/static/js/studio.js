@@ -169,6 +169,7 @@ const filesPanel   = document.getElementById('files-panel');
 const filesList    = document.getElementById('files-list');
 const latencyWrap  = document.getElementById('latency-indicator-wrap');
 const statsPanel   = document.getElementById('stats-panel');
+const btnFullscreen = document.getElementById('btn-fullscreen');
 
 // Timer DOM refs (host-only elements are null for non-hosts)
 const timerBar        = document.getElementById('timer-bar');
@@ -973,6 +974,45 @@ function setupControls() {
   btnView?.addEventListener('click', () => {
     setViewMode(viewMode === 'grid' ? 'spotlight' : 'grid');
     showToast(`Layout: ${viewMode === 'spotlight' ? 'Active speaker' : 'Grid'}`);
+  });
+
+  // Fullscreen toggle with auto-hide header/controls on mouse idle
+  let fsHideTimer = null;
+  const FS_ICON_EXPAND   = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+  const FS_ICON_COMPRESS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 0 2-2h3M3 16h3a2 2 0 0 0 2 2v3"/></svg>`;
+
+  function applyFullscreenState(isFS) {
+    document.body.classList.toggle('is-fullscreen', isFS);
+    btnFullscreen?.classList.toggle('active', isFS);
+    if (btnFullscreen) {
+      btnFullscreen.innerHTML = isFS ? FS_ICON_COMPRESS : FS_ICON_EXPAND;
+      btnFullscreen.title = isFS ? 'Exit fullscreen' : 'Fullscreen';
+    }
+    if (!isFS) {
+      document.body.classList.remove('controls-peek');
+      clearTimeout(fsHideTimer);
+    }
+  }
+
+  btnFullscreen?.addEventListener('click', () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  });
+
+  // Fullscreen API (button / programmatic)
+  document.addEventListener('fullscreenchange', () => {
+    applyFullscreenState(!!document.fullscreenElement);
+  });
+
+
+  document.addEventListener('mousemove', () => {
+    if (!document.body.classList.contains('is-fullscreen')) return;
+    document.body.classList.add('controls-peek');
+    clearTimeout(fsHideTimer);
+    fsHideTimer = setTimeout(() => document.body.classList.remove('controls-peek'), 3000);
   });
 
   btnChat?.addEventListener('click', () => {

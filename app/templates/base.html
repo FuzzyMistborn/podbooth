@@ -15,9 +15,11 @@
     <a href="/" class="logo">
       <img src="/static/images/logo-text.png" alt="PodBooth" class="logo-text-img" />
     </a>
+    {% block header_right %}
     <nav>
       <a href="/dashboard">Sessions</a>
     </nav>
+    {% endblock %}
   </header>
   <main>
     {% block content %}{% endblock %}

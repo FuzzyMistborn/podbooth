@@ -3,6 +3,15 @@
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 {% endblock %}
+{% block header_right %}
+<div class="studio-header-right">
+  <span class="session-title-label">{{ session.title }}</span>
+  {% if is_host %}<span class="host-badge">HOST</span>{% endif %}
+  <button class="ctrl-btn btn-header-icon" id="btn-fullscreen" title="Fullscreen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+  </button>
+</div>
+{% endblock %}
 {% block content %}
 <div class="studio-layout">
 
@@ -124,13 +133,6 @@
   <!-- Controls bar -->
   <div class="controls-bar">
     <div class="controls-left">
-      <span class="session-title-label">{{ session.title }}</span>
-      {% if is_host %}
-      <span class="host-badge">HOST</span>
-      {% endif %}
-    </div>
-
-    <div class="controls-center">
       <div class="device-btn-group">
         <button class="ctrl-btn" id="btn-mic" title="Toggle mic">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
