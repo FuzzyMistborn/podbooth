@@ -8,7 +8,6 @@ import time
 import uuid
 from pathlib import Path
 
-import opentimelineio as otio
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
@@ -145,9 +144,17 @@ async def _resolve_runs(session) -> list[dict]:
 
 # ── OpenTimelineIO ────────────────────────────────────────────────────────────
 
-def _build_otio_timeline(title: str, runs: list[dict]) -> otio.schema.Timeline:
-    timeline = otio.schema.Timeline(name=title)
+def _rt(value: int) -> dict:
+    return {"OTIO_SCHEMA": "RationalTime.1", "rate": RATE, "value": value}
+
+
+def _tr(start: int, duration: int) -> dict:
+    return {"OTIO_SCHEMA": "TimeRange.1", "start_time": _rt(start), "duration": _rt(duration)}
+
+
+def _build_otio_json(title: str, runs: list[dict]) -> str:
     base_ms = min((r["start_ms"] for r in runs), default=0)
+    tracks = []
 
     for run in runs:
         offset_s = max(0.0, (run["start_ms"] - base_ms) / 1000.0)
@@ -159,42 +166,55 @@ def _build_otio_timeline(title: str, runs: list[dict]) -> otio.schema.Timeline:
             info = run["tracks"][track_type]
             dur_frames = round(info["duration_s"] * RATE)
 
-            kind = (otio.schema.TrackKind.Audio if track_type == "audio"
-                    else otio.schema.TrackKind.Video)
             label = run["participant"]
             if run["take"] > 1:
                 label += f" Take {run['take']}"
             if track_type != "audio":
                 label += f" ({track_type})"
 
-            track = otio.schema.Track(name=label, kind=kind)
-
+            children = []
             if offset_frames > 0:
-                track.append(otio.schema.Gap(
-                    source_range=otio.opentime.TimeRange(
-                        otio.opentime.RationalTime(0, RATE),
-                        otio.opentime.RationalTime(offset_frames, RATE),
-                    )
-                ))
+                children.append({
+                    "OTIO_SCHEMA": "Gap.1",
+                    "metadata": {}, "name": "", "effects": [], "markers": [], "enabled": True,
+                    "source_range": _tr(0, offset_frames),
+                })
 
-            ref = otio.schema.ExternalReference(
-                target_url=info["path"].resolve().as_uri(),
-                available_range=otio.opentime.TimeRange(
-                    otio.opentime.RationalTime(0, RATE),
-                    otio.opentime.RationalTime(dur_frames, RATE),
-                ),
-            )
-            track.append(otio.schema.Clip(
-                name=info["filename"],
-                media_reference=ref,
-                source_range=otio.opentime.TimeRange(
-                    otio.opentime.RationalTime(0, RATE),
-                    otio.opentime.RationalTime(dur_frames, RATE),
-                ),
-            ))
-            timeline.tracks.append(track)
+            children.append({
+                "OTIO_SCHEMA": "Clip.1",
+                "metadata": {}, "effects": [], "markers": [], "enabled": True,
+                "name": info["filename"],
+                "source_range": _tr(0, dur_frames),
+                "media_reference": {
+                    "OTIO_SCHEMA": "ExternalReference.1",
+                    "metadata": {}, "name": "", "available_image_bounds": None,
+                    "target_url": f"{run['participant']}/{info['filename']}",
+                    "available_range": _tr(0, dur_frames),
+                },
+                "active_media_reference_key": "DEFAULT_MEDIA",
+            })
 
-    return timeline
+            tracks.append({
+                "OTIO_SCHEMA": "Track.1",
+                "metadata": {}, "source_range": None, "effects": [], "markers": [], "enabled": True,
+                "name": label,
+                "kind": "Audio" if track_type == "audio" else "Video",
+                "children": children,
+            })
+
+    timeline = {
+        "OTIO_SCHEMA": "Timeline.1",
+        "metadata": {},
+        "name": title,
+        "global_start_time": None,
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "metadata": {}, "name": "tracks", "source_range": None,
+            "effects": [], "markers": [], "enabled": True,
+            "children": tracks,
+        },
+    }
+    return json.dumps(timeline, indent=2)
 
 
 # ── FCPXML ────────────────────────────────────────────────────────────────────
@@ -374,8 +394,7 @@ async def export_otio(session_id: str, _: None = Depends(require_host)):
     runs = await _resolve_runs(session)
     if not runs:
         raise HTTPException(status_code=404, detail="No recordings available")
-    timeline = _build_otio_timeline(session.title, runs)
-    content = otio.adapters.write_to_string(timeline, adapter_name="otio_json")
+    content = _build_otio_json(session.title, runs)
     filename = f"{_safe_name(session.title)}.otio"
     return Response(
         content=content,
