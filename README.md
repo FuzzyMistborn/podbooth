@@ -156,16 +156,19 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 1. Go to `/` → enter a session title → **Create Session**
 2. You land in the studio as host with a share link
 3. Click **Share Link** → copy the guest URL → send to participants
-4. Guests open the link, check their devices, enter their name, and join
-5. Host clicks **REC** to start — all participants record locally and upload in real time
+4. Guests open the link, check their devices (mic/camera selections are saved for future sessions), enter their name, and join
+5. Host clicks **REC** to start — all participants record locally and upload in real time; a live input level meter and clip indicator appear on each tile during recording
 6. While recording, the host can:
    - Click **PAUSE** to suspend recording (guests stop capturing; click **RESUME** to start a new take)
    - Click **STOP** to end recording entirely
    - Click **PAUSE** on a participant tile to force-mute them, or **KICK** to remove them
    - Click the bell icon to send a text alert to all participants
-7. The **Files** panel in the studio shows recordings as they assemble in real time
-8. Guests can leave at any time with the **Leave** button; host clicks **End Session** to close the room
-9. Files are assembled server-side and downloadable from `/dashboard`
+   - Click **Topic** to stamp a named topic marker — saved as a downloadable `.txt` and listed in the Files panel
+7. The **Files** panel shows recordings assembling in real time and lists any topic marker files; the upload banner shows per-chunk progress and an assembling state
+8. Incoming join requests play a chime and can be **Accepted** or **Denied** by the host; each participant tile shows connection latency
+9. Open the **Stats** panel (⚙) for live WebRTC diagnostics (bitrate, packet loss, jitter, round-trip time)
+10. Guests can leave at any time with the **Leave** button (a confirmation appears if uploads are still in progress); host clicks **End Session** to close the room
+11. Files are assembled server-side and downloadable from `/dashboard`
 
 ---
 
@@ -185,6 +188,7 @@ recordings/
       audio_lz4abc.wav
       video_lz4abc.mp4
     video_grid.mp4        ← optional: all participants composited side-by-side
+    topics.txt            ← optional: timestamped topic markers stamped by the host
 ```
 
 Each recording take gets a unique epoch tag in the filename. A single uninterrupted session produces one `audio_<epoch>.wav` and `video_<epoch>.mp4` per participant; pause/resume produces additional pairs. `video.mp4` has the participant's mic audio mixed in so it can be used directly in an editor without needing to manually sync tracks.
@@ -201,7 +205,11 @@ The **grid export** (available from the dashboard) composites all participants i
 - **Assembly by byte-concatenation**: MediaRecorder chunks after the first are continuation data, not standalone files, so chunks are byte-concatenated into one source file, then ffmpeg runs once. Video already in H.264 is remuxed with `-c:v copy` (no re-encode); VP8/VP9 is transcoded to H.264 CRF 18.
 - **Cross-browser**: MIME fallback chain tries `video/mp4` (H.264) first, then WebM variants. Audio uses raw PCM via AudioWorklet with 320 kbps Opus as a fallback for Firefox.
 - **Recording sync**: Start/pause/resume/stop broadcasts over the LiveKit data channel; a 3s status poll reconciles missed messages and catches late joiners. If the host drops (detected via `is_host` in token metadata), guests stop recording automatically.
-- **Resumable uploads**: Each recording run gets a unique epoch tag stored in `sessionStorage`. If the page reloads mid-session, the client queries the server for the last received chunk and resumes from there rather than re-uploading.
+- **Resumable uploads**: Each recording run gets a unique epoch tag stored in `sessionStorage`. If the page reloads mid-session, the client queries the server for the last received chunk and resumes from there rather than re-uploading. The upload banner tracks per-chunk progress and transitions to an "assembling" state once all chunks have landed.
+- **Device persistence**: Mic and camera selections are saved to `localStorage` on the pre-join page and restored automatically on the next visit, so participants don't have to re-select their devices each session.
+- **Input level meter**: During recording, each participant tile displays a live audio level bar sourced from the same AudioWorklet stream used for capture. A clip indicator lights when the signal saturates.
+- **Topic markers**: The host can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `topics.txt` file in the session folder and shown in the Files panel for immediate download.
+- **Nerd stats panel**: A collapsible panel exposes live WebRTC statistics (inbound/outbound bitrate, packet loss, jitter, round-trip time) polled from `RTCPeerConnection.getStats()` every second.
 - **Host moderation**: Force-mute and kick are issued via the LiveKit server API. Force-unmute is sent as a `force_unmute` data-channel message so the guest's browser re-enables its mic track client-side.
 - **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes from pause/resume, they are stream-copied (no re-encode) into a single temp file before compositing.
 - **Persistence**: Sessions survive container restarts via `.sessions.json`. Optional `RETENTION_DAYS` purges old sessions and their recordings on startup.
