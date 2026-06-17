@@ -36,6 +36,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       if (i < attempts - 1) await new Promise(res => setTimeout(res, 1000 * (i + 1)));
     }
   }
+  uploadHasError = true;
   console.error(`Chunk permanently lost: ${trackType} #${index}`);
 }
 

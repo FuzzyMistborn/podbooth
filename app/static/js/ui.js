@@ -318,10 +318,8 @@ function setViewMode(mode) {
 function closeAllDeviceDropdowns() {
   document.getElementById('mic-dropdown')?.classList.remove('open');
   document.getElementById('cam-dropdown')?.classList.remove('open');
-  document.getElementById('spk-dropdown')?.classList.remove('open');
   document.getElementById('btn-mic-caret')?.classList.remove('open');
   document.getElementById('btn-cam-caret')?.classList.remove('open');
-  document.getElementById('btn-spk-caret')?.classList.remove('open');
 }
 
 async function openDeviceDropdown(kind) {
@@ -369,43 +367,41 @@ async function openDeviceDropdown(kind) {
     console.warn('Could not enumerate devices:', e);
   }
 
-  dropdown.classList.add('open');
-  document.getElementById(caretId)?.classList.add('open');
-}
-
-async function openSpeakerDropdown() {
-  const dropdown = document.getElementById('spk-dropdown');
-  if (!dropdown) return;
-  dropdown.innerHTML = '';
-  const label = document.createElement('div');
-  label.className = 'device-dropdown-label';
-  label.textContent = 'Speaker / Headphones';
-  dropdown.appendChild(label);
-
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    let idx = 0;
-    devices.filter(d => d.kind === 'audiooutput').forEach(d => {
-      const btn = document.createElement('button');
-      btn.className = 'device-dropdown-item' + (d.deviceId === activeSpkDeviceId ? ' active' : '');
-      const check = document.createElement('span');
-      check.className = 'check';
-      check.textContent = d.deviceId === activeSpkDeviceId ? '✓' : '';
-      btn.appendChild(check);
-      btn.appendChild(document.createTextNode(d.label || `Speaker ${++idx}`));
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        closeAllDeviceDropdowns();
-        updateSpeakerOutput(d.deviceId);
-      });
-      dropdown.appendChild(btn);
-    });
-  } catch (e) {
-    console.warn('Could not enumerate output devices:', e);
+  // Append speaker section to mic dropdown if supported
+  if (kind === 'audioinput' && typeof HTMLMediaElement.prototype.setSinkId === 'function') {
+    try {
+      const allDevices = await navigator.mediaDevices.enumerateDevices();
+      const outputDevices = allDevices.filter(d => d.kind === 'audiooutput');
+      if (outputDevices.length > 0) {
+        const divider = document.createElement('div');
+        divider.className = 'device-dropdown-divider';
+        dropdown.appendChild(divider);
+        const spkLabel = document.createElement('div');
+        spkLabel.className = 'device-dropdown-label';
+        spkLabel.textContent = 'Speaker / Headphones';
+        dropdown.appendChild(spkLabel);
+        let idx = 0;
+        outputDevices.forEach(d => {
+          const btn = document.createElement('button');
+          btn.className = 'device-dropdown-item' + (d.deviceId === activeSpkDeviceId ? ' active' : '');
+          const check = document.createElement('span');
+          check.className = 'check';
+          check.textContent = d.deviceId === activeSpkDeviceId ? '✓' : '';
+          btn.appendChild(check);
+          btn.appendChild(document.createTextNode(d.label || `Speaker ${++idx}`));
+          btn.addEventListener('click', e => {
+            e.stopPropagation();
+            closeAllDeviceDropdowns();
+            updateSpeakerOutput(d.deviceId);
+          });
+          dropdown.appendChild(btn);
+        });
+      }
+    } catch (e) {}
   }
 
   dropdown.classList.add('open');
-  document.getElementById('btn-spk-caret')?.classList.add('open');
+  document.getElementById(caretId)?.classList.add('open');
 }
 
 function updateSpeakerOutput(deviceId) {
@@ -435,23 +431,8 @@ function setupDeviceButtons(micDeviceId, camDeviceId) {
     if (!isOpen) await openDeviceDropdown('videoinput');
   });
 
-  // Show speaker dropdown only when setSinkId is supported
-  if (typeof HTMLMediaElement.prototype.setSinkId === 'function') {
-    document.getElementById('spk-btn-group')?.style.setProperty('display', '');
-    document.getElementById('btn-spk')?.addEventListener('click', async e => {
-      e.stopPropagation();
-      const isOpen = document.getElementById('spk-dropdown')?.classList.contains('open');
-      closeAllDeviceDropdowns();
-      if (!isOpen) await openSpeakerDropdown();
-    });
-    document.getElementById('btn-spk-caret')?.addEventListener('click', async e => {
-      e.stopPropagation();
-      const isOpen = document.getElementById('spk-dropdown')?.classList.contains('open');
-      closeAllDeviceDropdowns();
-      if (!isOpen) await openSpeakerDropdown();
-    });
-    // Apply saved speaker preference to any future audio elements
-    if (activeSpkDeviceId) updateSpeakerOutput(activeSpkDeviceId);
+  if (typeof HTMLMediaElement.prototype.setSinkId === 'function' && activeSpkDeviceId) {
+    updateSpeakerOutput(activeSpkDeviceId);
   }
 }
 
@@ -533,28 +514,38 @@ function setupControls() {
     }
   });
 
-  latencyWrap?.addEventListener('click', e => {
+  recIndicator?.addEventListener('click', e => {
     e.stopPropagation();
-    const open = statsPanel?.style.display !== 'none';
-    if (statsPanel) statsPanel.style.display = open ? 'none' : 'flex';
-    latencyWrap.classList.toggle('active', !open);
-    if (!open) {
-      updateStatsPanel();
-      statsInterval = setInterval(updateStatsPanel, 2000);
-    } else {
-      clearInterval(statsInterval);
-      statsInterval = null;
+    recIndicator.classList.toggle('popover-open');
+  });
+  document.addEventListener('click', e => {
+    if (recIndicator && !recIndicator.contains(e.target)) {
+      recIndicator.classList.remove('popover-open');
     }
   });
-  statsPanel?.addEventListener('click', e => e.stopPropagation());
-  document.addEventListener('click', () => {
-    if (statsPanel && statsPanel.style.display !== 'none') {
-      statsPanel.style.display = 'none';
+
+  let statsHideTimer = null;
+  function showStatsPanel() {
+    clearTimeout(statsHideTimer);
+    if (statsPanel) statsPanel.style.display = 'flex';
+    latencyWrap?.classList.add('active');
+    if (!statsInterval) {
+      updateStatsPanel();
+      statsInterval = setInterval(updateStatsPanel, 2000);
+    }
+  }
+  function hideStatsPanel() {
+    statsHideTimer = setTimeout(() => {
+      if (statsPanel) statsPanel.style.display = 'none';
       latencyWrap?.classList.remove('active');
       clearInterval(statsInterval);
       statsInterval = null;
-    }
-  });
+    }, 150);
+  }
+  latencyWrap?.addEventListener('mouseenter', showStatsPanel);
+  latencyWrap?.addEventListener('mouseleave', hideStatsPanel);
+  statsPanel?.addEventListener('mouseenter', () => clearTimeout(statsHideTimer));
+  statsPanel?.addEventListener('mouseleave', hideStatsPanel);
 
   btnMic?.addEventListener('click', async () => {
     const enabled = room.localParticipant.isMicrophoneEnabled;
@@ -602,30 +593,53 @@ function setupControls() {
   btnLeave?.addEventListener('click', leaveSession);
   btnAlertDismiss?.addEventListener('click', () => alertBanner?.classList.add('hidden'));
 
-  if (IS_HOST) {
-    btnAlert?.addEventListener('click', e => {
-      e.stopPropagation();
-      const open = alertPanel?.style.display !== 'none';
-      if (alertPanel) alertPanel.style.display = open ? 'none' : 'flex';
-      btnAlert?.classList.toggle('active', !open);
-    });
-    btnAlertSend?.addEventListener('click', () => {
-      const text = alertCustom?.value.trim();
+  btnAlert?.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = alertPanel?.style.display !== 'none';
+    if (alertPanel) alertPanel.style.display = open ? 'none' : 'flex';
+    btnAlert?.classList.toggle('active', !open);
+  });
+  btnAlertSend?.addEventListener('click', () => {
+    const text = alertCustom?.value.trim();
+    if (text) { sendAlert(text); alertCustom.value = ''; }
+  });
+  alertCustom?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const text = alertCustom.value.trim();
       if (text) { sendAlert(text); alertCustom.value = ''; }
-    });
-    alertCustom?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        const text = alertCustom.value.trim();
-        if (text) { sendAlert(text); alertCustom.value = ''; }
-      }
-    });
+    }
+  });
+  document.addEventListener('click', e => {
+    if (alertPanel && alertPanel.style.display !== 'none' && !alertPanel.contains(e.target) && e.target !== btnAlert) {
+      alertPanel.style.display = 'none';
+      btnAlert?.classList.remove('active');
+    }
+  });
 
+  const topicPopover = document.getElementById('topic-popover');
+  const btnTopicStamp = document.getElementById('btn-topic-stamp');
+  btnNewTopic?.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = topicPopover?.classList.contains('open');
+    topicPopover?.classList.toggle('open', !open);
+    btnNewTopic.classList.toggle('active', !open);
+    if (!open) topicInput?.focus();
+  });
+  btnTopicStamp?.addEventListener('click', () => createMarker());
+  topicInput?.addEventListener('keydown', e => { if (e.key === 'Enter') createMarker(); });
+  document.addEventListener('click', e => {
+    if (topicPopover?.classList.contains('open') &&
+        !topicPopover.contains(e.target) && e.target !== btnNewTopic) {
+      topicPopover.classList.remove('open');
+      btnNewTopic?.classList.remove('active');
+    }
+  });
+
+  if (IS_HOST) {
     btnRecord?.addEventListener('click', startRecording);
     btnPause?.addEventListener('click', pauseRecording);
     btnResume?.addEventListener('click', resumeRecording);
     btnStopRec?.addEventListener('click', stopRecording);
-    btnNewTopic?.addEventListener('click', createMarker);
-    topicInput?.addEventListener('keydown', e => { if (e.key === 'Enter') createMarker(); });
     btnEnd?.addEventListener('click', endSession);
     btnShowShare?.addEventListener('click', () => {
       shareWrap.style.display = shareWrap.style.display === 'none' ? 'flex' : 'none';

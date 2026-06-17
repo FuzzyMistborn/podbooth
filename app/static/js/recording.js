@@ -74,17 +74,21 @@ function setRecordingUI(recording, paused = false) {
   isRecording = recording;
   isPaused = !recording && paused;
 
+  const idle = !recording && !isPaused;
+  topicGroup && (topicGroup.style.display = !idle ? '' : 'none');
+  if (!idle) {
+    const popover = document.getElementById('topic-popover');
+    if (popover?.classList.contains('open')) {
+      popover.classList.remove('open');
+      btnNewTopic?.classList.remove('active');
+    }
+  }
   if (IS_HOST) {
-    const idle = !recording && !isPaused;
     btnRecord  && (btnRecord.style.display   = idle       ? '' : 'none');
     btnPause   && (btnPause.style.display    = recording  ? '' : 'none');
     btnResume  && (btnResume.style.display   = isPaused   ? '' : 'none');
     btnStopRec && (btnStopRec.style.display  = !idle      ? '' : 'none');
-    topicGroup && (topicGroup.style.display  = !idle      ? '' : 'none');
   }
-
-  const meterEl = document.getElementById('audio-meter');
-  if (meterEl) meterEl.style.display = recording ? 'flex' : 'none';
 
   if (recording) {
     recIndicator?.classList.add('active');
@@ -92,6 +96,7 @@ function setRecordingUI(recording, paused = false) {
     clearInterval(recTimerInterval);
     recordingStartTime = Date.now();
     recTimerInterval = setInterval(updateRecTimer, 1000);
+    startRecStatus();
   } else if (isPaused) {
     recIndicator?.classList.remove('active');
     recIndicator?.classList.add('paused');
@@ -107,6 +112,7 @@ function setRecordingUI(recording, paused = false) {
     cumulativeElapsedMs = 0;
     clearInterval(recTimerInterval);
     if (recTime) recTime.textContent = '00:00';
+    stopRecStatus();
     startFilesPoll();
   }
 }
@@ -237,7 +243,6 @@ async function startLocalRecording() {
     try {
       await startPcmCapture();
       audioFormat = 'pcm';
-      startLevelMeter();
       recLog('startLocalRecording: audio=pcm');
     } catch (e) {
       console.warn('PCM capture unavailable, falling back to Opus:', e);
@@ -618,7 +623,6 @@ async function resumeLocalRecording() {
 
 async function stopLocalRecording() {
   micMuted = false;
-  stopLevelMeter();
   recLog('stopLocalRecording: begin');
 
   // For each MediaRecorder, wrap its onstop so we get an explicit signal that
@@ -705,7 +709,6 @@ async function stopLocalRecording() {
 }
 
 async function restartPcmCapture() {
-  stopLevelMeter();
   pcmNode.port.onmessage = null;
   try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
   if (pcmFrames > 0) flushPcm(false); // upload buffered audio without finalizing
@@ -715,61 +718,41 @@ async function restartPcmCapture() {
   pcmCapturing = false;
   try {
     await startPcmCapture();
-    startLevelMeter();
   } catch (e) {
     console.warn('Could not restart PCM after mic switch:', e);
     startOpusFallback();
   }
 }
 
-// ── Audio level meter ────────────────────────────────────────────────────────
+// ── Recording status popover ─────────────────────────────────────────────────
 
-function startLevelMeter() {
-  if (!pcmCtx || !pcmSource || levelAnalyser) return;
-  try {
-    levelAnalyser = pcmCtx.createAnalyser();
-    levelAnalyser.fftSize = 1024;
-    levelAnalyser.smoothingTimeConstant = 0.85;
-    pcmSource.connect(levelAnalyser);
-    levelBuffer = new Float32Array(levelAnalyser.fftSize);
+let recStatusInterval = null;
 
-    function tick() {
-      if (!levelAnalyser || !levelBuffer) return;
-      levelAnalyser.getFloatTimeDomainData(levelBuffer);
-      let peak = 0;
-      for (const s of levelBuffer) {
-        const v = Math.abs(s);
-        if (v > peak) peak = v;
-      }
-      const fill  = document.getElementById('audio-meter-fill');
-      const badge = document.getElementById('clip-badge');
-      if (fill) {
-        const pct = Math.min(100, peak * 150);
-        fill.style.width = pct + '%';
-        fill.classList.toggle('warn', pct > 85);
-      }
-      if (badge && peak > 0.95) {
-        badge.classList.add('active');
-        clearTimeout(badge._clipTimer);
-        badge._clipTimer = setTimeout(() => badge.classList.remove('active'), 1500);
-      }
-      levelRafId = requestAnimationFrame(tick);
-    }
-    levelRafId = requestAnimationFrame(tick);
-  } catch (e) {
-    console.warn('Level meter start failed:', e);
-  }
+function setRecStatus(key, state) {
+  const row = document.getElementById(`rstatus-${key}`);
+  if (!row) return;
+  row.dataset.state = state;
+  const icon = row.querySelector('.rstatus-icon');
+  if (icon) icon.textContent = state === 'ok' ? '✓' : state === 'warn' ? '⚠' : state === 'error' ? '✗' : '—';
 }
 
-function stopLevelMeter() {
-  if (levelRafId) { cancelAnimationFrame(levelRafId); levelRafId = null; }
-  if (levelAnalyser) {
-    try { levelAnalyser.disconnect(); } catch (e) {}
-    levelAnalyser = null;
-  }
-  levelBuffer = null;
-  const fill = document.getElementById('audio-meter-fill');
-  if (fill) fill.style.width = '0%';
+function updateRecStatus() {
+  setRecStatus('audio', audioRecorder?.state === 'recording' || pcmCapturing ? 'ok' : isRecording ? 'error' : 'idle');
+  setRecStatus('video', videoRecorder ? (videoRecorder.state === 'recording' ? 'ok' : 'warn') : 'idle');
+  const uploadBacklog = uploadStats.queued - uploadStats.completed;
+  setRecStatus('upload', uploadHasError ? 'error' : uploadBacklog > 10 ? 'warn' : 'ok');
+  setRecStatus('livekit', room?.state === 'connected' ? 'ok' : 'error');
+}
+
+function startRecStatus() {
+  updateRecStatus();
+  recStatusInterval = setInterval(updateRecStatus, 1500);
+}
+
+function stopRecStatus() {
+  clearInterval(recStatusInterval);
+  recStatusInterval = null;
+  ['audio', 'video', 'upload', 'livekit'].forEach(k => setRecStatus(k, 'idle'));
 }
 
 // ── Topic markers ─────────────────────────────────────────────────────────────
@@ -792,6 +775,9 @@ async function createMarker() {
     });
     if (r.ok) {
       if (topicInput) topicInput.value = '';
+      const topicPopover = document.getElementById('topic-popover');
+      topicPopover?.classList.remove('open');
+      document.getElementById('btn-new-topic')?.classList.remove('active');
       showToast(label ? `Topic marked: "${label}"` : 'Topic marker saved');
       await broadcastData({ type: 'marker', label, recording_time_s: Math.floor(elapsedMs / 1000) });
     } else {

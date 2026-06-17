@@ -3,9 +3,10 @@
  * Forwards host_token through to the studio if present.
  */
 
-const DEVICE_KEY_MIC = 'podbooth:mic-device';
-const DEVICE_KEY_CAM = 'podbooth:cam-device';
-const DEVICE_KEY_SPK = 'podbooth:spk-device';
+const DEVICE_KEY_MIC  = 'podbooth:mic-device';
+const DEVICE_KEY_CAM  = 'podbooth:cam-device';
+const DEVICE_KEY_SPK  = 'podbooth:spk-device';
+const DEVICE_KEY_NAME = 'podbooth:participant-name';
 
 let stream = null;
 let audioContext = null;
@@ -27,6 +28,10 @@ function updateJoinButton() {
 }
 
 async function init() {
+  try {
+    const savedName = localStorage.getItem(DEVICE_KEY_NAME);
+    if (savedName) nameInput.value = savedName;
+  } catch (e) {}
   await populateDevices();
   await startPreview();
   micSelect.addEventListener('change', startPreview);
@@ -148,6 +153,7 @@ async function startPreview() {
 async function joinSession() {
   const name = nameInput.value.trim();
   if (!name) return;
+  try { localStorage.setItem(DEVICE_KEY_NAME, name); } catch (e) {}
   if (stream) stream.getTracks().forEach(t => t.stop());
   if (audioContext) audioContext.close();
   clearInterval(levelInterval);

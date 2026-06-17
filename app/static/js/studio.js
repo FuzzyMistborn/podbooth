@@ -79,10 +79,7 @@ let recordingEpoch = '';
 let recordingStarting = false;
 
 let uploadStats = { queued: 0, completed: 0 };
-
-let levelAnalyser = null;
-let levelBuffer   = null;
-let levelRafId    = null;
+let uploadHasError = false;
 
 const DEVICE_KEY_MIC = 'podbooth:mic-device';
 const DEVICE_KEY_CAM = 'podbooth:cam-device';

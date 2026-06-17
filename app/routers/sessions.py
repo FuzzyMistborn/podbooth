@@ -491,27 +491,23 @@ async def create_marker(session_id: str, request: Request):
     session_path = recordings_path / session.dir_name
     session_path.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.utcnow()
-    ts_str = ts.strftime("%Y-%m-%dT%H-%M-%S")
-    if label:
-        safe = "".join(c if c.isalnum() or c in "-_. " else "_" for c in label).strip()
-        safe = safe.replace(" ", "_")[:40]
-        filename = f"{ts_str}_{safe}.txt"
-    else:
-        filename = f"{ts_str}_marker.txt"
+    filename = "markers.txt"
+    marker_path = session_path / filename
 
-    lines = [f"Wall clock: {ts.isoformat()}Z"]
-    if label:
-        lines.append(f"Label: {label}")
+    time_str = ""
     if recording_time_s is not None:
         try:
             t = int(recording_time_s)
             m, s = divmod(t, 60)
-            lines.append(f"Recording time: {m}:{s:02d}")
+            time_str = f"[{m}:{s:02d}] "
         except (TypeError, ValueError):
             pass
 
-    (session_path / filename).write_text("\n".join(lines) + "\n")
+    line = f"- {time_str}{label}" if label else f"- {time_str}marker"
+
+    with marker_path.open("a") as f:
+        f.write(line + "\n")
+
     return JSONResponse({"ok": True, "filename": filename})
 
 
