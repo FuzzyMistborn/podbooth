@@ -10,14 +10,25 @@ Self-hosted remote podcast recording studio. Each participant records locally in
     <td><img src="screenshots/lobby.png" alt="Pre-join — device check"/><br/><sub>Pre-join — device check</sub></td>
   </tr>
   <tr>
-    <td><img src="screenshots/main.png" alt="Studio"/><br/><sub>Studio</sub></td>
-    <td><img src="screenshots/chat.png" alt="Studio — chat panel"/><br/><sub>Studio — chat panel</sub></td>
-  </tr>
-  <tr>
-    <td><img src="screenshots/clocktimer.png" alt="Studio — topic timer"/><br/><sub>Studio — topic timer</sub></td>
+    <td><img src="screenshots/studio-2.png" alt="Studio — live recording"/><br/><sub>Studio — live recording</sub></td>
     <td><img src="screenshots/sessions.png" alt="Sessions dashboard"/><br/><sub>Sessions dashboard</sub></td>
   </tr>
 </table>
+
+<details>
+<summary>More screenshots</summary>
+<br/>
+<table>
+  <tr>
+    <td><img src="screenshots/chat.png" alt="Studio — chat panel"/><br/><sub>Chat panel</sub></td>
+    <td><img src="screenshots/clocktimer.png" alt="Studio — topic timer"/><br/><sub>Topic timer</sub></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/alerts.png" alt="Studio — send alert"/><br/><sub>Send alert</sub></td>
+    <td><img src="screenshots/bookmarks.png" alt="Studio — topic marker"/><br/><sub>Topic marker</sub></td>
+  </tr>
+</table>
+</details>
 
 ---
 

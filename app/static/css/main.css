@@ -2182,9 +2182,9 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   flex-shrink: 0;
 }
 .topic-btn.active {
-  background: var(--bg-3);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--bg-2);
+  border-color: var(--text-2);
+  color: var(--text);
 }
 .topic-popover {
   position: absolute;
