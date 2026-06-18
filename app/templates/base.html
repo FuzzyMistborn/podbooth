@@ -12,9 +12,12 @@
 </head>
 <body>
   <header class="site-header">
-    <a href="/" class="logo">
-      <img src="/static/images/logo-text.png" alt="PodBooth" class="logo-text-img" />
-    </a>
+    <div class="logo-wrap">
+      <a href="/" class="logo">
+        <img src="/static/images/logo-text.png" alt="PodBooth" class="logo-text-img" />
+      </a>
+      <span class="app-version">{{ app_version }}</span>
+    </div>
     {% block header_right %}
     <nav>
       <a href="/dashboard">Sessions</a>

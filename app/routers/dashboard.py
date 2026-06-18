@@ -17,7 +17,7 @@ from starlette.background import BackgroundTask
 from app.models import list_sessions, get_session
 
 logger = logging.getLogger(__name__)
-from app.config import settings, ASSET_VERSION
+from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import require_host
 
 _VALID_MEDIA_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(wav|mp4|txt)$")
@@ -33,6 +33,7 @@ def _safe_name(value: str) -> str:
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["asset_v"] = ASSET_VERSION
+templates.env.globals["app_version"] = APP_VERSION
 
 
 def _collect_video_groups(session) -> list[list[Path]]:

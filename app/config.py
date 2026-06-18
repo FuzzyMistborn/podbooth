@@ -1,6 +1,26 @@
+import os
+import subprocess
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 from pathlib import Path
+
+
+def _app_version() -> str:
+    if v := os.environ.get("APP_VERSION", "").strip():
+        return v
+    try:
+        tag = subprocess.check_output(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=Path(__file__).parent.parent,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return tag if tag else "dev"
+    except Exception:
+        return "dev"
+
+
+APP_VERSION = _app_version()
 
 
 def _asset_version() -> str:

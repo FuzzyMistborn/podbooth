@@ -9,11 +9,12 @@ from app.auth import (
     make_session_token,
     password_configured,
 )
-from app.config import settings, ASSET_VERSION
+from app.config import settings, ASSET_VERSION, APP_VERSION
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["asset_v"] = ASSET_VERSION
+templates.env.globals["app_version"] = APP_VERSION
 
 
 def _safe_next(next_url: str) -> str:

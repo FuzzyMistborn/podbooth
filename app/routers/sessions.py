@@ -12,12 +12,13 @@ from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
 from app.routers.upload import recover_orphaned_chunks
-from app.config import settings, ASSET_VERSION
+from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import require_host
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["asset_v"] = ASSET_VERSION
+templates.env.globals["app_version"] = APP_VERSION
 
 
 def _is_host(host_token, session) -> bool:

@@ -78,6 +78,19 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   transition: opacity 0.15s;
 }
 .logo:hover .logo-text-img { opacity: 0.75; }
+.logo-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.app-version {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-2);
+  opacity: 0.5;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
 
 /* ── Splash layout (index page only) ─────────────────────────── */
 .splash-layout {
