@@ -116,10 +116,14 @@
           {% if f.take %}<span class="file-take">Take {{ f.take }}</span>{% endif %}
           <span class="file-type {{ f.type }}">{{ f.type }}</span>
           {% if f.size_mb is not none %}<span class="file-size">{{ f.size_mb }} MB</span>{% endif %}
-          {% if f.type != 'marker' %}
+          {% if f.type == 'transcript' %}
+          <button class="btn-play" onclick="openTranscriptView('/download/{{ f.path }}', '{{ f.filename }}')">View</button>
+          {% elif f.type != 'marker' %}
           <button class="btn-play" onclick="openPreview('/download/{{ f.path }}', '{{ f.type }}', '{{ f.participant }}', '{{ f.filename }}')">▶ Play</button>
           {% endif %}
+          {% if f.type != 'marker' %}
           <a class="btn-download" href="/download/{{ f.path }}">↓ Download</a>
+          {% endif %}
         </div>
         {% endfor %}
       </div>
@@ -130,6 +134,12 @@
         <p class="assembly-status" id="asm-{{ session.id }}" style="display:none"></p>
         {% endif %}
       </div>
+      {% endif %}
+      {% if session.ended and whisperx_enabled %}
+      {% set has_transcript = session_files[session.id] | selectattr('type', 'equalto', 'transcript') | list | length > 0 %}
+      {% if not has_transcript %}
+      <p class="assembly-status" id="tx-{{ session.id }}" style="display:none"></p>
+      {% endif %}
       {% endif %}
 
       <div class="session-card-actions">
@@ -505,6 +515,49 @@ async function deleteSession(sessionId, hostToken, title) {
     window.location.reload();
   } else {
     alert('Delete failed.');
+  }
+}
+
+// ── Transcription status ─────────────────────────────────────────────────────
+
+async function _pollTxStatus(sessionId) {
+  const statusEl = document.getElementById(`tx-${sessionId}`);
+  try {
+    const r = await fetch(`/api/session/${sessionId}/transcribe-status`);
+    if (!r.ok) return;
+    const { status } = await r.json();
+    if (status === 'transcribing') {
+      if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Transcribing audio…'; }
+      setTimeout(() => _pollTxStatus(sessionId), 5000);
+    } else if (status === 'done') {
+      window.location.reload();
+    }
+  } catch (e) {}
+}
+
+document.querySelectorAll('.session-card.ended').forEach(card => {
+  const el = document.getElementById(`tx-${card.dataset.sessionId}`);
+  if (el) _pollTxStatus(card.dataset.sessionId);
+});
+
+async function openTranscriptView(path, filename) {
+  const modal = document.getElementById('preview-modal');
+  const body = document.getElementById('preview-body');
+  document.getElementById('preview-participant').textContent = '';
+  document.getElementById('preview-filename').textContent = filename;
+  body.innerHTML = '<p style="color:var(--text-2);padding:1rem">Loading…</p>';
+  modal.classList.add('open');
+  document.addEventListener('keydown', _previewEsc);
+  try {
+    const r = await fetch(path);
+    const text = await r.text();
+    body.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow-y:auto;font-size:0.9rem;line-height:1.6;padding:0.5rem';
+    pre.textContent = text;
+    body.appendChild(pre);
+  } catch (e) {
+    body.textContent = 'Failed to load transcript.';
   }
 }
 

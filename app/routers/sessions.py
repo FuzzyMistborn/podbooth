@@ -169,6 +169,8 @@ async def end_session_route(session_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Not authorized")
 
     end_session(session_id)
+    from app.routers.transcribe import schedule_session_transcription
+    schedule_session_transcription(session_id)
     return JSONResponse({"ended": True})
 
 

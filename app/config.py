@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     host_password: str = ""
     retention_days: int = 0
+    whisperx_api_url: str = ""
+    whisperx_model: str = "large-v3-turbo"
+    whisperx_language: str = ""
 
     class Config:
         env_file = ".env"

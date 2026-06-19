@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 import logging
 import os
 
-from app.routers import sessions, upload, dashboard, login, export
+from app.routers import sessions, upload, dashboard, login, export, transcribe
 from app.routers.upload import recover_orphaned_chunks
 from app.config import settings
 from app import models
@@ -37,3 +37,4 @@ app.include_router(sessions.router)
 app.include_router(upload.router)
 app.include_router(dashboard.router)
 app.include_router(export.router)
+app.include_router(transcribe.router)

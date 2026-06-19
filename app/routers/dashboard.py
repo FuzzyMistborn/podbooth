@@ -295,6 +295,7 @@ async def dashboard(request: Request, _: None = Depends(require_host)):
             "session_files": session_files,
             "session_video_count": session_video_count,
             "retention_days": settings.retention_days,
+            "whisperx_enabled": bool(settings.whisperx_api_url),
         },
     )
 
@@ -371,17 +372,18 @@ def _get_session_files(session) -> list[dict]:
     if not session_path.is_dir():
         return files
 
-    # Topic marker .txt files live directly in the session root (not per-participant)
+    # .txt files in the session root: transcript.txt or topic markers
     for fpath in sorted(session_path.glob("*.txt")):
         if not fpath.is_file():
             continue
+        ftype = "transcript" if fpath.name == "transcript.txt" else "marker"
         files.append({
             "participant": "",
-            "type": "marker",
+            "type": ftype,
             "take": None,
             "filename": fpath.name,
             "path": str(fpath.relative_to(recordings_path)),
-            "size_mb": None,
+            "size_mb": round(fpath.stat().st_size / (1024 * 1024), 2) if ftype == "transcript" else None,
         })
 
     for participant_dir in sorted(session_path.iterdir()):

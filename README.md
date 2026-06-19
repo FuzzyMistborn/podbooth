@@ -160,6 +160,14 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `HOST_PASSWORD` | No | Password for the host UI. Leave blank to disable authentication |
 | `RETENTION_DAYS` | No | Delete sessions older than this many days on startup. Default: `0` (disabled) |
 
+### Transcription (WhisperX)
+
+| Variable | Required | Description |
+|---|---|---|
+| `WHISPERX_API_URL` | No | Base URL of a [whisperx-api](https://github.com/macnow/whisperx-api) server (e.g. `http://whisperx:8000`). Leave unset to disable transcription |
+| `WHISPERX_MODEL` | No | Faster-Whisper model to use. Default: `large-v3-turbo` |
+| `WHISPERX_LANGUAGE` | No | Force a language code (e.g. `en`, `fr`). Leave unset for automatic detection |
+
 ---
 
 ## Usage
@@ -179,6 +187,7 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 9. Open the **Stats** panel (⚙) for live WebRTC diagnostics (bitrate, packet loss, jitter, round-trip time)
 10. Guests can leave at any time with the **Leave** button (a confirmation appears if uploads are still in progress); host clicks **End Session** to close the room
 11. Files are assembled server-side and downloadable from `/dashboard`
+12. If transcription is configured, a single `transcript.txt` is generated automatically once the session ends — combining all participants' audio into one file and sending it to WhisperX. A "Transcribing…" indicator appears on the dashboard card while it runs; the transcript can be viewed inline or downloaded when complete
 
 ---
 
@@ -200,11 +209,14 @@ recordings/
       Bob_1_video.mp4
     video_grid.mp4          ← optional: all participants composited side-by-side
     markers.txt             ← optional: timestamped topic markers stamped by the host
+    transcript.txt          ← optional: full-session transcript (requires WhisperX)
 ```
 
 Files are named `{slug}_{take}.wav` for audio and `{slug}_{take}_video.mp4` for video, where slug is the participant's display name sanitized for use in filenames. Each press of **REC** after a **STOP** produces a new take number. **Pause/resume does not create a new take** — recording continues through the pause so the pause period appears in the file for editors to trim. `{slug}_{take}_video.mp4` has the participant's mic audio (AAC 320kbps) mixed in so it can be used directly in an editor without needing to manually sync tracks.
 
 The **grid export** (available from the dashboard) composites all participants into a single `video_grid.mp4` with an xstack layout. If a participant has multiple takes, they are spliced together automatically before compositing.
+
+The **transcript** (when `WHISPERX_API_URL` is set) is generated automatically when the host ends the session. PodBooth waits for all audio assembly to finish, then sends each participant's audio to WhisperX individually (`diarize=false` — speaker identity is already known). If a participant has multiple takes, they are concatenated first. The per-track responses are merged chronologically by segment timestamp into a single interleaved transcript with speaker labels, saved as `transcript.txt` in the session folder.
 
 ---
 
@@ -224,6 +236,7 @@ The **grid export** (available from the dashboard) composites all participants i
 - **Host moderation**: Force-mute and kick are issued via the LiveKit server API. Force-unmute is sent as a `force_unmute` data-channel message so the guest's browser re-enables its mic track client-side.
 - **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes, they are stream-copied (no re-encode) into a single temp file before compositing.
 - **Persistence**: Sessions survive container restarts via `.sessions.json`. Optional `RETENTION_DAYS` purges old sessions and their recordings on startup.
+- **Transcription**: When `WHISPERX_API_URL` is set, ending a session automatically triggers transcription. The server waits for all chunk assembly to complete (up to 10 minutes), then POSTs each participant's audio to the WhisperX API separately (`response_format=verbose_json`, `diarize=false`, `align=true`). If a participant has multiple takes, they are concatenated with ffmpeg before sending. The per-track segment lists are merged chronologically by start timestamp and formatted as an interleaved transcript with speaker labels (`[Alice]\n[0:00:05] Hello...`). The result is saved as `transcript.txt` and surfaced on the dashboard with inline preview and download.
 
 ---
 
@@ -261,4 +274,4 @@ The prebuilt image at `ghcr.io/fuzzymistborn/podbooth` tracks the `main` branch.
 
 ## Roadmap
 
-- Automatic transcription via WhisperX
+- Nothing at the moment
