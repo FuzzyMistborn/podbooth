@@ -159,6 +159,7 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `TZ` | No | Timezone for session timestamps and recording folder dates (e.g. `America/New_York`). Defaults to `UTC` |
 | `HOST_PASSWORD` | No | Password for the host UI. Leave blank to disable authentication |
 | `RETENTION_DAYS` | No | Delete sessions older than this many days on startup. Default: `0` (disabled) |
+| `LOG_LEVEL` | No | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Default: `INFO` |
 
 ### Transcription (WhisperX)
 
