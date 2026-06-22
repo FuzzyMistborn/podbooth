@@ -175,6 +175,9 @@
         {% if not session.ended %}
         <a href="/studio/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Rejoin as Host →</a>
         {% endif %}
+        {% if session.ended and whisperx_enabled %}
+        <button class="btn-secondary" id="retx-{{ session.id }}" onclick="retranscribe('{{ session.id }}', '{{ session.host_token }}', this)">Retranscribe</button>
+        {% endif %}
         <button class="btn-danger" onclick="deleteSession('{{ session.id }}', '{{ session.host_token }}', '{{ session.title }}')">Delete</button>
       </div>
     </div>
@@ -539,6 +542,37 @@ document.querySelectorAll('.session-card.ended').forEach(card => {
   const el = document.getElementById(`tx-${card.dataset.sessionId}`);
   if (el) _pollTxStatus(card.dataset.sessionId);
 });
+
+async function retranscribe(sessionId, hostToken, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const r = await fetch(`/api/session/${sessionId}/retranscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host_token: hostToken }),
+    });
+    if (r.ok) {
+      btn.textContent = 'Transcribing…';
+      // Ensure a status element exists so _pollTxStatus can show progress.
+      if (!document.getElementById(`tx-${sessionId}`)) {
+        const p = document.createElement('p');
+        p.className = 'assembly-status';
+        p.id = `tx-${sessionId}`;
+        btn.parentElement.before(p);
+      }
+      _pollTxStatus(sessionId);
+    } else {
+      const d = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      btn.textContent = 'Retranscribe';
+      alert('Retranscription failed: ' + (d.detail || r.status));
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Retranscribe';
+  }
+}
 
 async function openTranscriptView(path, filename) {
   const modal = document.getElementById('preview-modal');

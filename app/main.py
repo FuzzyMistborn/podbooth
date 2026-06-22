@@ -5,9 +5,13 @@ from contextlib import asynccontextmanager
 import logging
 import os
 
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
 from app.routers import sessions, upload, dashboard, login, export, transcribe
 from app.routers.upload import recover_orphaned_chunks
 from app.config import settings
+from app.limiter import limiter
 from app import models
 
 logging.basicConfig(
@@ -29,6 +33,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PodBooth", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 

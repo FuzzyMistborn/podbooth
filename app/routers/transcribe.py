@@ -12,12 +12,13 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -251,3 +252,32 @@ async def transcription_status(session_id: str):
     if session_id in _session_transcribing:
         return JSONResponse({"status": "transcribing"})
     return JSONResponse({"status": "idle"})
+
+
+def _is_host(host_token: str, session) -> bool:
+    if not isinstance(host_token, str) or not host_token:
+        return False
+    return secrets.compare_digest(host_token, session.host_token)
+
+
+@router.post("/api/session/{session_id}/retranscribe")
+async def retranscribe_session(session_id: str, request: Request):
+    data = await request.json()
+    host_token = data.get("host_token", "")
+
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not _is_host(host_token, session):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not settings.whisperx_api_url:
+        raise HTTPException(status_code=400, detail="Transcription not configured")
+
+    session_dir = Path(settings.recordings_dir) / session.dir_name
+    (session_dir / "transcript.txt").unlink(missing_ok=True)
+
+    if session_id in _session_transcribing:
+        return JSONResponse({"ok": True, "status": "already_running"})
+
+    schedule_session_transcription(session_id)
+    return JSONResponse({"ok": True, "status": "started"})

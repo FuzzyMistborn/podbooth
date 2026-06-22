@@ -10,6 +10,7 @@
 
   <form class="session-form" method="POST" action="/login">
     <input type="hidden" name="next" value="{{ next }}" />
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <label for="password">Host password</label>
     <input
       type="password"

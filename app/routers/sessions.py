@@ -15,7 +15,8 @@ from livekit.api import AccessToken, VideoGrants
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
 from app.routers.upload import recover_orphaned_chunks
 from app.config import settings, ASSET_VERSION, APP_VERSION
-from app.auth import require_host
+from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host
+from app.limiter import limiter
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -29,14 +30,35 @@ def _is_host(host_token, session) -> bool:
     return secrets.compare_digest(host_token, session.host_token)
 
 
+def _get_or_create_csrf(request: Request) -> tuple[str, bool]:
+    existing = request.cookies.get(CSRF_COOKIE)
+    if existing:
+        return existing, False
+    return make_csrf_token(), True
+
+
+def _set_csrf_cookie(response, token: str) -> None:
+    response.set_cookie(
+        CSRF_COOKIE, token,
+        httponly=True, samesite="strict",
+        secure=settings.base_url.startswith("https"),
+        max_age=3600,
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, _: None = Depends(require_host)):
     error = request.query_params.get("error")
     title = request.query_params.get("title", "")
-    return templates.TemplateResponse(request, "index.html", {
+    csrf, is_new = _get_or_create_csrf(request)
+    resp = templates.TemplateResponse(request, "index.html", {
         "error": error,
         "prefill_title": title,
+        "csrf_token": csrf,
     })
+    if is_new:
+        _set_csrf_cookie(resp, csrf)
+    return resp
 
 
 def _set_host_cookie(response, session_id: str, host_token: str) -> None:
@@ -52,7 +74,11 @@ def _set_host_cookie(response, session_id: str, host_token: str) -> None:
 
 
 @router.post("/session/new")
-async def new_session(title: str = Form(...), _: None = Depends(require_host)):
+async def new_session(
+    title: str = Form(...),
+    _: None = Depends(require_host),
+    _csrf: None = Depends(require_csrf),
+):
     if title_in_use(title):
         return RedirectResponse(
             url=f"/?error=duplicate&title={quote(title, safe='')}",
@@ -116,6 +142,7 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
 
 
 @router.post("/api/token")
+@limiter.limit("30/minute")
 async def get_token(request: Request):
     data = await request.json()
     session_id = data.get("session_id")
@@ -337,6 +364,7 @@ async def lobby_page(
 
 
 @router.post("/api/session/{session_id}/request-join")
+@limiter.limit("10/minute")
 async def request_join(session_id: str, request: Request):
     data = await request.json()
     identity = data.get("identity")

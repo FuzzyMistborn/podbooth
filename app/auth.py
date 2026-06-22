@@ -15,6 +15,21 @@ from fastapi import HTTPException, Request
 
 from app.config import settings
 
+CSRF_COOKIE = "podbooth_csrf"
+
+
+def make_csrf_token() -> str:
+    return secrets.token_hex(32)
+
+
+async def require_csrf(request: Request) -> None:
+    """FastAPI dependency: verify double-submit CSRF cookie on form POSTs."""
+    form = await request.form()
+    submitted = str(form.get("csrf_token", ""))
+    cookie = request.cookies.get(CSRF_COOKIE, "")
+    if not cookie or not submitted or not hmac.compare_digest(submitted, cookie):
+        raise HTTPException(status_code=403, detail="CSRF check failed")
+
 COOKIE_NAME = "podbooth_host"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
 
