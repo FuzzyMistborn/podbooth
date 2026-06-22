@@ -5,6 +5,8 @@ import logging
 import secrets
 from pathlib import Path
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -37,18 +39,29 @@ async def index(request: Request, _: None = Depends(require_host)):
     })
 
 
+def _set_host_cookie(response, session_id: str, host_token: str) -> None:
+    """Attach a short-lived HttpOnly cookie carrying the host token."""
+    response.set_cookie(
+        f"ht_{session_id}",
+        host_token,
+        max_age=300,
+        httponly=True,
+        samesite="lax",
+        secure=settings.base_url.startswith("https"),
+    )
+
+
 @router.post("/session/new")
 async def new_session(title: str = Form(...), _: None = Depends(require_host)):
     if title_in_use(title):
         return RedirectResponse(
-            url=f"/?error=duplicate&title={title}",
+            url=f"/?error=duplicate&title={quote(title, safe='')}",
             status_code=303,
         )
-    session = create_session(title)
-    return RedirectResponse(
-        url=f"/join/{session.id}?host_token={session.host_token}",
-        status_code=303,
-    )
+    session = await create_session(title)
+    resp = RedirectResponse(url=f"/join/{session.id}", status_code=303)
+    _set_host_cookie(resp, session.id, session.host_token)
+    return resp
 
 
 @router.get("/join/{session_id}", response_class=HTMLResponse)
@@ -60,6 +73,9 @@ async def join_page(request: Request, session_id: str, host_token: str = ""):
             {"message": "This session has ended or does not exist."},
             status_code=404,
         )
+    # Prefer the HttpOnly cookie (no URL exposure) over the query param
+    if not host_token:
+        host_token = request.cookies.get(f"ht_{session_id}", "")
     is_host = _is_host(host_token, session)
     return templates.TemplateResponse(
         request, "prejoin.html",
@@ -79,8 +95,12 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
             {"message": "Session not found."},
             status_code=404,
         )
+    # Prefer the HttpOnly cookie (no URL exposure) over the query param
+    cookie_token = request.cookies.get(f"ht_{session_id}", "")
+    if not host_token:
+        host_token = cookie_token
     is_host = _is_host(host_token, session)
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request, "studio.html",
         {
             "session": session,
@@ -90,6 +110,9 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
             "base_url": settings.base_url,
         },
     )
+    if cookie_token:
+        resp.delete_cookie(f"ht_{session_id}")
+    return resp
 
 
 @router.post("/api/token")
@@ -102,12 +125,16 @@ async def get_token(request: Request):
 
     if not session_id or not identity or not display_name:
         raise HTTPException(status_code=400, detail="Missing session_id, identity, or display_name")
+    if not isinstance(display_name, str) or len(display_name) > 100:
+        raise HTTPException(status_code=400, detail="display_name must be ≤100 characters")
 
     session = get_session(session_id)
     if not session or session.ended:
         raise HTTPException(status_code=404, detail="Session not found or ended")
 
     is_host = _is_host(host_token, session)
+    if not is_host and len(session.participants) >= 50 and display_name not in session.participants:
+        raise HTTPException(status_code=429, detail="Session is full")
 
     grants = VideoGrants(
         room_join=True,
@@ -129,7 +156,7 @@ async def get_token(request: Request):
     )
 
     session.participants[display_name] = datetime.now().isoformat()
-    touch(session_id)
+    await touch(session_id)
 
     return JSONResponse({"token": token, "is_host": is_host})
 
@@ -153,7 +180,7 @@ async def set_recording(session_id: str, request: Request):
     else:
         raise HTTPException(status_code=400, detail="action must be 'start' or 'stop'")
 
-    touch(session_id)
+    await touch(session_id)
     return JSONResponse({"recording": session.recording})
 
 
@@ -168,7 +195,7 @@ async def end_session_route(session_id: str, request: Request):
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    end_session(session_id)
+    await end_session(session_id)
     from app.routers.transcribe import schedule_session_transcription
     schedule_session_transcription(session_id)
     return JSONResponse({"ended": True})
@@ -185,7 +212,7 @@ async def delete_session_route(session_id: str, request: Request):
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    delete_session(session_id)
+    await delete_session(session_id)
     return JSONResponse({"deleted": True})
 
 
@@ -323,7 +350,7 @@ async def request_join(session_id: str, request: Request):
         "display_name": display_name,
         "requested_at": datetime.now().isoformat(),
     }
-    touch(session_id)
+    await touch(session_id)
     return JSONResponse({"ok": True})
 
 
@@ -364,7 +391,7 @@ async def admit_guest(session_id: str, identity: str, request: Request):
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
     session.admitted_guests[identity] = True
-    touch(session_id)
+    await touch(session_id)
     return JSONResponse({"ok": True})
 
 
@@ -378,7 +405,7 @@ async def deny_guest(session_id: str, identity: str, request: Request):
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
     session.denied_guests[identity] = True
-    touch(session_id)
+    await touch(session_id)
     return JSONResponse({"ok": True})
 
 
@@ -406,7 +433,7 @@ async def update_metadata(session_id: str, request: Request):
         if isinstance(raw_tags, list):
             session.tags = [str(t)[:50] for t in raw_tags[:20]]
 
-    touch(session_id)
+    await touch(session_id)
     return JSONResponse({"ok": True})
 
 
@@ -471,15 +498,23 @@ async def mute_participant(session_id: str, p_identity: str, request: Request):
 
 # ── Topic markers ────────────────────────────────────────────────────────────
 
+_MAX_MARKERS = 500
+
+
 @router.post("/api/session/{session_id}/marker")
 async def create_marker(session_id: str, request: Request):
     data = await request.json()
+    host_token = data.get("host_token", "")
     label = str(data.get("label", "")).strip()[:100]
     recording_time_s = data.get("recording_time_s")
+
+    identity = data.get("identity", "")
 
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if not _is_host(host_token, session) and identity not in session.admitted_guests:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     recordings_path = Path(settings.recordings_dir)
     session_path = recordings_path / session.dir_name
@@ -487,6 +522,16 @@ async def create_marker(session_id: str, request: Request):
 
     filename = "markers.txt"
     marker_path = session_path / filename
+
+    if marker_path.is_file():
+        try:
+            line_count = marker_path.read_text().count("\n")
+            if line_count >= _MAX_MARKERS:
+                raise HTTPException(status_code=429, detail="Marker limit reached for this session")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
 
     time_str = ""
     if recording_time_s is not None:

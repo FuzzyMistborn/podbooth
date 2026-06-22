@@ -19,7 +19,8 @@ templates.env.globals["app_version"] = APP_VERSION
 
 def _safe_next(next_url: str) -> str:
     # Only allow same-site relative paths to avoid open redirects.
-    if next_url.startswith("/") and not next_url.startswith("//"):
+    # Reject // and /\ — both can be normalized to protocol-relative URLs by browsers.
+    if next_url.startswith("/") and not next_url.startswith("//") and not next_url.startswith("/\\"):
         return next_url
     return "/"
 

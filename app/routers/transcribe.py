@@ -145,7 +145,8 @@ async def _wait_for_assembly(session_dir: Path, timeout_s: int = 600):
     from app.routers.upload import _assembly_in_progress
 
     for _ in range(timeout_s // 5):
-        in_flight = any(str(session_dir) in k for k in _assembly_in_progress)
+        session_dir_prefix = str(session_dir) + "/"
+        in_flight = any(k[0].startswith(session_dir_prefix) for k in _assembly_in_progress)
         has_chunks = False
         if session_dir.is_dir():
             for pdir in session_dir.iterdir():

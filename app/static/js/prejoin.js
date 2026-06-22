@@ -164,7 +164,7 @@ async function joinSession() {
     let url = `/studio/${SESSION_ID}?participant_name=${encodeURIComponent(name)}`;
     if (micSelect.value) url += `&mic_device_id=${encodeURIComponent(micSelect.value)}`;
     if (camSelect.value) url += `&cam_device_id=${encodeURIComponent(camSelect.value)}`;
-    url += `&host_token=${encodeURIComponent(HOST_TOKEN)}`;
+    // host_token is delivered via HttpOnly cookie — never put it in the URL
     window.location.href = url;
     return;
   }

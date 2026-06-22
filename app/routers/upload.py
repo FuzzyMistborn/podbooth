@@ -52,7 +52,9 @@ _metadata_lock = asyncio.Lock()
 
 # Epoch is client-supplied and ends up in filenames and glob patterns, so it
 # must never contain path separators or glob metacharacters.
-_EPOCH_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
+_EPOCH_RE = re.compile(r"^[A-Za-z0-9]{0,64}$")
+
+_MAX_CHUNK_BYTES = 500 * 1024 * 1024  # 500 MB per chunk
 
 # Matches chunk files in both epoch and no-epoch forms:
 #   audio_abc123_chunk_000000.raw   →  track=audio  epoch=abc123  ext=raw
@@ -240,12 +242,16 @@ async def upload_chunk(
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
         raise HTTPException(status_code=400, detail="Invalid ext")
+    if chunk_index < 0:
+        raise HTTPException(status_code=400, detail="Invalid chunk_index")
     _validate_epoch(epoch)
 
     content = await file.read()
     if len(content) == 0:
         logger.info("chunk skip empty: %s/%s #%d", track_type, participant, chunk_index)
         return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
+    if len(content) > _MAX_CHUNK_BYTES:
+        raise HTTPException(status_code=413, detail="Chunk exceeds size limit")
 
     directory = participant_dir(session, participant, identity)
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
@@ -273,8 +279,15 @@ async def finalize_track(request: Request):
     track_type = data.get("track_type")
     fmt = data.get("format", "container")
     epoch = data.get("epoch", "")
-    sample_rate = int(data.get("sample_rate") or 48000)
-    channels = int(data.get("channels") or 1)
+    try:
+        sample_rate = int(data.get("sample_rate") or 48000)
+        channels = int(data.get("channels") or 1)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid sample_rate or channels")
+    if not (1 <= sample_rate <= 384000):
+        raise HTTPException(status_code=400, detail="sample_rate out of range (1–384000)")
+    if not (1 <= channels <= 8):
+        raise HTTPException(status_code=400, detail="channels out of range (1–8)")
 
     session = get_session(session_id)
     if not session:

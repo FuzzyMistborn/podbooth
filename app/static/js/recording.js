@@ -725,6 +725,7 @@ async function createMarker() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         host_token: HOST_TOKEN,
+        identity: typeof identity !== 'undefined' ? identity : '',
         label,
         recording_time_s: Math.floor(elapsedMs / 1000),
       }),

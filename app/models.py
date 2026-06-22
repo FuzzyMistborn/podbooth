@@ -6,7 +6,7 @@ import json
 import logging
 import secrets
 import shutil
-import threading
+import asyncio
 
 from app.config import settings
 
@@ -41,7 +41,7 @@ class Session:
 
 
 _sessions: dict[str, Session] = {}
-_lock = threading.Lock()
+_lock = asyncio.Lock()
 
 
 def _store_path() -> Path:
@@ -89,7 +89,7 @@ def title_in_use(title: str) -> bool:
     return any(s.title.casefold() == needle and not s.ended for s in _sessions.values())
 
 
-def create_session(title: str) -> Session:
+async def create_session(title: str) -> Session:
     session_id = secrets.token_urlsafe(9)   # 72 bits, URL-safe
     host_token = secrets.token_hex(32)      # 256-bit secret
     created_at = datetime.now()
@@ -101,7 +101,7 @@ def create_session(title: str) -> Session:
         created_at=created_at,
         dir_name=dir_name,
     )
-    with _lock:
+    async with _lock:
         _sessions[session_id] = session
         _save()
     return session
@@ -115,14 +115,14 @@ def list_sessions() -> list[Session]:
     return sorted(_sessions.values(), key=lambda s: s.created_at, reverse=True)
 
 
-def touch(session_id: str):
+async def touch(session_id: str):
     """Persist after external mutation of a session object."""
-    with _lock:
+    async with _lock:
         _save()
 
 
-def end_session(session_id: str):
-    with _lock:
+async def end_session(session_id: str):
+    async with _lock:
         session = _sessions.get(session_id)
         if session:
             session.ended = True
@@ -130,8 +130,8 @@ def end_session(session_id: str):
             _save()
 
 
-def delete_session(session_id: str):
-    with _lock:
+async def delete_session(session_id: str):
+    async with _lock:
         session = _sessions.pop(session_id, None)
         _save()
     if session:
@@ -143,7 +143,7 @@ def delete_session(session_id: str):
                 logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
 
 
-def purge_expired() -> list[str]:
+async def purge_expired() -> list[str]:
     """Delete sessions older than retention_days. Returns deleted session IDs."""
     if settings.retention_days <= 0:
         return []
@@ -151,5 +151,5 @@ def purge_expired() -> list[str]:
     expired = [sid for sid, s in list(_sessions.items()) if s.created_at < cutoff]
     for sid in expired:
         logger.info("Purging expired session %s", sid)
-        delete_session(sid)
+        await delete_session(sid)
     return expired

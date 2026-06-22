@@ -200,8 +200,7 @@ async function init() {
   } catch (e) {}
 
   if (!displayName) {
-    const suffix = IS_HOST ? `?host_token=${HOST_TOKEN}` : '';
-    window.location.href = `/join/${SESSION_ID}${suffix}`;
+    window.location.href = `/join/${SESSION_ID}`;
     return;
   }
 
