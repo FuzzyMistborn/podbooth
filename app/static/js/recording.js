@@ -683,6 +683,30 @@ async function restartPcmCapture() {
 // ── Recording status popover ─────────────────────────────────────────────────
 
 let recStatusInterval = null;
+let recStatusBroadcastTimer = null;
+
+function startRecStatusBroadcast() {
+  if (recStatusBroadcastTimer) return;
+  function doBroadcast() {
+    const backlog = Math.max(0, uploadStats.queued - uploadStats.completed);
+    broadcastData({
+      type: 'rec_status',
+      identity,
+      displayName,
+      audioOk: !!(pcmCapturing || (audioRecorder && audioRecorder.state === 'recording')),
+      videoOk: !videoRecorder || videoRecorder.state === 'recording',
+      uploadBacklog: backlog,
+      uploadError: uploadHasError,
+    });
+  }
+  doBroadcast();
+  recStatusBroadcastTimer = setInterval(doBroadcast, 4000);
+}
+
+function stopRecStatusBroadcast() {
+  clearInterval(recStatusBroadcastTimer);
+  recStatusBroadcastTimer = null;
+}
 
 function setRecStatus(key, state) {
   const row = document.getElementById(`rstatus-${key}`);
@@ -703,12 +727,14 @@ function updateRecStatus() {
 function startRecStatus() {
   updateRecStatus();
   recStatusInterval = setInterval(updateRecStatus, 1500);
+  startRecStatusBroadcast();
 }
 
 function stopRecStatus() {
   clearInterval(recStatusInterval);
   recStatusInterval = null;
   ['audio', 'video', 'upload', 'livekit'].forEach(k => setRecStatus(k, 'idle'));
+  stopRecStatusBroadcast();
 }
 
 // ── Topic markers ─────────────────────────────────────────────────────────────

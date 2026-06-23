@@ -546,7 +546,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 
 .tile-label {
   position: absolute;
-  bottom: 10px;
+  bottom: 48px;
   left: 12px;
   font-size: 12px;
   font-family: var(--font-mono);
@@ -568,7 +568,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   justify-content: center;
 }
 .tile-muted {
-  bottom: 10px;
+  bottom: 48px;
   right: 10px;
   background: rgba(0,0,0,0.6);
   border-radius: 50%;
@@ -608,6 +608,19 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .participant-tile.speaking {
   border-color: var(--green);
   box-shadow: 0 0 0 2px var(--green);
+}
+
+/* ── Tile waveform strip (full-width audio history at bottom of tile) */
+.tile-wave {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 40px;
+  background: rgba(0,0,0,0.35);
+  border-top: 1px solid rgba(255,255,255,0.08);
+  pointer-events: none;
+  display: block;
 }
 
 .tile-hand {
@@ -2145,6 +2158,58 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   align-self: flex-start;
 }
 .upload-banner-close:hover { opacity: 1; }
+.upload-banner.warn {
+  background: var(--bg-2);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+}
+.upload-banner-issues { flex-direction: column; gap: 4px; }
+.upload-issue-row {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Prejoin capability warnings ────────────────────────────── */
+.capability-warnings {
+  flex-direction: column;
+  gap: 6px;
+}
+.cap-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+.cap-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.cap-error  { background: rgba(239,68,68,0.08);  border-color: rgba(239,68,68,0.25);  color: #fca5a5; }
+.cap-warn   { background: rgba(234,179,8,0.08);  border-color: rgba(234,179,8,0.25);  color: #fde047; }
+.cap-info   { background: rgba(148,163,184,0.08); border-color: rgba(148,163,184,0.2); color: var(--text-2); }
+
+/* ── Prejoin recovery banner ────────────────────────────────── */
+.recovery-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(232,93,0,0.1);
+  border: 1px solid rgba(232,93,0,0.3);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--accent);
+  line-height: 1.4;
+}
 
 /* ── Rec status popover ──────────────────────────────────────── */
 .rec-status-popover {
@@ -2187,6 +2252,21 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .rec-status-row[data-state="error"] .rstatus-icon { color: var(--red); }
 .rec-status-row[data-state="ok"]    .rstatus-label { color: var(--text-1, #ddd); }
 .rec-status-row[data-state="error"] .rstatus-label { color: var(--red); }
+
+/* ── Rec status participants section ─────────────────────────── */
+.rec-status-sep {
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+  padding-top: 4px;
+}
+.rec-status-section-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 0 4px;
+}
 
 /* ── New topic group ─────────────────────────────────────────── */
 .topic-group {
@@ -2244,14 +2324,14 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 
 /* ── Stats panel ─────────────────────────────────────────────── */
 .stats-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
+  position: fixed;
+  top: 64px;
+  right: 20px;
   width: 300px;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  z-index: 200;
+  z-index: 1000;
   box-shadow: 0 4px 24px rgba(0,0,0,0.4);
   flex-direction: column;
   overflow: hidden;
@@ -2295,7 +2375,8 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   font-size: 11px;
   color: var(--text);
   flex: 1;
-  word-break: break-all;
+  min-width: 0;
+  word-break: break-word;
 }
 .stats-empty {
   font-size: 13px;
@@ -2393,7 +2474,7 @@ body.is-fullscreen.controls-peek .controls-bar {
   .btn-share, .btn-danger { padding: 6px 9px; font-size: 11px; }
   .record-btn, .pause-btn, .resume-btn, .stop-btn { padding: 0 8px; font-size: 10px; gap: 4px; }
   #record-label { display: none; }
-  .audio-meter { display: none; }
+  .tile-wave { display: none; }
 
   /* Video area */
   .video-grid { padding: 8px; gap: 5px; }

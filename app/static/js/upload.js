@@ -88,6 +88,16 @@ async function waitForUploads() {
 
     showUploadBanner('done');
     setTimeout(() => hideUploadBanner(), 8000);
+
+    if (IS_HOST) {
+      try {
+        const vr = await fetch(`/api/session/${SESSION_ID}/verify-recordings`);
+        if (vr.ok) {
+          const { issues } = await vr.json();
+          if (issues && issues.length > 0) showUploadWarnings(issues);
+        }
+      } catch (e) {}
+    }
   } catch (e) {
     showUploadBanner('error');
   } finally {
@@ -164,6 +174,33 @@ function hideUploadBanner() {
   if (!banner) return;
   banner.classList.add('hidden');
   banner.classList.remove('uploading', 'done', 'error', 'assembling');
+}
+
+function showUploadWarnings(issues) {
+  const banner = document.getElementById('upload-banner');
+  if (!banner) return;
+  banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling');
+  banner.classList.add('warn');
+  banner.innerHTML = '';
+  const main = document.createElement('div');
+  main.className = 'upload-banner-main upload-banner-issues';
+  const lbl = document.createElement('span');
+  lbl.className = 'upload-banner-label';
+  lbl.textContent = `⚠ ${issues.length} recording issue${issues.length > 1 ? 's' : ''} detected`;
+  main.appendChild(lbl);
+  for (const iss of issues) {
+    const row = document.createElement('div');
+    row.className = 'upload-issue-row';
+    row.textContent = `${iss.participant} / ${iss.file}: ${iss.issue}`;
+    main.appendChild(row);
+  }
+  banner.appendChild(main);
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'upload-banner-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Dismiss';
+  closeBtn.addEventListener('click', hideUploadBanner);
+  banner.appendChild(closeBtn);
 }
 
 // ── Recordings files panel ────────────────────────────────────────────────────

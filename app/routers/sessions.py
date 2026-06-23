@@ -61,12 +61,12 @@ async def index(request: Request, _: None = Depends(require_host)):
     return resp
 
 
-def _set_host_cookie(response, session_id: str, host_token: str) -> None:
-    """Attach a short-lived HttpOnly cookie carrying the host token."""
+def _set_host_cookie(response, session_id: str, host_token: str, max_age: int = 14400) -> None:
+    """Attach an HttpOnly cookie carrying the host token."""
     response.set_cookie(
         f"ht_{session_id}",
         host_token,
-        max_age=300,
+        max_age=max_age,
         httponly=True,
         samesite="lax",
         secure=settings.base_url.startswith("https"),
@@ -103,13 +103,16 @@ async def join_page(request: Request, session_id: str, host_token: str = ""):
     if not host_token:
         host_token = request.cookies.get(f"ht_{session_id}", "")
     is_host = _is_host(host_token, session)
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request, "prejoin.html",
         {
             "session": session,
             "host_token": host_token if is_host else "",
         },
     )
+    if is_host:
+        _set_host_cookie(resp, session_id, host_token)
+    return resp
 
 
 @router.get("/studio/{session_id}", response_class=HTMLResponse)
@@ -136,7 +139,9 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
             "base_url": settings.base_url,
         },
     )
-    if cookie_token:
+    if is_host:
+        _set_host_cookie(resp, session_id, host_token)
+    elif cookie_token:
         resp.delete_cookie(f"ht_{session_id}")
     return resp
 
@@ -579,6 +584,48 @@ async def create_marker(session_id: str, request: Request):
 
 
 # ── Assembly status ──────────────────────────────────────────────────────────
+
+@router.get("/api/session/{session_id}/verify-recordings")
+async def verify_recordings(session_id: str, _: None = Depends(require_host)):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session_path = Path(settings.recordings_dir) / session.dir_name
+    if not session_path.is_dir():
+        return JSONResponse({"issues": []})
+    issues = []
+    for pdir in sorted(session_path.iterdir()):
+        if not pdir.is_dir():
+            continue
+        participant = pdir.name
+        for fpath in sorted(pdir.iterdir()):
+            if not fpath.is_file():
+                continue
+            name = fpath.name
+            if "_chunk_" in name or "_noaudio" in name or "_source" in name:
+                continue
+            if fpath.suffix not in (".wav", ".mp4", ".webm"):
+                continue
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(fpath),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                val = stdout.decode().strip()
+                dur = float(val) if val else 0.0
+            except Exception:
+                dur = 0.0
+            if dur == 0.0:
+                issues.append({"participant": participant, "file": name, "issue": "empty or unreadable"})
+            elif dur < 3.0:
+                issues.append({"participant": participant, "file": name, "issue": f"very short ({dur:.1f}s) — may be incomplete"})
+    return JSONResponse({"issues": issues})
+
 
 @router.get("/api/session/{session_id}/assembly-status")
 async def assembly_status_route(session_id: str):

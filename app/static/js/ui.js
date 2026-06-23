@@ -1,3 +1,163 @@
+// ── Audio waveform state ─────────────────────────────────────────────────────
+// Architecture: fast polling captures speech peaks; slow slot commits drive the
+// display. Each display slot stores the PEAK of all fast polls within its window,
+// giving a clean speech envelope (clear peaks during words, valleys in gaps)
+// over a long history. Rendering uses rAF + sub-pixel translate for smooth scroll.
+//
+// Poll every WAVE_FAST_MS → accumulate peak → commit one slot every WAVE_SLOT_MS
+// → 300 slots × 400 ms = 2 minutes of history shown.
+const waveBuffers   = new Map(); // tileId → Float32Array committed peak history
+const waveHeads     = new Map(); // tileId → next write index
+const wavePeakAccum = new Map(); // tileId → running peak for the current slot
+const waveLiveLvl   = new Map(); // tileId → fast EMA for the live right-edge preview
+const WAVE_BUF_SIZE   = 512;    // circular buffer (must be > WAVE_DISPLAY_N + 2)
+const WAVE_FAST_MS    = 50;     // poll interval — fast enough to catch syllable peaks
+const WAVE_SLOT_MS    = 400;    // each display column represents this many ms
+const WAVE_SLOT_TICKS = WAVE_SLOT_MS / WAVE_FAST_MS; // fast polls per committed slot
+const WAVE_DISPLAY_N  = 300;    // columns rendered (300 × 400 ms = 2 min)
+let waveTimerId     = null;
+let waveRafId       = null;
+let waveTickCount   = 0;
+let waveLastSlot    = 0;        // performance.now() when the last slot was committed
+let waveformEnabled = localStorage.getItem('podbooth:waveform') !== 'false';
+
+function startWaveAnimation() {
+  if (waveTimerId || !waveformEnabled) return;
+  waveTickCount = 0;
+  waveLastSlot  = performance.now();
+  waveTimerId   = setInterval(waveTickSample, WAVE_FAST_MS);
+  waveRafId     = requestAnimationFrame(waveDrawFrame);
+}
+function stopWaveAnimation() {
+  clearInterval(waveTimerId);
+  waveTimerId = null;
+  if (waveRafId) { cancelAnimationFrame(waveRafId); waveRafId = null; }
+}
+function toggleWaveform() {
+  waveformEnabled = !waveformEnabled;
+  localStorage.setItem('podbooth:waveform', waveformEnabled);
+  document.querySelectorAll('.tile-wave').forEach(c => {
+    c.style.display = waveformEnabled ? '' : 'none';
+  });
+  if (waveformEnabled && waveBuffers.size > 0) startWaveAnimation();
+  else if (!waveformEnabled) stopWaveAnimation();
+  const btn = document.getElementById('btn-wave');
+  if (btn) btn.classList.toggle('active', waveformEnabled);
+}
+function waveTickSample() {
+  if (typeof room === 'undefined' || !room) return;
+  const levels = new Map();
+  const lp = room.localParticipant;
+  if (lp) levels.set(`tile-${lp.identity}`, lp.audioLevel || 0);
+  room.remoteParticipants?.forEach(p => levels.set(`tile-${p.identity}`, p.audioLevel || 0));
+
+  for (const [tileId] of waveBuffers) {
+    const raw = levels.get(tileId) || 0;
+    // Peak accumulator: takes the loudest moment within each slot window
+    wavePeakAccum.set(tileId, Math.max(wavePeakAccum.get(tileId) || 0, raw));
+    // Fast EMA for the live right-edge preview (responds quickly, decays in ~300 ms)
+    const prev = waveLiveLvl.get(tileId) || 0;
+    waveLiveLvl.set(tileId, raw > prev ? raw : raw * 0.3 + prev * 0.7);
+  }
+
+  waveTickCount++;
+  if (waveTickCount < WAVE_SLOT_TICKS) return;
+  waveTickCount = 0;
+
+  // Commit slot: push accumulated peak into the circular buffer
+  for (const [tileId, buf] of waveBuffers) {
+    buf[waveHeads.get(tileId) % WAVE_BUF_SIZE] = wavePeakAccum.get(tileId) || 0;
+    waveHeads.set(tileId, (waveHeads.get(tileId) || 0) + 1);
+    wavePeakAccum.set(tileId, 0);
+  }
+  waveLastSlot = performance.now();
+}
+function waveDrawFrame() {
+  if (!waveTimerId) return;
+  waveRafId = requestAnimationFrame(waveDrawFrame);
+  if (!waveBuffers.size) return;
+
+  // Fraction of current slot elapsed — drives the sub-pixel scroll offset
+  const frac = Math.min(1, (performance.now() - waveLastSlot) / WAVE_SLOT_MS);
+  for (const [tileId, buf] of waveBuffers) {
+    _drawWave(tileId, buf, waveHeads.get(tileId) || 0, frac, waveLiveLvl.get(tileId) || 0);
+  }
+}
+function _drawWave(tileId, buf, head, frac, liveLvl) {
+  const tile = document.getElementById(tileId);
+  if (!tile) return;
+  const canvas = tile.querySelector('.tile-wave');
+  if (!canvas) return;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (!W || !H) return;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const n   = WAVE_DISPLAY_N;
+  const pxS = W / n;          // pixels per sample
+  const cy  = H / 2;
+  const amp = cy - 2;
+
+  // Centre hairline — visible at silence
+  ctx.beginPath();
+  ctx.moveTo(0, cy); ctx.lineTo(W, cy);
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Map linear level [0,1] → display deviation using a dB scale.
+  // Human hearing is logarithmic; a linear or power curve compresses the range
+  // so quiet and loud look similar. Floor at -30 dB (lvl ≈ 0.032) = silence.
+  const MIN_DB = -30;
+  const lvlToDev = lvl => {
+    if (lvl < 0.001) return 1;
+    const norm = (20 * Math.log10(lvl) - MIN_DB) / -MIN_DB; // 0 at floor, 1 at 0 dBFS
+    return Math.max(1, Math.min(amp, norm * amp));
+  };
+
+  // Precompute amplitude deviations for n+2 points.
+  // n+1 come from the committed buffer; the last is the live preview that fills
+  // the right-edge gap introduced by the sub-pixel translate.
+  const devs = new Float32Array(n + 2);
+  for (let i = 0; i <= n; i++) {
+    const si  = ((head - 1 - (n - i)) % WAVE_BUF_SIZE + WAVE_BUF_SIZE * 4) % WAVE_BUF_SIZE;
+    devs[i] = lvlToDev(buf[si]);
+  }
+  devs[n + 1] = lvlToDev(liveLvl);
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+  ctx.translate(-frac * pxS, 0);
+
+  // Filled symmetric waveform: top edge L→R, vertical join, bottom edge R→L, close.
+  ctx.beginPath();
+  ctx.moveTo(0, cy - devs[0]);
+  // Top edge — left to right
+  for (let i = 0; i <= n; i++) {
+    const mx = (i + 0.5) * pxS;
+    const my = (cy - devs[i] + cy - devs[i + 1]) / 2;
+    ctx.quadraticCurveTo(i * pxS, cy - devs[i], mx, my);
+  }
+  ctx.lineTo((n + 1) * pxS, cy - devs[n + 1]);
+  // Vertical join at right edge
+  ctx.lineTo((n + 1) * pxS, cy + devs[n + 1]);
+  // Bottom edge — right to left (mirror)
+  for (let i = n + 1; i >= 1; i--) {
+    const mx = (i - 0.5) * pxS;
+    const my = (cy + devs[i] + cy + devs[i - 1]) / 2;
+    ctx.quadraticCurveTo(i * pxS, cy + devs[i], mx, my);
+  }
+  ctx.lineTo(0, cy + devs[0]);
+  ctx.closePath();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 function renderLocalParticipant() {
@@ -96,6 +256,19 @@ function createTile(tileId, isLocal, labelText) {
     tile.appendChild(handEl);
   }
 
+  // Scrolling waveform strip — camera tiles only, full-width at bottom of tile
+  if (!tileId.endsWith('-screen')) {
+    const waveCanvas = document.createElement('canvas');
+    waveCanvas.className = 'tile-wave';
+    if (!waveformEnabled) waveCanvas.style.display = 'none';
+    tile.appendChild(waveCanvas);
+    waveBuffers.set(tile.id, new Float32Array(WAVE_BUF_SIZE));
+    waveHeads.set(tile.id, 0);
+    wavePeakAccum.set(tile.id, 0);
+    waveLiveLvl.set(tile.id, 0);
+    startWaveAnimation();
+  }
+
   // Pin / unpin this tile to the stage (per-user, local only)
   const pinBtn = document.createElement('button');
   pinBtn.className = 'tile-pin';
@@ -184,6 +357,11 @@ function createTile(tileId, isLocal, labelText) {
 }
 
 function removeTile(id) {
+  waveBuffers.delete(id);
+  waveHeads.delete(id);
+  wavePeakAccum.delete(id);
+  waveLiveLvl.delete(id);
+  if (waveBuffers.size === 0) stopWaveAnimation();
   document.getElementById(id)?.remove();
   const idx = tileOrder.indexOf(id);
   if (idx !== -1) tileOrder.splice(idx, 1);
@@ -446,6 +624,10 @@ function setupControls() {
     const saved = localStorage.getItem(VIEW_KEY);
     if (saved === 'grid' || saved === 'spotlight') viewMode = saved;
   } catch (e) {}
+  // Waveform toggle — restore saved pref and wire the button
+  document.getElementById('btn-wave')?.classList.toggle('active', waveformEnabled);
+  document.getElementById('btn-wave')?.addEventListener('click', toggleWaveform);
+
   btnView?.classList.toggle('active', viewMode === 'spotlight');
   btnView?.addEventListener('click', () => {
     setViewMode(viewMode === 'grid' ? 'spotlight' : 'grid');
@@ -650,6 +832,35 @@ function setupControls() {
 
   setupTimerBar();
   if (IS_HOST) setupTimerControls();
+  setupKeyboardShortcuts();
+}
+
+function setupKeyboardShortcuts() {
+  document.addEventListener('keydown', e => {
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (document.activeElement?.isContentEditable) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    switch (e.key) {
+      case ' ':
+        e.preventDefault();
+        btnMic?.click();
+        break;
+      case 'm':
+      case 'M':
+        if (isRecording) { e.preventDefault(); btnNewTopic?.click(); }
+        break;
+      case 'r':
+      case 'R':
+        if (IS_HOST) {
+          e.preventDefault();
+          if (isRecording) btnStopRec?.click();
+          else btnRecord?.click();
+        }
+        break;
+    }
+  });
 }
 
 // ── Alert ─────────────────────────────────────────────────────────────────────

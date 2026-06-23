@@ -45,6 +45,8 @@ async function init() {
   updateJoinButton();
   requestAnimationFrame(updateJoinButton);
   setTimeout(updateJoinButton, 100);
+  checkBrowserCapabilities();
+  checkInterruptedSession();
 }
 
 async function populateDevices() {
@@ -147,6 +149,58 @@ async function startPreview() {
     overlay.classList.remove('hidden');
     overlay.querySelector('span').textContent = 'Camera/mic not available';
     console.error('Preview error:', err);
+  }
+}
+
+async function checkBrowserCapabilities() {
+  const issues = [];
+
+  if (!window.MediaRecorder) {
+    issues.push({ level: 'error', text: 'MediaRecorder not supported — recording will not work in this browser.' });
+  } else {
+    const hasAudio = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus']
+      .some(m => MediaRecorder.isTypeSupported(m));
+    if (!hasAudio) issues.push({ level: 'warn', text: 'No supported audio codec found — audio recording may fail.' });
+    const hasVideo = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm']
+      .some(m => MediaRecorder.isTypeSupported(m));
+    if (!hasVideo) issues.push({ level: 'warn', text: 'No supported video codec found — video recording may be unavailable.' });
+  }
+
+  if (!('AudioWorklet' in window)) {
+    issues.push({ level: 'info', text: 'AudioWorklet not available — audio will use Opus fallback instead of lossless PCM.' });
+  }
+
+  if (!window.RTCPeerConnection) {
+    issues.push({ level: 'error', text: 'WebRTC not supported — cannot connect to the recording room.' });
+  }
+
+  const ua = navigator.userAgent;
+  if (ua.includes('Firefox')) {
+    issues.push({ level: 'info', text: 'Firefox: audio may take a moment to initialize when recording starts.' });
+  } else if (/^((?!chrome|android).)*safari/i.test(ua)) {
+    issues.push({ level: 'warn', text: 'Safari: video recording has known limitations. Chrome or Firefox is recommended.' });
+  }
+
+  if (issues.length === 0) return;
+  const wrap = document.getElementById('capability-warnings');
+  if (!wrap) return;
+  wrap.style.display = 'flex';
+  wrap.innerHTML = issues.map(i =>
+    `<div class="cap-item cap-${i.level}">` +
+    `<span class="cap-icon">${i.level === 'error' ? '✗' : i.level === 'warn' ? '⚠' : 'ℹ'}</span>` +
+    `<span>${i.text}</span></div>`
+  ).join('');
+}
+
+function checkInterruptedSession() {
+  const prefix = `podbooth:epoch:${SESSION_ID}:`;
+  for (let i = 0; i < sessionStorage.length; i++) {
+    const key = sessionStorage.key(i);
+    if (key && key.startsWith(prefix)) {
+      const banner = document.getElementById('recovery-banner');
+      if (banner) banner.style.display = 'flex';
+      return;
+    }
   }
 }
 

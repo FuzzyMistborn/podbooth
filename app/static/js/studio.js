@@ -108,6 +108,8 @@ let activeSpeakerTileId = null;
 const tileOrder = [];
 
 const participantLatency = new Map();
+const participantRecStatus = new Map();
+ // identity → {displayName, audioOk, videoOk, uploadBacklog, uploadError, ts}
 let localRttMs = null;
 let latencyInterval = null;
 
@@ -200,7 +202,8 @@ async function init() {
   } catch (e) {}
 
   if (!displayName) {
-    window.location.href = `/join/${SESSION_ID}`;
+    const base = `/join/${SESSION_ID}`;
+    window.location.href = HOST_TOKEN ? `${base}?host_token=${encodeURIComponent(HOST_TOKEN)}` : base;
     return;
   }
 
@@ -271,6 +274,7 @@ async function init() {
     // MediaStreamAudioSourceNode can take 10+ seconds before it delivers
     // real frames. Fire-and-forget: startPcmCapture() falls back if not ready.
     prewarmPcmGraph();
+    initDeviceWatcher();
 
     renderLocalParticipant();
     for (const p of room.remoteParticipants.values()) {
@@ -483,6 +487,10 @@ function attachRoomEvents() {
       const text = msg.label ? `New topic at ${timeStr}: "${msg.label}"` : `New topic marked at ${timeStr}`;
       showToast(text, 5000);
     }
+    if (msg.type === 'rec_status' && IS_HOST) {
+      participantRecStatus.set(msg.identity, { ...msg, ts: Date.now() });
+      renderParticipantRecStatus();
+    }
     if (msg.type === 'latency_report') {
       participantLatency.set(msg.identity, msg.rttMs);
       const tile = document.getElementById(`tile-${msg.identity}`);
@@ -564,6 +572,60 @@ async function broadcastData(msg) {
     await room.localParticipant.publishData(encoded, { reliable: true });
   } catch (e) {
     console.warn('broadcastData failed:', e);
+  }
+}
+
+
+function initDeviceWatcher() {
+  let knownIds = new Set();
+  navigator.mediaDevices.enumerateDevices()
+    .then(devices => { knownIds = new Set(devices.map(d => d.deviceId)); })
+    .catch(() => {});
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    navigator.mediaDevices.enumerateDevices()
+      .then(devices => {
+        const newIds = new Set(devices.map(d => d.deviceId));
+        if (activeMicDeviceId && knownIds.has(activeMicDeviceId) && !newIds.has(activeMicDeviceId)) {
+          showToast('⚠ Microphone disconnected — select another in the mic menu', 7000);
+        }
+        if (activeCamDeviceId && knownIds.has(activeCamDeviceId) && !newIds.has(activeCamDeviceId)) {
+          showToast('⚠ Camera disconnected — select another in the camera menu', 7000);
+        }
+        knownIds = newIds;
+      })
+      .catch(() => {});
+  });
+}
+
+function renderParticipantRecStatus() {
+  const wrap = document.getElementById('rstatus-peers-wrap');
+  const list = document.getElementById('rstatus-peers');
+  if (!wrap || !list) return;
+  const now = Date.now();
+  for (const [id, s] of participantRecStatus) {
+    if (now - s.ts > 10000) participantRecStatus.delete(id);
+  }
+  if (participantRecStatus.size === 0) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  list.innerHTML = '';
+  for (const [, s] of participantRecStatus) {
+    const row = document.createElement('div');
+    row.className = 'rec-status-row';
+    const hasIssue = !s.audioOk || s.uploadError || s.uploadBacklog > 15;
+    row.dataset.state = hasIssue ? 'warn' : 'ok';
+    let statusText = 'OK';
+    if (!s.audioOk) statusText = 'no audio';
+    else if (s.uploadError) statusText = 'upload error';
+    else if (s.uploadBacklog > 15) statusText = `${s.uploadBacklog} chunks queued`;
+    const icon = document.createElement('span');
+    icon.className = 'rstatus-icon';
+    icon.textContent = hasIssue ? '⚠' : '✓';
+    const label = document.createElement('span');
+    label.className = 'rstatus-label';
+    label.textContent = `${s.displayName}: ${statusText}`;
+    row.appendChild(icon);
+    row.appendChild(label);
+    list.appendChild(row);
   }
 }
 
