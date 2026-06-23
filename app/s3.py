@@ -156,11 +156,13 @@ def delete_session_objects(session_id: str, extra_prefixes: list[str] | None = N
                         seen.add(key)
                         to_delete.append({"Key": key})
         for i in range(0, len(to_delete), 1000):
-            s3.delete_objects(
+            resp = s3.delete_objects(
                 Bucket=bucket,
                 Delete={"Objects": to_delete[i:i+1000], "Quiet": True},
             )
-            deleted += len(to_delete[i:i+1000])
+            deleted += len(to_delete[i:i+1000]) - len(resp.get("Errors", []))
+            for err in resp.get("Errors", []):
+                logger.warning("S3 delete_objects error: key=%s code=%s message=%s", err.get("Key"), err.get("Code"), err.get("Message"))
         logger.info("S3 deleted %d objects under %s", deleted, prefixes)
     except (BotoCoreError, ClientError) as e:
         logger.warning("S3 delete_session_objects failed for %s: %s", session_id, e)

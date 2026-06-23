@@ -79,6 +79,7 @@ async def _build_manifest_files(loop, objs: list[dict], r2_meta: dict, expiry_se
                 None, lambda k=key: s3.generate_download_url(k, expires_in=expiry_secs)
             )
         except Exception:
+            logger.exception("Failed to generate download URL for key %s", key)
             dl_url = ""
         manifest_files.append({
             "key": key,
