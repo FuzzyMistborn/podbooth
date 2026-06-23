@@ -236,8 +236,13 @@ Files are organized under the configured upload path as:
    | Key | Action |
    |-----|--------|
    | `Space` | Toggle mic mute |
+   | `A` | Toggle alert panel |
+   | `C` | Toggle chat |
+   | `F` | Fullscreen |
+   | `H` | Raise / lower hand |
    | `M` | Stamp a topic marker (while recording) |
    | `R` | Start / stop recording (host only) |
+   | `T` | Toggle timer queue (host only) |
 
 6. While recording, the host can:
    - Click **STOP** to end recording entirely

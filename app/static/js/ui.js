@@ -837,12 +837,6 @@ function setupControls() {
 
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
-      const modal = document.getElementById('shortcuts-modal');
-      if (modal?.classList.contains('open')) { modal.classList.remove('open'); e.preventDefault(); }
-      return;
-    }
-
     const tag = document.activeElement?.tagName?.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (document.activeElement?.isContentEditable) return;
@@ -864,6 +858,30 @@ function setupKeyboardShortcuts() {
           if (isRecording) btnStopRec?.click();
           else btnRecord?.click();
         }
+        break;
+      case 'a':
+      case 'A':
+        e.preventDefault();
+        document.getElementById('btn-alert')?.click();
+        break;
+      case 'c':
+      case 'C':
+        e.preventDefault();
+        document.getElementById('btn-chat')?.click();
+        break;
+      case 'f':
+      case 'F':
+        e.preventDefault();
+        document.getElementById('btn-fullscreen')?.click();
+        break;
+      case 'h':
+      case 'H':
+        e.preventDefault();
+        document.getElementById('btn-raise-hand')?.click();
+        break;
+      case 't':
+      case 'T':
+        if (IS_HOST) { e.preventDefault(); document.getElementById('btn-timer')?.click(); }
         break;
     }
   });

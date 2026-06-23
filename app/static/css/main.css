@@ -2589,71 +2589,82 @@ body.is-fullscreen.controls-peek .controls-bar {
   .session-card-actions { flex-wrap: wrap; }
 }
 
-/* ── Keyboard shortcuts modal ────────────────────────────────── */
-.shortcuts-modal-backdrop {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.55);
-  z-index: 600;
+/* ── Keyboard shortcuts hover trigger ───────────────────────── */
+.shortcuts-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  cursor: default;
+}
+.shortcuts-trigger-label {
+  width: 18px;
+  height: 18px;
+  display: flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-2);
+  line-height: 1;
+  user-select: none;
+  transition: color 0.12s, border-color 0.12s;
 }
-.shortcuts-modal-backdrop.open { display: flex; }
-.shortcuts-modal-box {
+.shortcuts-trigger:hover .shortcuts-trigger-label,
+.shortcuts-trigger:focus-visible .shortcuts-trigger-label {
+  color: var(--text);
+  border-color: var(--text-2);
+}
+.shortcuts-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
   background: var(--bg-2);
   border: 1px solid #444;
   border-radius: var(--radius);
-  padding: 1.25rem 1.4rem;
-  width: 340px;
+  padding: 0.85rem 1rem;
+  width: 260px;
+  z-index: 400;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
-.shortcuts-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.9rem;
+.shortcuts-trigger:hover .shortcuts-popover,
+.shortcuts-trigger:focus-within .shortcuts-popover {
+  display: block;
+}
+.shortcuts-popover-title {
+  font-size: 0.78rem;
   font-weight: 600;
-  margin-bottom: 1rem;
-}
-.shortcuts-modal-close {
-  background: none;
-  border: none;
   color: var(--text-2);
-  cursor: pointer;
-  font-size: 1rem;
-  line-height: 1;
-  padding: 0;
+  margin-bottom: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
-.shortcuts-modal-close:hover { color: var(--text); }
 .shortcuts-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
 }
 .shortcuts-table td {
-  padding: 0.35rem 0;
+  padding: 0.28rem 0;
   vertical-align: middle;
 }
 .shortcuts-table td:first-child {
-  width: 90px;
-  padding-right: 0.75rem;
+  width: 76px;
+  padding-right: 0.6rem;
 }
 kbd {
   display: inline-block;
   background: var(--bg-1);
   border: 1px solid #555;
   border-radius: 4px;
-  padding: 2px 8px;
+  padding: 1px 7px;
   font-family: monospace;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: var(--text);
 }
 .shortcut-note {
   color: var(--text-2);
-  font-size: 0.78rem;
-}
-.shortcuts-footer {
-  margin: 0.9rem 0 0;
   font-size: 0.75rem;
-  color: var(--text-2);
 }

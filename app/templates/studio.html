@@ -17,6 +17,24 @@
       <div id="stats-content"></div>
     </div>
   </div>
+  <div class="shortcuts-trigger" tabindex="0" aria-label="Keyboard shortcuts">
+    <span class="shortcuts-trigger-label">?</span>
+    <div class="shortcuts-popover">
+      <div class="shortcuts-popover-title">Keyboard Shortcuts</div>
+      <table class="shortcuts-table">
+        <tbody>
+          <tr><td><kbd>Space</kbd></td><td>Toggle mic mute</td></tr>
+          <tr><td><kbd>A</kbd></td><td>Toggle alert panel</td></tr>
+          <tr><td><kbd>C</kbd></td><td>Toggle chat</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Fullscreen</td></tr>
+          <tr><td><kbd>H</kbd></td><td>Raise / lower hand</td></tr>
+          <tr><td><kbd>M</kbd></td><td>Stamp topic marker <span class="shortcut-note">(recording)</span></td></tr>
+          {% if is_host %}<tr><td><kbd>R</kbd></td><td>Start / stop recording</td></tr>{% endif %}
+          {% if is_host %}<tr><td><kbd>T</kbd></td><td>Toggle timer queue</td></tr>{% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
   <div class="rec-indicator" id="rec-indicator">
     <span class="rec-dot"></span>
     <span id="rec-time">00:00</span>
@@ -163,16 +181,16 @@
         </button>
         <div class="device-dropdown" id="cam-dropdown"></div>
       </div>
-      <button class="ctrl-btn" id="btn-fullscreen" title="Fullscreen">
+      <button class="ctrl-btn" id="btn-fullscreen" title="Fullscreen [F]">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
       </button>
       <button class="ctrl-btn" id="btn-screen" title="Share screen">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
       </button>
-      <button class="ctrl-btn" id="btn-raise-hand" title="Raise hand">
+      <button class="ctrl-btn" id="btn-raise-hand" title="Raise hand [H]">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>
       </button>
-      <button class="ctrl-btn" id="btn-chat" title="Chat">
+      <button class="ctrl-btn" id="btn-chat" title="Chat [C]">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       </button>
       <button class="ctrl-btn" id="btn-view" title="Switch layout: Grid / Active speaker">
@@ -184,7 +202,7 @@
       </button>
 
 {% if is_host %}
-      <button class="ctrl-btn" id="btn-timer" title="Timer queue">
+      <button class="ctrl-btn" id="btn-timer" title="Timer queue [T]">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="10"/>
           <polyline points="12 6 12 12 16 14"/>
@@ -192,7 +210,7 @@
       </button>
       {% endif %}
       <div class="alert-btn-wrap">
-        <button class="ctrl-btn" id="btn-alert" title="Send alert to all participants">
+        <button class="ctrl-btn" id="btn-alert" title="Send alert to all participants [A]">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
             <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
@@ -233,9 +251,6 @@
     </div>
 
     <div class="controls-right">
-      <button class="ctrl-btn" id="btn-shortcuts" title="Keyboard shortcuts" onclick="document.getElementById('shortcuts-modal').classList.add('open')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
-      </button>
       <div class="share-wrap" id="share-wrap" style="display:none">
         <input type="text" id="share-link" readonly />
         <button class="btn-copy" id="btn-copy">Copy</button>
@@ -276,23 +291,6 @@
 
 <div class="upload-banner hidden" id="upload-banner"></div>
 
-<!-- Keyboard shortcuts modal -->
-<div class="shortcuts-modal-backdrop" id="shortcuts-modal" onclick="if(event.target===this)this.classList.remove('open')">
-  <div class="shortcuts-modal-box">
-    <div class="shortcuts-modal-header">
-      <span>Keyboard Shortcuts</span>
-      <button class="shortcuts-modal-close" onclick="document.getElementById('shortcuts-modal').classList.remove('open')">✕</button>
-    </div>
-    <table class="shortcuts-table">
-      <tbody>
-        <tr><td><kbd>Space</kbd></td><td>Toggle mic mute</td></tr>
-        <tr><td><kbd>M</kbd></td><td>Stamp topic marker <span class="shortcut-note">(while recording)</span></td></tr>
-        {% if is_host %}<tr><td><kbd>R</kbd></td><td>Start / stop recording <span class="shortcut-note">(host only)</span></td></tr>{% endif %}
-      </tbody>
-    </table>
-    <p class="shortcuts-footer">Shortcuts are disabled while typing in a text field.</p>
-  </div>
-</div>
 
 <div class="alert-banner hidden" id="alert-banner">
   <svg class="alert-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
