@@ -66,8 +66,10 @@
           <span class="badge badge-ended">Ended</span>
           {% elif session.recording %}
           <span class="badge badge-recording">● Recording</span>
-          {% else %}
+          {% elif session.participants %}
           <span class="badge badge-live">Live</span>
+          {% else %}
+          <span class="badge badge-waiting">Waiting</span>
           {% endif %}
           <button class="btn-edit-meta" onclick="toggleMetaEdit('{{ session.id }}')">Edit</button>
         </div>
@@ -173,7 +175,8 @@
         </div>
         {% endif %}
         {% if not session.ended %}
-        <a href="/studio/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Rejoin as Host →</a>
+        <a href="/join/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Join as Host →</a>
+        <button class="btn-secondary" onclick="copyJoinLink('{{ session.id }}', this)">Copy Guest Link</button>
         {% endif %}
         {% if session.ended and whisperx_enabled %}
         <button class="btn-secondary" id="retx-{{ session.id }}" onclick="retranscribe('{{ session.id }}', '{{ session.host_token }}', this)">Retranscribe</button>
@@ -202,6 +205,15 @@
 
 <script>
 // ── Feature 1: Metadata edit ─────────────────────────────────────────────────
+
+function copyJoinLink(sessionId, btn) {
+  const url = window.location.origin + '/join/' + sessionId;
+  navigator.clipboard.writeText(url).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  });
+}
 
 function toggleMetaEdit(sessionId) {
   const form = document.getElementById(`meta-form-${sessionId}`);

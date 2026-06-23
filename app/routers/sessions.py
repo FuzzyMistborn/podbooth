@@ -76,6 +76,7 @@ def _set_host_cookie(response, session_id: str, host_token: str, max_age: int = 
 @router.post("/session/new")
 async def new_session(
     title: str = Form(...),
+    join_now: str = Form("true"),
     _: None = Depends(require_host),
     _csrf: None = Depends(require_csrf),
 ):
@@ -85,7 +86,10 @@ async def new_session(
             status_code=303,
         )
     session = await create_session(title)
-    resp = RedirectResponse(url=f"/join/{session.id}", status_code=303)
+    if join_now == "false":
+        resp = RedirectResponse(url="/dashboard", status_code=303)
+    else:
+        resp = RedirectResponse(url=f"/join/{session.id}", status_code=303)
     _set_host_cookie(resp, session.id, session.host_token)
     return resp
 
