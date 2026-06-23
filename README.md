@@ -230,6 +230,15 @@ Files are organized under the configured upload path as:
 3. Click **Share Link** → copy the guest URL → send to participants
 4. Guests open the link, check their devices (mic/camera selections are saved for future sessions), enter their name, and join
 5. Host clicks **REC** to start — all participants record locally and upload in real time; a live input level meter and clip indicator appear on each tile during recording
+
+   **Keyboard shortcuts** (active when no text field is focused — click the keyboard icon in the controls bar to see them in-app):
+
+   | Key | Action |
+   |-----|--------|
+   | `Space` | Toggle mic mute |
+   | `M` | Stamp a topic marker (while recording) |
+   | `R` | Start / stop recording (host only) |
+
 6. While recording, the host can:
    - Click **STOP** to end recording entirely
    - Click **PAUSE** on a participant tile to force-mute them, or **KICK** to remove them
@@ -237,11 +246,11 @@ Files are organized under the configured upload path as:
    - Click **Topic** to stamp a named topic marker — saved as a downloadable `.txt` and listed in the Files panel
 7. The **Files** panel shows recordings assembling in real time and lists any topic marker files; the upload banner shows per-chunk progress and an assembling state
 8. Incoming join requests play a chime and can be **Accepted** or **Denied** by the host; each participant tile shows connection latency
-9. Open the **Stats** panel (⚙) for live WebRTC diagnostics (bitrate, packet loss, jitter, round-trip time)
+9. Hover over the top right corner to see stats (WebRTC diagnostics for things like bitrate, packet loss, jitter, round-trip time), and when recording see the health of the recording
 10. Guests can leave at any time with the **Leave** button (a confirmation appears if uploads are still in progress); host clicks **End Session** to close the room
 11. Files are assembled server-side and downloadable from `/dashboard`
 12. If transcription is configured, a single `transcript.txt` is generated automatically once the session ends — combining all participants' audio into one file and sending it to WhisperX. A "Transcribing…" indicator appears on the dashboard card while it runs; the transcript can be viewed inline or downloaded when complete
-13. If cloud upload is configured, an **↑ Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **↑ Upload OBS Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
+13. If cloud upload is configured, an **Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **Upload Local Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
 
 ---
 

@@ -837,6 +837,12 @@ function setupControls() {
 
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('shortcuts-modal');
+      if (modal?.classList.contains('open')) { modal.classList.remove('open'); e.preventDefault(); }
+      return;
+    }
+
     const tag = document.activeElement?.tagName?.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (document.activeElement?.isContentEditable) return;
