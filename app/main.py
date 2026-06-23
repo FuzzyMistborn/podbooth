@@ -8,7 +8,7 @@ import os
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from app.routers import sessions, upload, dashboard, login, export, transcribe, cloudsync, localupload
+from app.routers import sessions, upload, dashboard, login, export, transcribe, cloudsync, localupload, s3upload
 from app.routers.upload import recover_orphaned_chunks
 from app.config import settings
 from app.limiter import limiter
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.recordings_dir, exist_ok=True)
     models.load()
     await models.purge_expired()
+    await models.purge_expired_r2()
     # Recover any chunks that were never finalized before the last shutdown
     # (e.g. a client crashed mid-recording). Assembly runs as background tasks.
     for session in models.list_sessions():
@@ -49,3 +50,4 @@ app.include_router(export.router)
 app.include_router(transcribe.router)
 app.include_router(cloudsync.router)
 app.include_router(localupload.router)
+app.include_router(s3upload.router)

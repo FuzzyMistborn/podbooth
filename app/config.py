@@ -78,6 +78,21 @@ class Settings(BaseSettings):
     b2_bucket: str = ""
     b2_upload_path: str = "PodBooth"
 
+    # S3-compatible object storage (for editor delivery)
+    s3_endpoint_url: str = ""
+    s3_region: str = "auto"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket_name: str = ""
+    s3_public_url: str = ""
+    s3_upload_expiry_days: int = 7
+
+    # Editor portal
+    editor_portal_url: str = ""
+
+    # Discord notifications
+    discord_webhook_url: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"

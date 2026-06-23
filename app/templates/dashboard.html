@@ -1,5 +1,57 @@
 {% extends "base.html" %}
 {% block title %}Sessions — PodBooth{% endblock %}
+{% block head %}
+<style>
+.s3-delivery-section {
+  margin: 0.75rem 0;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.s3-toggle-btn {
+  width: 100%;
+  text-align: left;
+  background: #111827;
+  color: #94a3b8;
+  border: none;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.s3-toggle-btn:hover { background: #1e293b; }
+.s3-panel {
+  padding: 0.75rem 0.9rem;
+  background: #0f1117;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.s3-subsection { display: flex; flex-direction: column; gap: 0.4rem; }
+.s3-subsection-title { font-size: 0.78rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+.s3-danger .s3-subsection-title { color: #7f1d1d; }
+.s3-url-input {
+  flex: 1;
+  background: #1e2533;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.6rem;
+  min-width: 0;
+}
+.s3-participant-url, .s3-editor-result { display: flex; gap: 0.4rem; align-items: center; margin-top: 0.25rem; }
+.s3-editor-existing { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.s3-expiry-label { font-size: 0.8rem; color: #94a3b8; }
+.s3-no-portal { font-size: 0.78rem; color: #64748b; font-style: italic; }
+.btn-sm { font-size: 0.8rem; padding: 0.3rem 0.75rem; }
+.s3-file-list { margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.3rem; }
+.s3-file-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; padding: 0.3rem 0; border-bottom: 1px solid #1e293b; }
+.s3-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s3-file-meta { color: #64748b; white-space: nowrap; }
+</style>
+{% endblock %}
 {% block content %}
 <div class="dashboard-layout">
   <div class="dash-header">
@@ -142,6 +194,42 @@
       {% if not has_transcript %}
       <p class="assembly-status" id="tx-{{ session.id }}" style="display:none"></p>
       {% endif %}
+      {% endif %}
+
+      {% if s3_enabled %}
+      <div class="s3-delivery-section">
+        <button class="s3-toggle-btn" onclick="toggleS3Panel('{{ session.id }}', this)">☁ File Delivery ▾</button>
+        <div class="s3-panel" id="s3-panel-{{ session.id }}" style="display:none">
+
+          <!-- Editor link subsection -->
+          <div class="s3-subsection">
+            <div class="s3-subsection-title">Editor Link</div>
+            {% if session.editor_token_hash %}
+            <div class="s3-editor-existing" id="s3-editor-existing-{{ session.id }}">
+              <span class="s3-expiry-label">Expires: {{ session.r2_expires_at[:10] if session.r2_expires_at else "unknown" }}</span>
+              {% if not editor_portal_url %}
+              <span class="s3-no-portal">Set EDITOR_PORTAL_URL to generate editor links</span>
+              {% endif %}
+              <button class="btn-secondary btn-sm" onclick="refreshManifest('{{ session.id }}', this)">Refresh file list</button>
+            </div>
+            {% endif %}
+            <button class="btn-secondary btn-sm" onclick="generateEditorLink('{{ session.id }}', this)">{% if session.editor_token_hash %}Regenerate editor link{% else %}Generate editor link{% endif %}</button>
+            <div class="s3-editor-result" id="s3-editor-result-{{ session.id }}" style="display:none">
+              <input type="text" readonly id="s3-editor-url-{{ session.id }}" class="s3-url-input">
+              <button class="btn-secondary btn-sm" onclick="copyS3Url('s3-editor-url-{{ session.id }}', this)">Copy</button>
+            </div>
+            <!-- File list on demand -->
+            <button class="btn-secondary btn-sm" onclick="loadS3Files('{{ session.id }}', this)" style="margin-top:0.5rem">Show uploaded files</button>
+            <div class="s3-file-list" id="s3-files-{{ session.id }}" style="display:none"></div>
+          </div>
+
+          <!-- Danger zone -->
+          <div class="s3-subsection s3-danger">
+            <div class="s3-subsection-title">Danger Zone</div>
+            <button class="btn-danger btn-sm" onclick="deleteS3Files('{{ session.id }}', this)">Delete all S3 files</button>
+          </div>
+        </div>
+      </div>
       {% endif %}
 
       <div class="session-card-actions">
@@ -749,6 +837,118 @@ document.querySelectorAll('[id^="cloud-up-"]').forEach(btn => {
     })
     .catch(() => {});
 });
+
+// ── S3 File Delivery ─────────────────────────────────────────────────────────
+
+function toggleS3Panel(sessionId, btn) {
+  const panel = document.getElementById(`s3-panel-${sessionId}`);
+  if (!panel) return;
+  const open = panel.style.display !== 'none';
+  panel.style.display = open ? 'none' : '';
+  btn.textContent = open ? '☁ File Delivery ▾' : '☁ File Delivery ▴';
+}
+
+function copyS3Url(inputId, btn) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  navigator.clipboard.writeText(input.value).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  });
+}
+
+async function apiPost(url, hostToken) {
+  const card = document.querySelector(`[data-host-token="${hostToken}"]`);
+  const token = card ? card.dataset.hostToken : hostToken;
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host_token: token }),
+    credentials: 'include',
+  });
+}
+
+async function generateEditorLink(sessionId, btn) {
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Generating…';
+  try {
+    const r = await fetch(`/api/session/${sessionId}/s3/editor-link`, {
+      method: 'POST', credentials: 'include',
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Error: ' + (d.detail || r.status)); return; }
+    const { editor_url } = await r.json();
+    const wrap = document.getElementById(`s3-editor-result-${sessionId}`);
+    const input = document.getElementById(`s3-editor-url-${sessionId}`);
+    if (wrap && input) { input.value = editor_url || '(no editor portal URL configured)'; wrap.style.display = ''; }
+  } catch (e) { alert('Request failed'); }
+  finally { btn.disabled = false; btn.textContent = orig; }
+}
+
+
+async function refreshManifest(sessionId, btn) {
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Refreshing…';
+  try {
+    const r = await fetch(`/api/session/${sessionId}/s3/manifest-refresh`, {
+      method: 'POST', credentials: 'include',
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Error: ' + (d.detail || r.status)); return; }
+    const { file_count } = await r.json();
+    btn.textContent = `Refreshed (${file_count} file(s))`;
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 3000);
+    return;
+  } catch (e) { alert('Request failed'); }
+  btn.disabled = false; btn.textContent = orig;
+}
+
+async function loadS3Files(sessionId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  const container = document.getElementById(`s3-files-${sessionId}`);
+  try {
+    const r = await fetch(`/api/session/${sessionId}/s3/files`, { credentials: 'include' });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Error: ' + (d.detail || r.status)); btn.disabled = false; btn.textContent = 'Show uploaded files'; return; }
+    const { files } = await r.json();
+    if (!files.length) { container.innerHTML = '<p style="color:#94a3b8;font-size:0.85rem">No files uploaded yet.</p>'; }
+    else {
+      container.innerHTML = files.map(f => `
+        <div class="s3-file-row">
+          <span class="s3-file-name">${f.filename}</span>
+          <span class="s3-file-meta">${(f.size_bytes / 1048576).toFixed(1)} MB${f.uploader ? ' · ' + f.uploader : ''}</span>
+          ${f.download_url ? `<a class="btn-download" href="${f.download_url}" target="_blank">↓</a>` : ''}
+        </div>
+      `).join('');
+    }
+    container.style.display = '';
+    btn.disabled = false;
+    btn.textContent = 'Hide files';
+    btn.onclick = () => {
+      container.style.display = 'none';
+      btn.textContent = 'Show uploaded files';
+      btn.onclick = () => loadS3Files(sessionId, btn);
+    };
+  } catch (e) { alert('Request failed'); btn.disabled = false; btn.textContent = 'Show uploaded files'; }
+}
+
+async function deleteS3Files(sessionId, btn) {
+  if (!confirm('Delete ALL S3 files for this session? This cannot be undone.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+  try {
+    const r = await fetch(`/api/session/${sessionId}/s3`, {
+      method: 'DELETE', credentials: 'include',
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Error: ' + (d.detail || r.status)); return; }
+    const { deleted } = await r.json();
+    btn.textContent = `Deleted ${deleted} file(s)`;
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Delete all S3 files'; }, 3000);
+    return;
+  } catch (e) { alert('Request failed'); }
+  btn.disabled = false; btn.textContent = 'Delete all S3 files';
+}
 
 // Poll assembly status for ended sessions that have no files yet.
 // When assembly finishes, reload to show the assembled files.

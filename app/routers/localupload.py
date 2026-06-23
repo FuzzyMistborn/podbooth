@@ -26,7 +26,7 @@ import os
 import re
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
@@ -35,8 +35,10 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.limiter import limiter
+from app import models
 from app.models import get_session
 from app.routers.cloudsync import (
+    S3Backend,
     UploadItem,
     _get_backends,
     _session_slug,
@@ -244,9 +246,35 @@ async def start_local_upload(
 
     upload_id = str(uuid.uuid4())
 
+    # Compute the actual storage keys for R2/B2 backends so we can record them
+    # in session.r2_files after a successful upload (needed for editor delivery).
+    s3_keys = []
+    for b in backends:
+        if isinstance(b, S3Backend):
+            upload_path = getattr(b, "_upload_path", "").strip("/")
+            key = f"{upload_path}/{remote_path}" if upload_path else remote_path
+            s3_keys.append(key)
+
+    file_size = tmp_path.stat().st_size
+
     async def _run_and_cleanup():
         try:
             await run_upload(upload_id, _local_upload_status, [item], backends)
+            result = _local_upload_status.get(upload_id, {})
+            if result.get("status") == "done" and s3_keys:
+                s = get_session(session_id)
+                if s:
+                    existing = {f["key"] for f in s.r2_files}
+                    for key in s3_keys:
+                        if key not in existing:
+                            s.r2_files.append({
+                                "key": key,
+                                "filename": filename,
+                                "size_bytes": file_size,
+                                "uploaded_at": datetime.now(tz=timezone.utc).isoformat(),
+                                "uploader": safe_participant or "local-upload",
+                            })
+                    await models.touch(session_id)
         finally:
             tmp_path.unlink(missing_ok=True)
 

@@ -5,6 +5,8 @@ import logging
 import secrets
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request, Form, HTTPException
@@ -252,6 +254,18 @@ async def delete_session_route(session_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Not authorized")
 
     slug = _session_slug(session.title)
+
+    # Clean up S3/R2/B2 objects before removing the session record
+    if session.editor_token_hash or session.r2_files:
+        try:
+            from app import s3
+            from app.routers.s3upload import _cloudsync_prefixes
+            extra_pfx = _cloudsync_prefixes(session.title)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
+        except Exception as e:
+            logger.warning("delete_session_route: S3 cleanup failed for %s: %s", session_id, e)
+
     await delete_session(session_id)
 
     if data.get("delete_cloud"):

@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BitFlip — Editor Files</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f0f0f;
+      --surface:   #1a1a1a;
+      --border:    #2a2a2a;
+      --accent:    #ff6b00;
+      --accent-dim:#7a3300;
+      --text:      #e0e0e0;
+      --muted:     #888;
+      --error-bg:  #1f0d0d;
+      --error-border: #5c1a1a;
+      --error-text: #ff6b6b;
+      --success:   #2a7a2a;
+      --font-ui:   'Inter', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Layout ── */
+    .page {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+
+    /* ── Wordmark ── */
+    .wordmark {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 48px;
+    }
+    .wordmark-icon {
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .wordmark-icon svg {
+      width: 16px;
+      height: 16px;
+      fill: #000;
+    }
+    .wordmark-label {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    /* ── Waveform accent (signature element) ── */
+    .waveform {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 28px;
+      margin-bottom: 20px;
+    }
+    .waveform-bar {
+      width: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+      opacity: 0.7;
+    }
+
+    /* ── Episode header ── */
+    .episode-header {
+      margin-bottom: 36px;
+      padding-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+    }
+    .episode-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--accent);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .episode-title {
+      font-size: 26px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.3;
+      margin-bottom: 12px;
+    }
+    .episode-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .episode-meta span {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .meta-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--border);
+      display: inline-block;
+    }
+    .expiry-warning {
+      color: #e0a020;
+    }
+    .expiry-urgent {
+      color: var(--error-text);
+    }
+
+    /* ── File list ── */
+    .files-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .files-count {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+    }
+    .files-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .file-list {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .file-group-header {
+      padding: 7px 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .file-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .file-row:last-child { border-bottom: none; }
+    .file-row:hover { background: var(--surface); }
+
+    .file-name {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .file-name .file-ext {
+      color: var(--accent);
+    }
+    .file-uploader {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+      font-family: var(--font-mono);
+    }
+    .file-size {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      text-align: right;
+    }
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      background: transparent;
+      border: 1px solid var(--accent-dim);
+      border-radius: 5px;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn-download:hover {
+      background: rgba(255,107,0,0.1);
+      border-color: var(--accent);
+      text-decoration: none;
+    }
+    .btn-download svg {
+      width: 13px;
+      height: 13px;
+      fill: currentColor;
+      flex-shrink: 0;
+    }
+
+    /* ── Footer ── */
+    .portal-footer {
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .footer-warning {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .footer-warning svg {
+      width: 13px;
+      height: 13px;
+      fill: var(--muted);
+      flex-shrink: 0;
+    }
+
+    /* ── State: Loading ── */
+    #state-loading { display: none; }
+    .skeleton-line {
+      height: 14px;
+      background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    .skeleton-line.w-40 { width: 40%; }
+    .skeleton-line.w-60 { width: 60%; }
+    .skeleton-line.w-80 { width: 80%; }
+    .skeleton-line.w-100 { width: 100%; }
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* ── State: Error ── */
+    #state-error { display: none; }
+    .error-box {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      border-radius: 8px;
+      padding: 28px 32px;
+    }
+    .error-code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--error-text);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .error-heading {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .error-body {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    /* ── State: Content ── */
+    #state-content { display: none; }
+
+    /* ── Responsive ── */
+    @media (max-width: 560px) {
+      .page { padding: 32px 16px 60px; }
+      .file-row {
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto;
+      }
+      .file-size { display: none; }
+      .episode-title { font-size: 21px; }
+    }
+
+    /* ── Reduced motion ── */
+    @media (prefers-reduced-motion: reduce) {
+      .skeleton-line { animation: none; }
+      .file-row { transition: none; }
+      .btn-download { transition: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Wordmark -->
+  <div class="wordmark">
+    <div class="wordmark-icon">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <!-- Stylised "B" as circuit/bit motif -->
+        <rect x="2" y="2" width="2" height="12"/>
+        <rect x="4" y="2" width="5" height="2"/>
+        <rect x="4" y="7" width="5" height="2"/>
+        <rect x="4" y="12" width="5" height="2"/>
+        <rect x="9" y="4" width="2" height="3"/>
+        <rect x="9" y="9" width="2" height="3"/>
+      </svg>
+    </div>
+    <span class="wordmark-label">BitFlip · Editor Files</span>
+  </div>
+
+  <!-- Loading state -->
+  <div id="state-loading">
+    <div class="skeleton-line w-40" style="height:10px; margin-bottom:16px;"></div>
+    <div class="skeleton-line w-80" style="height:24px; margin-bottom:10px;"></div>
+    <div class="skeleton-line w-60" style="height:10px; margin-bottom:36px;"></div>
+    <div class="skeleton-line w-100" style="height:52px; margin-bottom:3px;"></div>
+    <div class="skeleton-line w-100" style="height:52px; margin-bottom:3px;"></div>
+    <div class="skeleton-line w-100" style="height:52px;"></div>
+  </div>
+
+  <!-- Error state -->
+  <div id="state-error">
+    <div class="error-box">
+      <div class="error-code" id="error-code">Error</div>
+      <div class="error-heading" id="error-heading">Something went wrong</div>
+      <div class="error-body" id="error-body">Unable to load this download link.</div>
+    </div>
+  </div>
+
+  <!-- Content state -->
+  <div id="state-content">
+
+    <div class="episode-header">
+      <div class="waveform" id="waveform" aria-hidden="true"></div>
+      <div class="episode-label" id="episode-label">Episode</div>
+      <div class="episode-title" id="episode-title"></div>
+      <div class="episode-meta">
+        <span id="meta-recorded"></span>
+        <span class="meta-dot" aria-hidden="true"></span>
+        <span id="meta-files"></span>
+        <span class="meta-dot" aria-hidden="true"></span>
+        <span id="meta-expiry"></span>
+      </div>
+    </div>
+
+    <div class="files-header">
+      <span class="files-label">Files</span>
+      <span class="files-count" id="files-count"></span>
+    </div>
+
+    <div class="file-list" id="file-list" role="list"></div>
+
+    <div class="portal-footer">
+      <span class="footer-warning">
+        <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4zm0 7.25a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z"/>
+        </svg>
+        Do not share this link
+      </span>
+      <span id="footer-session-id"></span>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- Runtime config — must load before portal.js -->
+<script src="/config.js"></script>
+
+<script>
+(function () {
+  "use strict";
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function showState(name) {
+    ["loading", "error", "content"].forEach(function (s) {
+      document.getElementById("state-" + s).style.display = s === name ? "block" : "none";
+    });
+  }
+
+  function showError(code, heading, body) {
+    document.getElementById("error-code").textContent = code;
+    document.getElementById("error-heading").textContent = heading;
+    document.getElementById("error-body").textContent = body;
+    showState("error");
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return "—";
+    var gb = bytes / (1024 * 1024 * 1024);
+    var mb = bytes / (1024 * 1024);
+    if (gb >= 1) return gb.toFixed(2) + " GB";
+    if (mb >= 1) return mb.toFixed(1) + " MB";
+    return (bytes / 1024).toFixed(0) + " KB";
+  }
+
+  function formatDate(isoString) {
+    if (!isoString) return "";
+    try {
+      var d = new Date(isoString);
+      return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function daysUntil(isoString) {
+    try {
+      var now = new Date();
+      var then = new Date(isoString);
+      return Math.ceil((then - now) / (1000 * 60 * 60 * 24));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function escapeHtml(str) {
+    var d = document.createElement("div");
+    d.appendChild(document.createTextNode(String(str)));
+    return d.innerHTML;
+  }
+
+  // Extracts the base name and extension for colour-coding
+  function splitExt(filename) {
+    var idx = filename.lastIndexOf(".");
+    if (idx < 1) return { base: filename, ext: "" };
+    return { base: filename.slice(0, idx), ext: filename.slice(idx) };
+  }
+
+  // ── Waveform decoration ────────────────────────────────────────────────────
+
+  function buildWaveform() {
+    var el = document.getElementById("waveform");
+    var heights = [8, 14, 20, 24, 28, 22, 18, 26, 28, 20, 16, 24, 28, 22, 14, 10, 18, 22, 16, 12];
+    heights.forEach(function (h) {
+      var bar = document.createElement("div");
+      bar.className = "waveform-bar";
+      bar.style.height = h + "px";
+      el.appendChild(bar);
+    });
+  }
+
+  // ── Token verification (Web Crypto SHA-256) ────────────────────────────────
+
+  async function sha256Hex(str) {
+    var encoder = new TextEncoder();
+    var data = encoder.encode(str);
+    var hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    var hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  }
+
+  // ── Parse URL ─────────────────────────────────────────────────────────────
+
+  // Supports both:
+  //   /session/{sessionId}?token=...  (Cloudflare Pages with _redirects)
+  //   /?session={sessionId}&token=... (plain static hosting fallback)
+  function parseUrl() {
+    var params = new URLSearchParams(window.location.search);
+    var token = params.get("token") || "";
+
+    // Path-based: /session/{sessionId}
+    var pathMatch = window.location.pathname.match(/\/session\/([A-Za-z0-9_-]+)/);
+    if (pathMatch) {
+      return { sessionId: pathMatch[1], token: token };
+    }
+
+    // Query-based fallback: ?session={sessionId}&token={token}
+    var sessionId = params.get("session") || "";
+    return { sessionId: sessionId, token: token };
+  }
+
+  // ── Fetch manifest ─────────────────────────────────────────────────────────
+
+  async function fetchManifest(sessionId) {
+    var baseUrl = (window.PORTAL_CONFIG && window.PORTAL_CONFIG.R2_BASE_URL) || "";
+    if (!baseUrl) {
+      throw new Error("Portal config missing: R2_BASE_URL not set in config.js");
+    }
+    // Strip any trailing slash
+    baseUrl = baseUrl.replace(/\/$/, "");
+    var url = baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/manifest.json";
+
+    var resp = await fetch(url, { cache: "no-store" });
+    if (resp.status === 404) {
+      throw { code: "NOT_FOUND" };
+    }
+    if (!resp.ok) {
+      throw { code: "FETCH_ERROR", status: resp.status };
+    }
+    var manifest;
+    try {
+      manifest = await resp.json();
+    } catch (e) {
+      throw { code: "PARSE_ERROR" };
+    }
+    return manifest;
+  }
+
+  // ── Validate manifest structure ────────────────────────────────────────────
+
+  function validateManifest(m) {
+    if (!m || typeof m !== "object") return false;
+    if (typeof m.session_id !== "string") return false;
+    if (typeof m.editor_token_hash !== "string" || m.editor_token_hash.length !== 64) return false;
+    if (typeof m.expires_at !== "string") return false;
+    if (!Array.isArray(m.files)) return false;
+    return true;
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  function makeFileRow(file) {
+    var parts = splitExt(file.filename || "unknown");
+    var row = document.createElement("div");
+    row.className = "file-row";
+    row.setAttribute("role", "listitem");
+
+    var nameCol = document.createElement("div");
+    nameCol.innerHTML =
+      '<div class="file-name">' +
+        escapeHtml(parts.base) +
+        '<span class="file-ext">' + escapeHtml(parts.ext) + '</span>' +
+      '</div>' +
+      (file.uploader
+        ? '<div class="file-uploader">' + escapeHtml(file.uploader) + '</div>'
+        : "");
+
+    var sizeCol = document.createElement("div");
+    sizeCol.className = "file-size";
+    sizeCol.textContent = formatBytes(file.size_bytes);
+
+    var dlCol = document.createElement("div");
+    if (file.download_url) {
+      var link = document.createElement("a");
+      link.className = "btn-download";
+      link.href = file.download_url;
+      link.setAttribute("download", file.filename || "");
+      link.setAttribute("aria-label", "Download " + (file.filename || "file"));
+      link.innerHTML =
+        '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+          '<path d="M8 1v8.293l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7.5 9.293V1H8zM2 13h12v1H2v-1z"/>' +
+        '</svg>' +
+        'Download';
+      dlCol.appendChild(link);
+    } else {
+      var unavail = document.createElement("span");
+      unavail.style.cssText = "font-size:12px;color:var(--muted);font-family:var(--font-mono);";
+      unavail.textContent = "Unavailable";
+      dlCol.appendChild(unavail);
+    }
+
+    row.appendChild(nameCol);
+    row.appendChild(sizeCol);
+    row.appendChild(dlCol);
+    return row;
+  }
+
+  function makeGroupHeader(label) {
+    var h = document.createElement("div");
+    h.className = "file-group-header";
+    h.textContent = label;
+    return h;
+  }
+
+  function renderFileList(files) {
+    var list = document.getElementById("file-list");
+    list.innerHTML = "";
+
+    if (!files || files.length === 0) {
+      list.innerHTML = '<div class="file-row" style="color:var(--muted);font-size:13px;">No files available.</div>';
+      return;
+    }
+
+    var podbooth = files.filter(function (f) { return f.source === "podbooth"; });
+    var local    = files.filter(function (f) { return f.source === "local"; });
+    var other    = files.filter(function (f) { return f.source !== "podbooth" && f.source !== "local"; });
+
+    if (podbooth.length > 0) {
+      list.appendChild(makeGroupHeader("PodBooth Recordings"));
+      podbooth.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (local.length > 0) {
+      list.appendChild(makeGroupHeader("Local Uploads"));
+      local.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (other.length > 0) {
+      list.appendChild(makeGroupHeader("Other"));
+      other.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+  }
+
+  function renderContent(manifest) {
+    buildWaveform();
+
+    // Episode label + title
+    var epLabel = manifest.episode ? "Episode " + manifest.episode : "Session";
+    document.getElementById("episode-label").textContent = epLabel;
+    document.getElementById("episode-title").textContent = manifest.title || "Untitled Session";
+    document.title = epLabel + " — BitFlip Editor Files";
+
+    // Recorded date
+    var recEl = document.getElementById("meta-recorded");
+    if (manifest.created_at) {
+      recEl.textContent = "Recorded " + formatDate(manifest.created_at);
+    } else {
+      recEl.style.display = "none";
+      recEl.previousElementSibling && (recEl.previousElementSibling.style.display = "none");
+    }
+
+    // File count
+    var count = Array.isArray(manifest.files) ? manifest.files.length : 0;
+    document.getElementById("meta-files").textContent = count + (count === 1 ? " file" : " files");
+    document.getElementById("files-count").textContent = count + " total";
+
+    // Expiry
+    var expiryEl = document.getElementById("meta-expiry");
+    var days = daysUntil(manifest.expires_at);
+    if (days !== null) {
+      var expiryText = days > 0
+        ? "Expires " + formatDate(manifest.expires_at) + " (" + days + (days === 1 ? " day" : " days") + ")"
+        : "Expired " + formatDate(manifest.expires_at);
+      expiryEl.textContent = expiryText;
+      if (days <= 2 && days > 0) expiryEl.className += " expiry-warning";
+      if (days <= 0) expiryEl.className += " expiry-urgent";
+    }
+
+    // Footer session ID
+    document.getElementById("footer-session-id").textContent = "Session " + manifest.session_id;
+
+    // Files
+    renderFileList(manifest.files);
+
+    showState("content");
+  }
+
+  // ── Main ───────────────────────────────────────────────────────────────────
+
+  async function main() {
+    showState("loading");
+
+    var parsed = parseUrl();
+
+    if (!parsed.sessionId || !parsed.token) {
+      showError(
+        "Invalid link",
+        "This link is incomplete",
+        "The URL is missing required parameters. Ask the host to send you the full download link."
+      );
+      return;
+    }
+
+    // Basic token format sanity check (URL-safe base64, min 32 chars)
+    if (!/^[A-Za-z0-9_-]{32,}$/.test(parsed.token)) {
+      showError(
+        "Invalid token",
+        "This link is not valid",
+        "The access token in this URL is malformed. Ask the host to regenerate the download link."
+      );
+      return;
+    }
+
+    var manifest;
+    try {
+      manifest = await fetchManifest(parsed.sessionId);
+    } catch (err) {
+      if (err && err.code === "NOT_FOUND") {
+        showError(
+          "Not found",
+          "No files here",
+          "This session has no files, or the link has already expired and been cleaned up."
+        );
+      } else if (err && err.code === "PARSE_ERROR") {
+        showError(
+          "Corrupt manifest",
+          "Could not read file list",
+          "The file manifest is unreadable. Contact the host."
+        );
+      } else {
+        showError(
+          "Network error",
+          "Could not load files",
+          err && err.message ? err.message : "A network error occurred. Check your connection and try again."
+        );
+      }
+      return;
+    }
+
+    if (!validateManifest(manifest)) {
+      showError(
+        "Invalid manifest",
+        "File list is malformed",
+        "The manifest is missing required fields. The host may need to regenerate the download link."
+      );
+      return;
+    }
+
+    // ── Expiry check (before token verify — no point verifying an expired link) ──
+    var days = daysUntil(manifest.expires_at);
+    if (days !== null && days <= 0) {
+      showError(
+        "Link expired",
+        "This download link has expired",
+        "Files are removed after " + formatDate(manifest.expires_at) + ". Ask the host for a new link or check if the episode has been published."
+      );
+      return;
+    }
+
+    // ── Token verification ──
+    var tokenHash;
+    try {
+      tokenHash = await sha256Hex(parsed.token);
+    } catch (e) {
+      showError(
+        "Crypto error",
+        "Token verification failed",
+        "Your browser does not support the required cryptography API. Try a modern browser."
+      );
+      return;
+    }
+
+    // Constant-time-ish string comparison (both are the same length hex strings)
+    if (tokenHash !== manifest.editor_token_hash) {
+      showError(
+        "Access denied",
+        "This link is not valid",
+        "The token in this URL does not match. Ask the host to resend the download link."
+      );
+      return;
+    }
+
+    // ── Render ──
+    renderContent(manifest);
+  }
+
+  // Run after DOM is ready
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", main);
+  } else {
+    main();
+  }
+
+})();
+</script>
+</body>
+</html>

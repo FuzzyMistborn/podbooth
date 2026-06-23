@@ -202,6 +202,33 @@ Set the account ID and credentials to enable uploading to a Cloudflare R2 bucket
 | `R2_ACCESS_KEY_SECRET` | Yes (to enable) | R2 API token secret |
 | `R2_BUCKET` | Yes (to enable) | R2 bucket name |
 | `R2_UPLOAD_PATH` | No | Folder prefix inside the bucket. Default: `PodBooth` |
+| `R2_PUBLIC_URL` | No | Public base URL of the bucket (e.g. `https://files.example.com`). If set, file download URLs in editor manifests use this domain instead of the raw R2 endpoint |
+
+### Editor Link
+
+When R2 is configured, hosts can generate a time-limited editor link that lets a remote editor download session files directly from R2 — no PodBooth access required. The link generates a signed manifest (`sessions/{session_id}/manifest.json`) in R2 containing presigned download URLs for every uploaded file. Generating a new link rotates the token and rewrites the manifest, immediately invalidating the previous one.
+
+| Variable | Required | Description |
+|---|---|---|
+| `EDITOR_PORTAL_URL` | No | Base URL of the editor portal (e.g. `https://editor.example.com`). If set, the generated link is formatted as `{EDITOR_PORTAL_URL}/?session={id}&token={token}` |
+| `EDITOR_LINK_EXPIRY_DAYS` | No | How many days before the editor link and presigned URLs expire. Default: `7` |
+
+The R2 bucket must allow public GET requests on the `sessions/` prefix (for the manifest) and have CORS configured to permit requests from the editor portal domain. Actual file downloads use presigned URLs and do not require public bucket access.
+
+### Discord Notifications
+
+When an editor link is generated, PodBooth can fire a Discord webhook to notify a channel. The notification is a rich embed showing the episode, file count, total size, download link, and expiry date.
+
+| Variable | Required | Description |
+|---|---|---|
+| `DISCORD_WEBHOOK_URL` | No | Discord incoming webhook URL. Leave unset to disable notifications |
+
+**Setting up a webhook in Discord:**
+1. Open the target channel (e.g. `#recordings`) → **Edit Channel** → **Integrations** → **Webhooks** → **New Webhook**
+2. Name it `Podbooth` and optionally set an avatar
+3. Click **Copy Webhook URL** and set it as `DISCORD_WEBHOOK_URL` in your `.env`
+
+No bot permissions or bot code changes are required — webhooks are independent of any bot.
 
 ### Cloud Upload — Backblaze B2
 
@@ -256,6 +283,7 @@ Files are organized under the configured upload path as:
 11. Files are assembled server-side and downloadable from `/dashboard`
 12. If transcription is configured, a single `transcript.txt` is generated automatically once the session ends — combining all participants' audio into one file and sending it to WhisperX. A "Transcribing…" indicator appears on the dashboard card while it runs; the transcript can be viewed inline or downloaded when complete
 13. If cloud upload is configured, an **Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **Upload Local Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
+14. If R2 is configured and files have been uploaded, the host can click **Generate Editor Link** on the session card to produce a time-limited link for a remote editor. The link gives the editor direct download access to all R2 files without needing a PodBooth account. Generating a new link immediately invalidates the previous one
 
 ---
 

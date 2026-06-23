@@ -299,6 +299,8 @@ async def dashboard(request: Request, _: None = Depends(require_host)):
             "whisperx_enabled": bool(settings.whisperx_api_url),
             "cloud_upload_enabled": cloud_upload_enabled(),
             "base_url": settings.base_url,
+            "s3_enabled": bool(settings.s3_bucket_name or settings.r2_bucket or settings.b2_bucket),
+            "editor_portal_url": settings.editor_portal_url,
         },
     )
 
