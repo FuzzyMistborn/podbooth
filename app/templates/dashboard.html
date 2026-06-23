@@ -146,7 +146,7 @@
 
       <div class="session-card-actions">
         {% if files %}
-        <a href="/download-zip/{{ session.id }}" class="btn-secondary">↓ Download All</a>
+        <a href="/download-zip/{{ session.id }}" class="btn-secondary">Download All</a>
         <div class="export-split-btn">
           <div class="export-split-group">
             <span class="btn-export-grid" style="cursor:default">Export for Editing</span>
@@ -178,15 +178,51 @@
         <a href="/join/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Join as Host →</a>
         <button class="btn-secondary" onclick="copyJoinLink('{{ session.id }}', this)">Copy Guest Link</button>
         {% endif %}
-        {% if session.ended and whisperx_enabled %}
-        <button class="btn-secondary" id="retx-{{ session.id }}" onclick="retranscribe('{{ session.id }}', '{{ session.host_token }}', this)">Retranscribe</button>
+
+        {% if files and cloud_upload_enabled %}
+        <button class="btn-secondary" id="cloud-up-{{ session.id }}" onclick="startCloudUpload('{{ session.id }}', this)">Upload to Cloud</button>
         {% endif %}
+
+        {# ── More actions dropdown ── #}
+        {% set has_more = (session.ended and whisperx_enabled) or cloud_upload_enabled %}
+        {% if has_more %}
+        <div class="more-actions-wrap">
+          <button class="btn-secondary btn-more-actions" onclick="toggleMoreActions('{{ session.id }}', event)" title="More actions">⋯</button>
+          <div class="more-actions-dropdown" id="more-dd-{{ session.id }}" style="display:none">
+            {% if session.ended and whisperx_enabled %}
+            <button class="export-dropdown-item" id="retx-{{ session.id }}" onclick="closeMoreActions('{{ session.id }}'); retranscribe('{{ session.id }}', '{{ session.host_token }}', document.getElementById('retx-{{ session.id }}'))">Retranscribe Audio</button>
+            {% endif %}
+            {% if cloud_upload_enabled %}
+            <button class="export-dropdown-item" onclick="closeMoreActions('{{ session.id }}'); copyUploadLink('{{ base_url }}/local-upload/{{ session.id }}?token={{ session.upload_token }}', this)">Copy Upload Link</button>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
         <button class="btn-danger" onclick="deleteSession('{{ session.id }}', '{{ session.host_token }}', '{{ session.title }}')">Delete</button>
       </div>
     </div>
     {% endfor %}
   </div>
   {% endif %}
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="delete-modal-backdrop" id="delete-modal" style="display:none" onclick="cancelDelete(event)">
+  <div class="delete-modal-box">
+    <div class="delete-modal-title">Delete session?</div>
+    <div class="delete-modal-session-name" id="delete-modal-name"></div>
+    {% if cloud_upload_enabled %}
+    <label class="delete-modal-cloud-row">
+      <input type="checkbox" id="delete-cloud-chk">
+      <span>Also delete cloud files</span>
+    </label>
+    {% endif %}
+    <div class="delete-modal-actions">
+      <button class="btn-secondary" onclick="cancelDelete()">Cancel</button>
+      <button class="btn-danger" id="delete-modal-confirm">Delete</button>
+    </div>
+  </div>
 </div>
 
 <!-- Preview modal -->
@@ -205,6 +241,30 @@
 
 <script>
 // ── Feature 1: Metadata edit ─────────────────────────────────────────────────
+
+function closeAllDropdowns() {
+  document.querySelectorAll('.more-actions-dropdown, .export-split-dropdown').forEach(d => { d.style.display = 'none'; });
+}
+function toggleMoreActions(sessionId, e) {
+  e.stopPropagation();
+  const dd = document.getElementById(`more-dd-${sessionId}`);
+  const isOpen = dd.style.display !== 'none';
+  closeAllDropdowns();
+  dd.style.display = isOpen ? 'none' : '';
+}
+function closeMoreActions(sessionId) {
+  const dd = document.getElementById(`more-dd-${sessionId}`);
+  if (dd) dd.style.display = 'none';
+}
+document.addEventListener('click', closeAllDropdowns);
+
+function copyUploadLink(url, btn) {
+  navigator.clipboard.writeText(url).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  });
+}
 
 function copyJoinLink(sessionId, btn) {
   const url = window.location.origin + '/join/' + sessionId;
@@ -441,7 +501,7 @@ function toggleExportDropdown(sessionId, event) {
   const dropdown = _exportDropdown(sessionId);
   if (!dropdown) return;
   const isOpen = dropdown.style.display !== 'none';
-  document.querySelectorAll('.export-split-dropdown').forEach(d => { d.style.display = 'none'; });
+  closeAllDropdowns();
   if (!isOpen) dropdown.style.display = 'block';
 }
 
@@ -450,7 +510,7 @@ function toggleNleDropdown(sessionId, event) {
   const dd = document.getElementById(`nle-dd-${sessionId}`);
   if (!dd) return;
   const isOpen = dd.style.display !== 'none';
-  document.querySelectorAll('.export-split-dropdown').forEach(d => { d.style.display = 'none'; });
+  closeAllDropdowns();
   if (!isOpen) dd.style.display = 'block';
 }
 
@@ -458,10 +518,6 @@ function closeExportDropdown(sessionId) {
   const dropdown = _exportDropdown(sessionId);
   if (dropdown) dropdown.style.display = 'none';
 }
-
-document.addEventListener('click', () => {
-  document.querySelectorAll('.export-split-dropdown').forEach(d => { d.style.display = 'none'; });
-});
 
 async function _pollExportProgress(sessionId) {
   const btn = _exportBtn(sessionId);
@@ -519,19 +575,46 @@ document.querySelectorAll('.btn-export-grid').forEach(btn => {
   _pollExportProgress(btn.dataset.sessionId);
 });
 
-async function deleteSession(sessionId, hostToken, title) {
-  if (!confirm(`Delete "${title}"?\n\nThis will permanently remove the session and all its recordings.`)) return;
+let _pendingDelete = null;
+
+function deleteSession(sessionId, hostToken, title) {
+  _pendingDelete = { sessionId, hostToken };
+  document.getElementById('delete-modal-name').textContent = title;
+  const chk = document.getElementById('delete-cloud-chk');
+  if (chk) chk.checked = false;
+  document.getElementById('delete-modal').style.display = 'flex';
+}
+
+function cancelDelete(e) {
+  if (e && e.target !== document.getElementById('delete-modal')) return;
+  document.getElementById('delete-modal').style.display = 'none';
+  _pendingDelete = null;
+}
+
+document.getElementById('delete-modal-confirm').addEventListener('click', async () => {
+  if (!_pendingDelete) return;
+  const { sessionId, hostToken } = _pendingDelete;
+  const chk = document.getElementById('delete-cloud-chk');
+  const deleteCloud = chk ? chk.checked : false;
+
+  document.getElementById('delete-modal').style.display = 'none';
+  _pendingDelete = null;
+
   const r = await fetch(`/api/session/${sessionId}/delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host_token: hostToken }),
+    body: JSON.stringify({ host_token: hostToken, delete_cloud: deleteCloud }),
   });
   if (r.ok) {
+    const data = await r.json().catch(() => ({}));
+    if (data.cloud_errors?.length) {
+      alert('Session deleted, but some cloud files could not be removed:\n\n' + data.cloud_errors.join('\n'));
+    }
     window.location.reload();
   } else {
     alert('Delete failed.');
   }
-}
+});
 
 // ── Transcription status ─────────────────────────────────────────────────────
 
@@ -606,6 +689,66 @@ async function openTranscriptView(path, filename) {
     body.textContent = 'Failed to load transcript.';
   }
 }
+
+// ── Cloud upload ─────────────────────────────────────────────────────────────
+
+async function startCloudUpload(sessionId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Uploading…';
+  try {
+    const r = await fetch(`/api/session/${sessionId}/upload-cloud`, { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      btn.textContent = '↑ Upload to Cloud';
+      alert('Upload failed: ' + (d.detail || r.status));
+      return;
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '↑ Upload to Cloud';
+    return;
+  }
+  _pollCloudUpload(sessionId, btn);
+}
+
+async function _pollCloudUpload(sessionId, btn) {
+  if (!btn) btn = document.getElementById(`cloud-up-${sessionId}`);
+  if (!btn) return;
+  try {
+    const r = await fetch(`/api/session/${sessionId}/upload-cloud-status`);
+    if (!r.ok) return;
+    const { status, message, uploaded, total } = await r.json();
+    if (status === 'uploading') {
+      btn.textContent = total ? `Uploading… ${uploaded}/${total}` : 'Uploading…';
+      setTimeout(() => _pollCloudUpload(sessionId, btn), 2000);
+    } else if (status === 'done') {
+      btn.disabled = false;
+      btn.textContent = '✓ Uploaded';
+    } else if (status === 'error') {
+      btn.disabled = false;
+      btn.textContent = '↑ Upload to Cloud';
+      alert('Upload error: ' + (message || 'unknown error'));
+    }
+  } catch (e) {}
+}
+
+// Poll any sessions currently uploading (e.g. after a page reload)
+document.querySelectorAll('[id^="cloud-up-"]').forEach(btn => {
+  const sessionId = btn.id.replace('cloud-up-', '');
+  fetch(`/api/session/${sessionId}/upload-cloud-status`)
+    .then(r => r.json())
+    .then(({ status }) => {
+      if (status === 'uploading') {
+        btn.disabled = true;
+        btn.textContent = 'Uploading…';
+        _pollCloudUpload(sessionId, btn);
+      } else if (status === 'done') {
+        btn.textContent = '✓ Uploaded';
+      }
+    })
+    .catch(() => {});
+});
 
 // Poll assembly status for ended sessions that have no files yet.
 // When assembly finishes, reload to show the assembled files.

@@ -19,6 +19,7 @@ from app.models import list_sessions, get_session
 logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import require_host
+from app.routers.cloudsync import cloud_upload_enabled
 
 _VALID_MEDIA_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(wav|mp4|txt)$")
 
@@ -296,6 +297,8 @@ async def dashboard(request: Request, _: None = Depends(require_host)):
             "session_video_count": session_video_count,
             "retention_days": settings.retention_days,
             "whisperx_enabled": bool(settings.whisperx_api_url),
+            "cloud_upload_enabled": cloud_upload_enabled(),
+            "base_url": settings.base_url,
         },
     )
 

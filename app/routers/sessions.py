@@ -17,6 +17,7 @@ from app.routers.upload import recover_orphaned_chunks
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host
 from app.limiter import limiter
+from app.routers.cloudsync import cloud_upload_enabled, delete_cloud_session, _session_slug
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -141,6 +142,8 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
             "host_token": host_token if is_host else "",
             "livekit_url": settings.livekit_public_url,
             "base_url": settings.base_url,
+            "cloud_upload_enabled": cloud_upload_enabled(),
+            "upload_token": session.upload_token,
         },
     )
     if is_host:
@@ -248,7 +251,14 @@ async def delete_session_route(session_id: str, request: Request):
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    slug = _session_slug(session.title)
     await delete_session(session_id)
+
+    if data.get("delete_cloud"):
+        errors = await delete_cloud_session(slug)
+        if errors:
+            return JSONResponse({"deleted": True, "cloud_errors": errors})
+
     return JSONResponse({"deleted": True})
 
 

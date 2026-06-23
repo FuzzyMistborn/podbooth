@@ -34,6 +34,9 @@ class Session:
     episode: str = ""
     notes: str = ""
     tags: list = field(default_factory=list)
+    # Single-session-scoped token for the participant local-upload page.
+    # Valid for 48 h from session creation; rotate by calling regenerate_upload_token().
+    upload_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
 
     @property
     def guest_link_path(self) -> str:
@@ -76,6 +79,7 @@ def load():
             d.setdefault("admitted_guests", {})
             d.setdefault("denied_guests", {})
             d.pop("paused", None)  # removed field; old sessions.json may still have it
+            d.setdefault("upload_token", secrets.token_urlsafe(32))
             session = Session(**d)
             session.recording = False
             _sessions[session.id] = session

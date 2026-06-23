@@ -947,7 +947,16 @@ async function handleSessionEnded() {
   await new Promise(r => setTimeout(r, 100));
   await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
   window.removeEventListener('beforeunload', _unloadGuard);
-  window.location.href = '/';
+
+  // If cloud upload is configured, send guests to the local upload page so they
+  // can upload their own recordings without needing to copy a link separately.
+  if (typeof UPLOAD_TOKEN === 'string' && UPLOAD_TOKEN && typeof SESSION_ID === 'string') {
+    const params = new URLSearchParams({ token: UPLOAD_TOKEN });
+    if (typeof displayName === 'string' && displayName) params.set('participant', displayName);
+    window.location.href = `/local-upload/${SESSION_ID}?${params}`;
+  } else {
+    window.location.href = '/';
+  }
 }
 
 // ── Waiting room (host only) ─────────────────────────────────────────────────

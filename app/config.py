@@ -52,6 +52,32 @@ class Settings(BaseSettings):
     whisperx_model: str = "large-v3-turbo"
     whisperx_language: str = ""
 
+    # Nextcloud upload (WebDAV)
+    nextcloud_url: str = ""
+    nextcloud_user: str = ""
+    nextcloud_password: str = ""
+    nextcloud_upload_path: str = "PodBooth"
+
+    # FileBrowser upload
+    filebrowser_url: str = ""
+    filebrowser_user: str = ""
+    filebrowser_password: str = ""
+    filebrowser_upload_path: str = "PodBooth"
+
+    # Cloudflare R2 upload (S3-compatible)
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_access_key_secret: str = ""
+    r2_bucket: str = ""
+    r2_upload_path: str = "PodBooth"
+
+    # Backblaze B2 upload (S3-compatible)
+    b2_endpoint_url: str = ""
+    b2_access_key_id: str = ""
+    b2_access_key_secret: str = ""
+    b2_bucket: str = ""
+    b2_upload_path: str = "PodBooth"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

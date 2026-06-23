@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Upload Local Recordings – {{ session.title }}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3347;
+      --accent: #6c63ff;
+      --accent-dim: #4a44b5;
+      --text: #e8eaf0;
+      --text-dim: #8a8fa8;
+      --green: #3ecf8e;
+      --red: #f87171;
+      --yellow: #fbbf24;
+      --radius: 10px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2rem;
+      width: 100%;
+      max-width: 640px;
+    }
+
+    h1 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
+    .session-name {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      margin-bottom: 1.5rem;
+    }
+
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 2.5rem 1.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      background: var(--surface2);
+      position: relative;
+    }
+    .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(108, 99, 255, 0.08);
+    }
+    .drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+    .drop-icon {
+      font-size: 2.5rem;
+      margin-bottom: 0.75rem;
+      line-height: 1;
+    }
+    .drop-label {
+      font-size: 1rem;
+      font-weight: 500;
+      margin-bottom: 0.35rem;
+    }
+    .drop-hint {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.6rem 1.4rem;
+      border-radius: 6px;
+      border: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-dim); }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-top: 1.25rem;
+    }
+
+    .file-count {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    /* File list */
+    #file-list {
+      margin-top: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .file-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+    }
+
+    .file-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .file-icon { font-size: 1.1rem; flex-shrink: 0; }
+
+    .file-name {
+      font-size: 0.88rem;
+      font-weight: 500;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-size {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      flex-shrink: 0;
+    }
+
+    .status-badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.15rem 0.55rem;
+      border-radius: 20px;
+      flex-shrink: 0;
+    }
+    .status-badge.pending  { background: rgba(139,147,176,0.15); color: var(--text-dim); }
+    .status-badge.sending  { background: rgba(108,99,255,0.2);   color: var(--accent); }
+    .status-badge.syncing  { background: rgba(251,191,36,0.2);   color: var(--yellow); }
+    .status-badge.done     { background: rgba(62,207,142,0.15);  color: var(--green); }
+    .status-badge.error    { background: rgba(248,113,113,0.15); color: var(--red); }
+
+    /* Progress bar */
+    .progress-wrap {
+      height: 5px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.2s;
+      background: var(--accent);
+      width: 0%;
+    }
+    .progress-bar.done  { background: var(--green); }
+    .progress-bar.error { background: var(--red); }
+
+    .file-message {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      margin-top: 0.35rem;
+    }
+    .file-message.error { color: var(--red); }
+
+    /* No-cloud warning */
+    .warning-box {
+      background: rgba(251,191,36,0.1);
+      border: 1px solid rgba(251,191,36,0.3);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      font-size: 0.88rem;
+      color: var(--yellow);
+      line-height: 1.5;
+    }
+
+    .name-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+    .name-row label {
+      font-size: 0.88rem;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .name-row input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.9rem;
+      padding: 0.45rem 0.75rem;
+    }
+    .name-row input:focus { outline: none; border-color: var(--accent); }
+
+    .all-done-banner {
+      display: none;
+      margin-top: 1.25rem;
+      background: rgba(62,207,142,0.1);
+      border: 1px solid rgba(62,207,142,0.3);
+      border-radius: 8px;
+      padding: 0.9rem 1.25rem;
+      font-size: 0.9rem;
+      color: var(--green);
+      font-weight: 500;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Upload Local Recordings</h1>
+    <div class="session-name">Session: {{ session.title }}</div>
+
+    {% if not cloud_upload_enabled %}
+    <div class="warning-box">
+      No cloud storage is configured for this PodBooth instance. Contact your host.
+    </div>
+    {% else %}
+
+    {% if not participant %}
+    <div class="name-row">
+      <label for="input-name">Your name</label>
+      <input type="text" id="input-name" placeholder="Enter your name…" maxlength="80" autocomplete="name" />
+    </div>
+    {% endif %}
+
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" multiple accept=".wav,.mp3,.mp4,.m4a,.mkv,.mov,.avi,.webm,.flac,.ogg,.aac,.opus,audio/*,video/*">
+      <div class="drop-icon">📁</div>
+      <div class="drop-label">Drop files here or click to browse</div>
+      <div class="drop-hint">Accepted: WAV, MP3, MP4, M4A, MKV, MOV, AVI, WebM, FLAC, OGG, AAC, Opus — max 10 GB per file</div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="btn-upload" disabled>Upload</button>
+      <span class="file-count" id="file-count"></span>
+    </div>
+
+    <div id="file-list"></div>
+    <div class="all-done-banner" id="all-done-banner">✓ All files uploaded successfully!</div>
+
+    {% endif %}
+  </div>
+
+  <script>
+    const SESSION_ID      = {{ session.id | tojson }};
+    const UPLOAD_TOKEN    = {{ upload_token | tojson }};
+    const PARTICIPANT_PRE = {{ participant | tojson }}; // pre-filled from URL; may be empty
+
+    const dropZone   = document.getElementById('drop-zone');
+    const fileInput  = document.getElementById('file-input');
+    const btnUpload  = document.getElementById('btn-upload');
+    const fileCount  = document.getElementById('file-count');
+    const fileList   = document.getElementById('file-list');
+    const allDone    = document.getElementById('all-done-banner');
+
+    let selectedFiles = [];
+    // upload_id → {item, bar, badge, msg, phase}
+    let uploadJobs = {};
+
+    // ── Drag & drop ────────────────────────────────────────────────────────────
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      handleFiles([...e.dataTransfer.files]);
+    });
+    fileInput.addEventListener('change', () => handleFiles([...fileInput.files]));
+
+    function handleFiles(files) {
+      selectedFiles = files;
+      fileCount.textContent = files.length === 0 ? '' : `${files.length} file${files.length > 1 ? 's' : ''} selected`;
+      btnUpload.disabled = files.length === 0;
+      // Reset list
+      fileList.innerHTML = '';
+      uploadJobs = {};
+      allDone.style.display = 'none';
+      for (const f of files) {
+        renderFileItem(f);
+      }
+    }
+
+    function renderFileItem(file) {
+      const item = document.createElement('div');
+      item.className = 'file-item';
+      item.innerHTML = `
+        <div class="file-header">
+          <span class="file-icon">${fileIcon(file.name)}</span>
+          <span class="file-name" title="${esc(file.name)}">${esc(file.name)}</span>
+          <span class="file-size">${formatSize(file.size)}</span>
+          <span class="status-badge pending" data-badge>Pending</span>
+        </div>
+        <div class="progress-wrap"><div class="progress-bar" data-bar></div></div>
+        <div class="file-message" data-msg></div>
+      `;
+      fileList.appendChild(item);
+      return item;
+    }
+
+    function resolvedParticipant() {
+      if (PARTICIPANT_PRE) return PARTICIPANT_PRE;
+      const el = document.getElementById('input-name');
+      return el ? el.value.trim() : '';
+    }
+
+    // ── Upload ─────────────────────────────────────────────────────────────────
+    btnUpload.addEventListener('click', startUploads);
+
+    async function startUploads() {
+      if (!resolvedParticipant()) {
+        const el = document.getElementById('input-name');
+        if (el) { el.focus(); el.style.borderColor = 'var(--red)'; }
+        return;
+      }
+      btnUpload.disabled = true;
+      if (document.getElementById('input-name')) document.getElementById('input-name').disabled = true;
+      fileInput.disabled = true;
+      allDone.style.display = 'none';
+
+      const items = [...fileList.querySelectorAll('.file-item')];
+
+      for (let i = 0; i < selectedFiles.length; i++) {
+        await uploadFile(selectedFiles[i], items[i]);
+      }
+
+      checkAllDone();
+    }
+
+    async function uploadFile(file, itemEl) {
+      const badge = itemEl.querySelector('[data-badge]');
+      const bar   = itemEl.querySelector('[data-bar]');
+      const msg   = itemEl.querySelector('[data-msg]');
+
+      // Phase 1: send to server
+      setBadge(badge, 'sending', 'Uploading…');
+      msg.textContent = 'Sending to server…';
+      msg.className = 'file-message';
+
+      let uploadId;
+      try {
+        uploadId = await sendToServer(file, (pct) => {
+          bar.style.width = `${Math.round(pct * 0.6)}%`; // 0-60% for server phase
+          msg.textContent = `Uploading… ${Math.round(pct)}%`;
+        });
+      } catch (e) {
+        setBadge(badge, 'error', 'Error');
+        bar.style.width = '100%';
+        bar.className = 'progress-bar error';
+        msg.textContent = `Failed to send: ${e.message}`;
+        msg.className = 'file-message error';
+        return;
+      }
+
+      // Phase 2: cloud sync
+      setBadge(badge, 'syncing', 'Syncing…');
+      bar.style.width = '65%';
+      msg.textContent = 'Syncing to cloud…';
+
+      try {
+        await pollCloudStatus(uploadId, bar, msg);
+        setBadge(badge, 'done', 'Done');
+        bar.style.width = '100%';
+        bar.className = 'progress-bar done';
+        msg.textContent = 'Uploaded successfully';
+        msg.className = 'file-message';
+      } catch (e) {
+        setBadge(badge, 'error', 'Error');
+        bar.style.width = '100%';
+        bar.className = 'progress-bar error';
+        msg.textContent = e.message;
+        msg.className = 'file-message error';
+      }
+    }
+
+    function sendToServer(file, onProgress) {
+      return new Promise((resolve, reject) => {
+        const fd = new FormData();
+        fd.append('file', file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/api/session/${SESSION_ID}/local-upload`);
+        xhr.setRequestHeader('X-Upload-Token', UPLOAD_TOKEN);
+        xhr.setRequestHeader('X-Participant', resolvedParticipant());
+
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) onProgress((e.loaded / e.total) * 100);
+        };
+
+        xhr.onload = () => {
+          if (xhr.status === 200) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              resolve(data.upload_id);
+            } catch {
+              reject(new Error('Invalid server response'));
+            }
+          } else {
+            let detail = xhr.statusText;
+            try { detail = JSON.parse(xhr.responseText).detail || detail; } catch {}
+            reject(new Error(detail));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(fd);
+      });
+    }
+
+    async function pollCloudStatus(uploadId, bar, msg) {
+      const url = `/api/session/${SESSION_ID}/local-upload/${uploadId}/status`;
+      const headers = { 'X-Upload-Token': UPLOAD_TOKEN };
+      for (let attempt = 0; attempt < 600; attempt++) {
+        await sleep(1000);
+        const r = await fetch(url, { headers });
+        if (!r.ok) throw new Error(`Status poll failed: HTTP ${r.status}`);
+        const data = await r.json();
+
+        if (data.status === 'done') {
+          return;
+        }
+        if (data.status === 'error') {
+          throw new Error(data.message || 'Cloud upload failed');
+        }
+        if (data.status === 'uploading') {
+          const frac = data.total ? data.uploaded / data.total : 0;
+          bar.style.width = `${65 + Math.round(frac * 35)}%`;
+          if (data.message) msg.textContent = data.message;
+        }
+      }
+      throw new Error('Timed out waiting for cloud upload');
+    }
+
+    function checkAllDone() {
+      const badges = [...fileList.querySelectorAll('[data-badge]')];
+      const allSuccess = badges.length > 0 && badges.every(b => b.dataset.state === 'done');
+      if (allSuccess) allDone.style.display = '';
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+    function setBadge(el, state, label) {
+      el.className = `status-badge ${state}`;
+      el.dataset.state = state;
+      el.textContent = label;
+    }
+
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes/1024).toFixed(1)} KB`;
+      if (bytes < 1024 * 1024 * 1024) return `${(bytes/1024/1024).toFixed(1)} MB`;
+      return `${(bytes/1024/1024/1024).toFixed(2)} GB`;
+    }
+
+    function fileIcon(name) {
+      const ext = name.split('.').pop().toLowerCase();
+      if (['mp4','mkv','mov','avi','webm'].includes(ext)) return '🎬';
+      if (['mp3','wav','flac','ogg','aac','m4a'].includes(ext)) return '🎵';
+      return '📄';
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  </script>
+</body>
+</html>

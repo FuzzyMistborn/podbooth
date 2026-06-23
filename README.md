@@ -169,6 +169,58 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `WHISPERX_MODEL` | No | Faster-Whisper model to use. Default: `large-v3-turbo` |
 | `WHISPERX_LANGUAGE` | No | Force a language code (e.g. `en`, `fr`). Leave unset for automatic detection |
 
+### Cloud Upload — Nextcloud
+
+Set all three required variables to enable uploading recordings to a Nextcloud instance via WebDAV.
+
+| Variable | Required | Description |
+|---|---|---|
+| `NEXTCLOUD_URL` | Yes (to enable) | Base URL of your Nextcloud instance, e.g. `https://nextcloud.example.com` |
+| `NEXTCLOUD_USER` | Yes (to enable) | Nextcloud username |
+| `NEXTCLOUD_PASSWORD` | Yes (to enable) | Nextcloud password (or app password) |
+| `NEXTCLOUD_UPLOAD_PATH` | No | Folder prefix inside your Nextcloud to upload into. Default: `PodBooth` |
+
+### Cloud Upload — FileBrowser
+
+Set all three required variables to enable uploading recordings to a [FileBrowser](https://filebrowser.org) instance.
+
+| Variable | Required | Description |
+|---|---|---|
+| `FILEBROWSER_URL` | Yes (to enable) | Base URL of your FileBrowser instance, e.g. `https://files.example.com` |
+| `FILEBROWSER_USER` | Yes (to enable) | FileBrowser username |
+| `FILEBROWSER_PASSWORD` | Yes (to enable) | FileBrowser password |
+| `FILEBROWSER_UPLOAD_PATH` | No | Folder prefix inside FileBrowser to upload into. Default: `PodBooth` |
+
+### Cloud Upload — Cloudflare R2
+
+Set the account ID and credentials to enable uploading to a Cloudflare R2 bucket. Requires `boto3` (included in the Docker image).
+
+| Variable | Required | Description |
+|---|---|---|
+| `R2_ACCOUNT_ID` | Yes (to enable) | Your Cloudflare account ID |
+| `R2_ACCESS_KEY_ID` | Yes (to enable) | R2 API token key ID |
+| `R2_ACCESS_KEY_SECRET` | Yes (to enable) | R2 API token secret |
+| `R2_BUCKET` | Yes (to enable) | R2 bucket name |
+| `R2_UPLOAD_PATH` | No | Folder prefix inside the bucket. Default: `PodBooth` |
+
+### Cloud Upload — Backblaze B2
+
+Set the endpoint and credentials to enable uploading to a Backblaze B2 bucket via its S3-compatible API. Requires `boto3` (included in the Docker image).
+
+| Variable | Required | Description |
+|---|---|---|
+| `B2_ENDPOINT_URL` | Yes (to enable) | B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` |
+| `B2_ACCESS_KEY_ID` | Yes (to enable) | B2 application key ID |
+| `B2_ACCESS_KEY_SECRET` | Yes (to enable) | B2 application key |
+| `B2_BUCKET` | Yes (to enable) | B2 bucket name |
+| `B2_UPLOAD_PATH` | No | Folder prefix inside the bucket. Default: `PodBooth` |
+
+Multiple cloud backends can be enabled simultaneously — files will be uploaded to all of them.
+
+Files are organized under the configured upload path as:
+- `{UploadPath}/{SessionTitle}/podbooth/{participant}/{filename}` — server-recorded files
+- `{UploadPath}/{SessionTitle}/local/{filename}` — participant OBS uploads
+
 ---
 
 ## Usage
@@ -189,6 +241,7 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 10. Guests can leave at any time with the **Leave** button (a confirmation appears if uploads are still in progress); host clicks **End Session** to close the room
 11. Files are assembled server-side and downloadable from `/dashboard`
 12. If transcription is configured, a single `transcript.txt` is generated automatically once the session ends — combining all participants' audio into one file and sending it to WhisperX. A "Transcribing…" indicator appears on the dashboard card while it runs; the transcript can be viewed inline or downloaded when complete
+13. If cloud upload is configured, an **↑ Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **↑ Upload OBS Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
 
 ---
 

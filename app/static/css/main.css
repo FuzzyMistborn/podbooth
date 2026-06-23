@@ -1765,6 +1765,88 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 }
 .export-dropdown-item:hover { background: var(--bg-3); color: var(--accent); }
 
+/* ── Delete confirmation modal ───────────────────────────────── */
+.delete-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.delete-modal-box {
+  background: var(--bg-2);
+  border: 1px solid #444;
+  border-radius: var(--radius);
+  padding: 1.1rem 1.25rem;
+  width: 300px;
+}
+.delete-modal-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.delete-modal-session-name {
+  font-size: 0.82rem;
+  color: var(--text-2);
+  margin-bottom: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.delete-modal-cloud-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  margin-bottom: 0.9rem;
+  cursor: pointer;
+  color: var(--text-2);
+  width: 100%;
+}
+.delete-modal-cloud-row input {
+  cursor: pointer;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+.delete-modal-cloud-row span {
+  white-space: nowrap;
+}
+.delete-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+.delete-modal-actions .btn-secondary,
+.delete-modal-actions .btn-danger {
+  padding: 6px 14px;
+  font-size: 0.82rem;
+}
+
+/* ── More actions dropdown ───────────────────────────────────── */
+.more-actions-wrap {
+  position: relative;
+  display: inline-block;
+}
+.btn-more-actions {
+  padding: 9px 14px;
+  letter-spacing: 0.05em;
+}
+.more-actions-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  background: var(--bg-2);
+  border: 1px solid #444;
+  border-radius: var(--radius);
+  z-index: 200;
+  overflow: hidden;
+}
+
 /* ── Preview modal ───────────────────────────────────────────── */
 .btn-play {
   background: var(--bg-3);

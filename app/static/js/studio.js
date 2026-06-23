@@ -333,6 +333,7 @@ function attachRoomEvents() {
       await stopLocalRecording();
       setRecordingUI(false);
       await waitForUploads();
+      showLocalUploadButton();
     }
   });
 
@@ -444,6 +445,7 @@ function attachRoomEvents() {
       await stopLocalRecording();
       setRecordingUI(false);
       await waitForUploads();
+      showLocalUploadButton();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
       handleSessionEnded();
@@ -557,6 +559,7 @@ function pollSessionStatus() {
           await stopLocalRecording();
           setRecordingUI(false);
           await waitForUploads();
+          showLocalUploadButton();
         }
       }
     } catch (e) {}
@@ -646,6 +649,18 @@ function onBeforeUnload(e) {
     e.preventDefault();
     e.returnValue = 'Recordings are still uploading. Leave anyway?';
   }
+}
+
+// ── Local upload (host + guest) ───────────────────────────────────────────────
+
+function showLocalUploadButton() {
+  const btn = document.getElementById('btn-local-upload');
+  if (btn) btn.style.display = '';
+}
+
+function openLocalUpload() {
+  const params = new URLSearchParams({ token: UPLOAD_TOKEN, participant: displayName });
+  window.open(`/local-upload/${SESSION_ID}?${params}`, '_blank', 'noopener');
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

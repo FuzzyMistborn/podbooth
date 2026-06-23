@@ -241,8 +241,14 @@
       {% if is_host %}
       <button class="btn-share" id="btn-files">Files <span id="files-badge" class="files-badge" style="display:none"></span></button>
       <button class="btn-share" id="btn-show-share">Share Link</button>
+      {% if cloud_upload_enabled %}
+      <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">↑ Upload Local Recording</button>
+      {% endif %}
       <button class="btn-danger" id="btn-end">End Session</button>
       {% else %}
+      {% if cloud_upload_enabled %}
+      <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">↑ Upload Local Recording</button>
+      {% endif %}
       <button class="btn-danger" id="btn-leave">Leave</button>
       {% endif %}
     </div>
@@ -276,13 +282,14 @@
 <div class="toast" id="toast"></div>
 
 <script>
-  const SESSION_ID   = "{{ session.id }}";
-  const IS_HOST      = {{ "true" if is_host else "false" }};
-  const HOST_TOKEN   = "{{ host_token }}";
-  const LIVEKIT_URL  = "{{ livekit_url }}";
-  const BASE_URL     = "{{ base_url }}";
-  const JOIN_LINK    = BASE_URL + "/join/" + SESSION_ID;
-  const ASSET_V      = "{{ asset_v }}";
+  const SESSION_ID    = "{{ session.id }}";
+  const IS_HOST       = {{ "true" if is_host else "false" }};
+  const HOST_TOKEN    = "{{ host_token }}";
+  const UPLOAD_TOKEN  = "{{ upload_token }}";
+  const LIVEKIT_URL   = "{{ livekit_url }}";
+  const BASE_URL      = "{{ base_url }}";
+  const JOIN_LINK     = BASE_URL + "/join/" + SESSION_ID;
+  const ASSET_V       = "{{ asset_v }}";
 </script>
 <script src="/static/js/recording.js?v={{ asset_v }}"></script>
 <script src="/static/js/upload.js?v={{ asset_v }}"></script>

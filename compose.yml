@@ -34,6 +34,32 @@ services:
     #   TZ: UTC
     #   # Uncomment to require a password for the host UI:
     #   # HOST_PASSWORD: your-password
+    #   # Transcription (WhisperX) — leave unset to disable:
+    #   # WHISPERX_API_URL: http://whisperx:8000
+    #   # WHISPERX_MODEL: large-v3-turbo
+    #   # WHISPERX_LANGUAGE: en
+    #   # Nextcloud upload — set URL + credentials to enable:
+    #   # NEXTCLOUD_URL: https://nextcloud.example.com
+    #   # NEXTCLOUD_USER: myuser
+    #   # NEXTCLOUD_PASSWORD: mypassword
+    #   # NEXTCLOUD_UPLOAD_PATH: PodBooth
+    #   # FileBrowser upload — set URL + credentials to enable:
+    #   # FILEBROWSER_URL: https://files.example.com
+    #   # FILEBROWSER_USER: admin
+    #   # FILEBROWSER_PASSWORD: mypassword
+    #   # FILEBROWSER_UPLOAD_PATH: PodBooth
+    #   # Cloudflare R2 upload — set account ID + credentials to enable:
+    #   # R2_ACCOUNT_ID: abcdef1234567890abcdef1234567890
+    #   # R2_ACCESS_KEY_ID: your-r2-access-key-id
+    #   # R2_ACCESS_KEY_SECRET: your-r2-access-key-secret
+    #   # R2_BUCKET: my-podbooth-bucket
+    #   # R2_UPLOAD_PATH: PodBooth
+    #   # Backblaze B2 upload — set endpoint + credentials to enable:
+    #   # B2_ENDPOINT_URL: https://s3.us-west-004.backblazeb2.com
+    #   # B2_ACCESS_KEY_ID: your-b2-key-id
+    #   # B2_ACCESS_KEY_SECRET: your-b2-application-key
+    #   # B2_BUCKET: my-podbooth-bucket
+    #   # B2_UPLOAD_PATH: PodBooth
 
   podbooth-coturn:
     image: coturn/coturn:latest

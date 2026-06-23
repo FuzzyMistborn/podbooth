@@ -51,6 +51,7 @@ async function stopRecording() {
   setRecordingUI(false);
   await waitForUploads();
   if (btnStopRec) btnStopRec.disabled = false;
+  if (typeof showLocalUploadButton === 'function') showLocalUploadButton();
 }
 
 function setRecordingUI(recording) {
