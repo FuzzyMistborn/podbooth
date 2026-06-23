@@ -14,10 +14,13 @@ from app.config import settings
 from app.limiter import limiter
 from app import models
 
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    level=_log_level,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+for _uvicorn_logger in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    logging.getLogger(_uvicorn_logger).setLevel(_log_level)
 
 
 @asynccontextmanager
