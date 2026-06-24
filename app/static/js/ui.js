@@ -1330,6 +1330,23 @@ async function updateStatsPanel() {
 
 // ── Timer ─────────────────────────────────────────────────────────────────────
 
+function saveTimerQueue() {
+  try { localStorage.setItem(TIMER_QUEUE_KEY, JSON.stringify(timerQueue)); } catch (e) {}
+}
+
+function loadTimerQueue() {
+  try {
+    const raw = localStorage.getItem(TIMER_QUEUE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        timerQueue.length = 0;
+        parsed.forEach(t => timerQueue.push({ name: String(t.name || ''), duration: Math.max(1, parseInt(t.duration) || 60), notes: String(t.notes || '') }));
+      }
+    }
+  } catch (e) {}
+}
+
 function setupTimerBar() {
   try {
     const v = localStorage.getItem(TIMER_SHOW_KEY);
@@ -1343,6 +1360,15 @@ function setupTimerBar() {
     try { localStorage.setItem(TIMER_SHOW_KEY, String(timerShowTime)); } catch (e) {}
     applyTimerShowTime();
   });
+
+  btnTimerNotesToggle?.addEventListener('click', e => {
+    e.stopPropagation();
+    timerNotesOpen = !timerNotesOpen;
+    applyTimerNotesToggle();
+  });
+
+  loadTimerQueue();
+  renderTimerQueue();
 }
 
 function setupTimerControls() {
@@ -1395,6 +1421,7 @@ function addQueueTopic() {
     if (timerAddDur)   timerAddDur.value   = '';
     if (timerAddNotes) timerAddNotes.value = '';
   }
+  saveTimerQueue();
   renderTimerQueue();
 }
 
@@ -1426,6 +1453,7 @@ function jumpToTopic(i) {
   timerState.total      = timerQueue[i].duration;
   timerState.paused     = false;
   timerState.expired    = false;
+  timerState.overtime   = 0;
   if (!timerInterval) startTimerTick();
   broadcastTimerState();
   updateTimerBar();
@@ -1446,6 +1474,8 @@ function renderTimerQueue() {
     timerQueueEl.appendChild(empty);
     return;
   }
+  let dragSrcIndex = -1;
+
   timerQueue.forEach((topic, i) => {
     const isActive  = timerState.active && timerState.topicIndex === i;
     const isEditing = timerEditIndex === i;
@@ -1453,6 +1483,13 @@ function renderTimerQueue() {
     row.className = 'timer-queue-row' +
       (isActive  ? ' active'  : '') +
       (isEditing ? ' editing' : '');
+    row.draggable = !timerState.active;
+    row.dataset.idx = i;
+
+    const dragHandle = document.createElement('span');
+    dragHandle.className = 'timer-queue-drag';
+    dragHandle.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>`;
+    dragHandle.title = 'Drag to reorder';
 
     const numEl = document.createElement('span');
     numEl.className = 'timer-queue-num';
@@ -1476,6 +1513,33 @@ function renderTimerQueue() {
       });
     }
 
+    if (!timerState.active) {
+      row.addEventListener('dragstart', e => {
+        dragSrcIndex = i;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        timerQueueEl.querySelectorAll('.timer-queue-row').forEach(r => r.classList.remove('drag-over'));
+      });
+      row.addEventListener('dragover', e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        timerQueueEl.querySelectorAll('.timer-queue-row').forEach(r => r.classList.remove('drag-over'));
+        if (i !== dragSrcIndex) row.classList.add('drag-over');
+      });
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        if (dragSrcIndex < 0 || dragSrcIndex === i) return;
+        const [moved] = timerQueue.splice(dragSrcIndex, 1);
+        timerQueue.splice(i, 0, moved);
+        dragSrcIndex = -1;
+        saveTimerQueue();
+        renderTimerQueue();
+      });
+    }
+
     const editBtn = document.createElement('button');
     editBtn.className = 'timer-queue-edit';
     editBtn.title = 'Edit';
@@ -1492,10 +1556,11 @@ function renderTimerQueue() {
     rmBtn.addEventListener('click', () => {
       if (timerEditIndex === i) cancelEditTopic();
       timerQueue.splice(i, 1);
+      saveTimerQueue();
       renderTimerQueue();
     });
 
-    row.append(numEl, nameEl, durEl, editBtn, rmBtn);
+    row.append(dragHandle, numEl, nameEl, durEl, editBtn, rmBtn);
     timerQueueEl.appendChild(row);
   });
 }
@@ -1509,6 +1574,7 @@ function timerStartStop() {
     timerState.active     = true;
     timerState.paused     = false;
     timerState.expired    = false;
+    timerState.overtime   = 0;
     startTimerTick();
   } else if (timerState.expired) {
     // Restart the current topic with its original duration
@@ -1517,6 +1583,7 @@ function timerStartStop() {
     timerState.total     = timerState.remaining;
     timerState.expired   = false;
     timerState.paused    = false;
+    timerState.overtime  = 0;
     startTimerTick();
   } else if (timerState.paused) {
     timerState.paused = false;
@@ -1552,6 +1619,7 @@ function timerSkip() {
   timerState.total      = timerQueue[next].duration;
   timerState.paused     = false;
   timerState.expired    = false;
+  timerState.overtime   = 0;
   if (!timerInterval) startTimerTick();
   broadcastTimerState();
   updateTimerBar();
@@ -1572,13 +1640,17 @@ function timerStopAll() {
 function startTimerTick() {
   clearInterval(timerInterval);
   timerInterval = setInterval(() => {
+    if (timerState.expired) {
+      timerState.overtime++;
+      broadcastTimerState();
+      updateTimerBar();
+      return;
+    }
     if (timerState.remaining > 0) {
       timerState.remaining--;
       if (timerState.remaining === 0) {
-        // Expired — stop and wait for host to advance
-        clearInterval(timerInterval);
-        timerInterval = null;
-        timerState.expired = true;
+        timerState.expired  = true;
+        timerState.overtime = 0;
         broadcastTimerState();
         updateTimerBar();
         syncTimerButtons();
@@ -1602,6 +1674,7 @@ function broadcastTimerState() {
     topicName:  topic?.name  || '',
     topicNotes: topic?.notes || '',
     remaining:  timerState.remaining,
+    overtime:   timerState.overtime,
     total:      timerState.total,
     yellowAt:   timerThresholds.yellow,
     redAt:      timerThresholds.red,
@@ -1618,13 +1691,14 @@ function applyTimerUpdate(msg) {
   }
   timerBar?.classList.remove('hidden');
   if (timerTopicEl) timerTopicEl.textContent = msg.topicName;
-  if (timerNotesEl) {
-    timerNotesEl.innerHTML     = _renderMd(msg.topicNotes);
-    timerNotesEl.style.display = msg.topicNotes ? '' : 'none';
+  setTimerNotes(msg.topicNotes);
+  if (timerCountEl) {
+    timerCountEl.textContent = msg.expired
+      ? '+' + fmtTime(msg.overtime ?? 0)
+      : fmtTime(msg.remaining);
   }
-  if (timerCountEl) timerCountEl.textContent = fmtTime(msg.remaining);
   if (timerProgressEl && msg.total > 0) {
-    timerProgressEl.style.width = ((msg.remaining / msg.total) * 100) + '%';
+    timerProgressEl.style.width = msg.expired ? '0%' : ((msg.remaining / msg.total) * 100) + '%';
   }
   colorTimerBar(msg.remaining, msg.yellowAt, msg.redAt, msg.expired);
 }
@@ -1664,13 +1738,14 @@ function updateTimerBar() {
   }
   timerBar?.classList.remove('hidden');
   if (timerTopicEl) timerTopicEl.textContent = topic.name;
-  if (timerNotesEl) {
-    timerNotesEl.innerHTML     = _renderMd(topic.notes);
-    timerNotesEl.style.display = topic.notes ? '' : 'none';
+  setTimerNotes(topic.notes);
+  if (timerCountEl) {
+    timerCountEl.textContent = timerState.expired
+      ? '+' + fmtTime(timerState.overtime)
+      : fmtTime(timerState.remaining);
   }
-  if (timerCountEl) timerCountEl.textContent = fmtTime(timerState.remaining);
   if (timerProgressEl && timerState.total > 0) {
-    timerProgressEl.style.width = ((timerState.remaining / timerState.total) * 100) + '%';
+    timerProgressEl.style.width = timerState.expired ? '0%' : ((timerState.remaining / timerState.total) * 100) + '%';
   }
   colorTimerBar(timerState.remaining, timerThresholds.yellow, timerThresholds.red, timerState.expired);
 }
@@ -1695,6 +1770,25 @@ function applyTimerShowTime() {
     btnTimerEye.title = timerShowTime ? 'Hide time' : 'Show time';
     btnTimerEye.classList.toggle('inactive', !timerShowTime);
   }
+}
+
+function applyTimerNotesToggle() {
+  if (!timerNotesEl) return;
+  const hasNotes = timerNotesEl.innerHTML.trim() !== '' && timerNotesEl.dataset.hasNotes === 'true';
+  if (hasNotes) timerNotesEl.style.display = timerNotesOpen ? '' : 'none';
+  if (btnTimerNotesToggle) {
+    btnTimerNotesToggle.title = timerNotesOpen ? 'Collapse notes' : 'Expand notes';
+    btnTimerNotesToggle.classList.toggle('collapsed', !timerNotesOpen);
+  }
+}
+
+function setTimerNotes(notes) {
+  if (!timerNotesEl) return;
+  const hasNotes = !!notes;
+  timerNotesEl.dataset.hasNotes = String(hasNotes);
+  timerNotesEl.innerHTML = hasNotes ? _renderMd(notes) : '';
+  if (btnTimerNotesToggle) btnTimerNotesToggle.style.display = hasNotes ? '' : 'none';
+  timerNotesEl.style.display = (hasNotes && timerNotesOpen) ? '' : 'none';
 }
 
 function syncTimerButtons() {

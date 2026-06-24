@@ -1412,7 +1412,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   }
 }
 .timer-bar.timer-expired {
-  animation: timer-expired-flash 0.5s ease-in-out infinite;
+  animation: timer-expired-flash 1.4s ease-in-out infinite;
 }
 @keyframes timer-expired-flash {
   0%, 100% {
@@ -1427,11 +1427,13 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   }
 }
 .timer-bar.timer-expired .timer-countdown {
-  animation: timer-expired-blink 0.5s ease-in-out infinite;
+  animation: timer-expired-blink 1.4s ease-in-out infinite;
+  color: var(--red);
+  letter-spacing: 0.04em;
 }
 @keyframes timer-expired-blink {
   0%, 100% { opacity: 1; }
-  50%       { opacity: 0.25; }
+  50%       { opacity: 0.35; }
 }
 .timer-bar-main {
   display: flex;
@@ -1439,6 +1441,26 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   justify-content: space-between;
   gap: 12px;
 }
+.timer-topic-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.timer-notes-toggle {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 2px;
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s, transform 0.2s;
+}
+.timer-notes-toggle:hover { color: var(--text-2); }
+.timer-notes-toggle.collapsed svg { transform: rotate(-90deg); }
 .timer-topic-name {
   font-size: 13px;
   font-weight: 600;
@@ -1629,6 +1651,21 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   color: var(--text-2);
   white-space: nowrap;
   flex-shrink: 0;
+}
+.timer-queue-drag {
+  color: var(--text-3);
+  cursor: grab;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
+  opacity: 0.5;
+}
+.timer-queue-row:hover .timer-queue-drag { opacity: 1; }
+.timer-queue-row.dragging { opacity: 0.4; }
+.timer-queue-row.drag-over {
+  border-color: var(--accent);
+  background: rgba(232, 93, 0, 0.10);
 }
 .timer-queue-row.editing {
   background: rgba(99, 102, 241, 0.10);

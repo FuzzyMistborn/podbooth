@@ -168,7 +168,14 @@
   <!-- Timer bar — visible to all participants when a timer is active -->
   <div class="timer-bar hidden" id="timer-bar">
     <div class="timer-bar-main">
-      <span class="timer-topic-name" id="timer-topic-name"></span>
+      <div class="timer-topic-left">
+        <button class="timer-notes-toggle" id="btn-timer-notes-toggle" title="Collapse notes" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </button>
+        <span class="timer-topic-name" id="timer-topic-name"></span>
+      </div>
       <div class="timer-bar-end">
         <span class="timer-countdown" id="timer-countdown"></span>
         <button class="timer-eye-btn" id="btn-timer-eye" title="Hide time">
@@ -275,13 +282,13 @@
             <div class="timer-threshold-row">
               <span class="timer-threshold-swatch swatch-yellow"></span>
               <span class="timer-threshold-label">Yellow at</span>
-              <input type="number" id="timer-yellow" value="120" min="1" max="3600" step="1">
+              <input type="number" id="timer-yellow" value="60" min="1" max="3600" step="1">
               <span class="timer-threshold-unit">s</span>
             </div>
             <div class="timer-threshold-row">
               <span class="timer-threshold-swatch swatch-red"></span>
               <span class="timer-threshold-label">Red at</span>
-              <input type="number" id="timer-red" value="60" min="1" max="3600" step="1">
+              <input type="number" id="timer-red" value="30" min="1" max="3600" step="1">
               <span class="timer-threshold-unit">s</span>
             </div>
           </div>
