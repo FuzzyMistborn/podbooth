@@ -8,7 +8,7 @@ import os
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from app.routers import sessions, upload, dashboard, login, export, transcribe, cloudsync, localupload, s3upload
+from app.routers import sessions, upload, dashboard, login, export, transcribe, cloudsync, localupload, s3upload, outline
 from app.routers.upload import recover_orphaned_chunks
 from app.config import settings
 from app.limiter import limiter
@@ -51,3 +51,4 @@ app.include_router(transcribe.router)
 app.include_router(cloudsync.router)
 app.include_router(localupload.router)
 app.include_router(s3upload.router)
+app.include_router(outline.router)

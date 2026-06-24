@@ -39,6 +39,7 @@ class Session:
     r2_files: list = field(default_factory=list)
     editor_token_hash: str = ""
     r2_expires_at: str = ""
+    outline_doc_id: str = ""
 
     @property
     def guest_link_path(self) -> str:

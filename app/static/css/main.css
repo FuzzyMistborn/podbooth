@@ -378,8 +378,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   margin-right: 300px;
 }
 
-.files-panel,
-.timer-panel {
+.files-panel {
   position: absolute;
   bottom: 72px;
   background: var(--bg-2);
@@ -388,6 +387,9 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   z-index: 200;
   box-shadow: 0 4px 24px rgba(0,0,0,0.4);
   flex-direction: column;
+}
+.timer-btn-wrap {
+  position: relative;
 }
 
 /* Device split buttons (mic / cam + caret → dropdown) */
@@ -1382,7 +1384,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-bottom: 2px;
+  margin: 4px 16px 0;
   transition: background 0.4s, border-color 0.4s, box-shadow 0.4s;
 }
 .timer-bar.hidden { display: none; }
@@ -1481,16 +1483,30 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .timer-eye-btn svg { width: 15px; height: 15px; }
 .timer-eye-btn.inactive { opacity: 0.3; }
 .timer-notes-row {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-2);
   line-height: 1.45;
   padding-left: 10px;
   border-left: 2px solid rgba(255, 255, 255, 0.10);
   margin-left: 2px;
-  white-space: pre-wrap;
-  max-height: 72px;
+  max-height: 100px;
   overflow-y: auto;
 }
+.timer-notes-row .md-h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  margin: 6px 0 2px;
+}
+.timer-notes-row .md-h3:first-child { margin-top: 0; }
+.timer-notes-row ul {
+  margin: 0 0 4px 0;
+  padding-left: 16px;
+}
+.timer-notes-row li { margin: 1px 0; }
+.timer-notes-row p  { margin: 2px 0; }
 .timer-progress-track {
   height: 2px;
   background: rgba(255, 255, 255, 0.07);
@@ -1510,10 +1526,19 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 
 /* ── Timer panel (host) ──────────────────────────────────────── */
 .timer-panel {
-  left: 16px;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
   width: 288px;
   max-height: calc(100vh - 200px);
   overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  z-index: 200;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  flex-direction: column;
   gap: 0;
 }
 .timer-panel-header {

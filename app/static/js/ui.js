@@ -1619,14 +1619,40 @@ function applyTimerUpdate(msg) {
   timerBar?.classList.remove('hidden');
   if (timerTopicEl) timerTopicEl.textContent = msg.topicName;
   if (timerNotesEl) {
-    timerNotesEl.textContent    = msg.topicNotes;
-    timerNotesEl.style.display  = msg.topicNotes ? '' : 'none';
+    timerNotesEl.innerHTML     = _renderMd(msg.topicNotes);
+    timerNotesEl.style.display = msg.topicNotes ? '' : 'none';
   }
   if (timerCountEl) timerCountEl.textContent = fmtTime(msg.remaining);
   if (timerProgressEl && msg.total > 0) {
     timerProgressEl.style.width = ((msg.remaining / msg.total) * 100) + '%';
   }
   colorTimerBar(msg.remaining, msg.yellowAt, msg.redAt, msg.expired);
+}
+
+function _renderMd(text) {
+  if (!text) return '';
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  const lines = text.split('\n');
+  const out = [];
+  let inList = false;
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const h3 = line.match(/^###\s+(.+)/);
+    const li  = line.match(/^\s*[*\-]\s+(.+)/);
+    if (h3) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(`<div class="md-h3">${inline(h3[1])}</div>`);
+    } else if (li) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${inline(li[1])}</li>`);
+    } else {
+      if (inList) { out.push('</ul>'); inList = false; }
+      if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  if (inList) out.push('</ul>');
+  return out.join('');
 }
 
 function updateTimerBar() {
@@ -1639,7 +1665,7 @@ function updateTimerBar() {
   timerBar?.classList.remove('hidden');
   if (timerTopicEl) timerTopicEl.textContent = topic.name;
   if (timerNotesEl) {
-    timerNotesEl.textContent   = topic.notes;
+    timerNotesEl.innerHTML     = _renderMd(topic.notes);
     timerNotesEl.style.display = topic.notes ? '' : 'none';
   }
   if (timerCountEl) timerCountEl.textContent = fmtTime(timerState.remaining);

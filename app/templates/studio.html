@@ -2,6 +2,107 @@
 {% block title %}{{ session.title }} — Studio{% endblock %}
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<style>
+.notes-btn-wrap {
+  position: relative;
+}
+.notes-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 300px;
+  max-height: 480px;
+  background: #0d1117;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  display: none;
+  flex-direction: column;
+  z-index: 200;
+  overflow: hidden;
+}
+.notes-panel.open { display: flex; }
+.notes-panel-header {
+  padding: 0.65rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #94a3b8;
+  border-bottom: 1px solid #1e293b;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.notes-panel-title { flex: 1; }
+.notes-panel-close {
+  background: none;
+  border: none;
+  color: #475569;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.2rem;
+  line-height: 1;
+}
+.notes-panel-close:hover { color: #94a3b8; }
+.notes-outline-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid #1e293b;
+  flex-shrink: 0;
+}
+.notes-outline-input {
+  flex: 1;
+  background: #1e2533;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.5rem;
+  min-width: 0;
+}
+.notes-outline-input::placeholder { color: #475569; }
+.notes-outline-input:disabled { opacity: 0.5; }
+.notes-outline-btn {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.notes-outline-btn:hover:not(:disabled) { background: #273344; color: #e2e8f0; }
+.notes-outline-btn:disabled { opacity: 0.5; cursor: default; }
+.notes-outline-status {
+  padding: 0 0.75rem 0.4rem;
+  font-size: 0.72rem;
+  color: #475569;
+  min-height: 1.2em;
+  flex-shrink: 0;
+}
+.notes-outline-status.ok  { color: #4ade80; }
+.notes-outline-status.err { color: #f87171; }
+.notes-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem;
+  font-size: 0.82rem;
+  color: #94a3b8;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.notes-body-empty {
+  color: #334155;
+  font-style: italic;
+}
+</style>
 {% endblock %}
 {% block header_right %}
 <div class="studio-header-right">
@@ -64,29 +165,29 @@
 {% block content %}
 <div class="studio-layout">
 
+  <!-- Timer bar — visible to all participants when a timer is active -->
+  <div class="timer-bar hidden" id="timer-bar">
+    <div class="timer-bar-main">
+      <span class="timer-topic-name" id="timer-topic-name"></span>
+      <div class="timer-bar-end">
+        <span class="timer-countdown" id="timer-countdown"></span>
+        <button class="timer-eye-btn" id="btn-timer-eye" title="Hide time">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="timer-notes-row" id="timer-notes-row" style="display:none"></div>
+    <div class="timer-progress-track">
+      <div class="timer-progress-fill" id="timer-progress-fill"></div>
+    </div>
+  </div>
+
   <!-- Video grid: tiles live on the #stage (large) or #filmstrip (thumbnails),
        placed by the layout engine in studio.js based on view mode / pins. -->
   <div class="video-grid view-grid" id="video-grid">
-
-    <!-- Timer bar — visible to all participants when a timer is active -->
-    <div class="timer-bar hidden" id="timer-bar">
-      <div class="timer-bar-main">
-        <span class="timer-topic-name" id="timer-topic-name"></span>
-        <div class="timer-bar-end">
-          <span class="timer-countdown" id="timer-countdown"></span>
-          <button class="timer-eye-btn" id="btn-timer-eye" title="Hide time">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-              <circle cx="12" cy="12" r="3"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-      <div class="timer-notes-row" id="timer-notes-row" style="display:none"></div>
-      <div class="timer-progress-track">
-        <div class="timer-progress-fill" id="timer-progress-fill"></div>
-      </div>
-    </div>
 
     <div class="stage s1" id="stage">
       <div class="empty-grid-msg" id="empty-msg">Waiting for participants…</div>
@@ -99,49 +200,6 @@
   <div class="files-panel" id="files-panel" style="display:none">
     <div class="files-panel-header">Recordings</div>
     <div id="files-list"><span class="files-empty">No recordings yet.</span></div>
-  </div>
-  {% endif %}
-
-  <!-- Timer panel (host only) -->
-  {% if is_host %}
-  <div class="timer-panel" id="timer-panel" style="display:none">
-    <div class="timer-panel-header">Timer Queue</div>
-
-    <div class="timer-thresholds">
-      <div class="timer-threshold-row">
-        <span class="timer-threshold-swatch swatch-yellow"></span>
-        <span class="timer-threshold-label">Yellow at</span>
-        <input type="number" id="timer-yellow" value="120" min="1" max="3600" step="1">
-        <span class="timer-threshold-unit">s</span>
-      </div>
-      <div class="timer-threshold-row">
-        <span class="timer-threshold-swatch swatch-red"></span>
-        <span class="timer-threshold-label">Red at</span>
-        <input type="number" id="timer-red" value="60" min="1" max="3600" step="1">
-        <span class="timer-threshold-unit">s</span>
-      </div>
-    </div>
-
-    <div class="timer-queue-list" id="timer-queue-list">
-      <div class="timer-queue-empty">No topics yet</div>
-    </div>
-
-    <div class="timer-add-form">
-      <input type="text" id="timer-add-name" placeholder="Topic name" maxlength="60">
-      <input type="number" id="timer-add-dur" placeholder="Duration (min)" min="0.5" step="0.5">
-      <textarea id="timer-add-notes" placeholder="Show notes (optional)" rows="2" maxlength="500"></textarea>
-      <div class="timer-add-actions">
-        <button class="btn-timer-cancel-btn" id="btn-timer-cancel" style="display:none">Cancel</button>
-        <button class="btn-timer-add-btn" id="btn-timer-add">+ Add Topic</button>
-      </div>
-    </div>
-
-    <div class="timer-controls-row">
-      <button class="timer-ctrl-btn" id="btn-timer-startstop">Start</button>
-      <button class="timer-ctrl-btn timer-plus30" id="btn-timer-plus30">+30s</button>
-      <button class="timer-ctrl-btn" id="btn-timer-skip" disabled>Skip →</button>
-      <button class="timer-ctrl-btn timer-stop-btn" id="btn-timer-stop" disabled>Stop</button>
-    </div>
   </div>
   {% endif %}
 
@@ -158,6 +216,7 @@
     <div class="hand-queue-header">✋ Queue</div>
     <ol class="hand-queue-list" id="hand-queue-list"></ol>
   </div>
+
 
 
   <!-- Controls bar -->
@@ -202,12 +261,53 @@
       </button>
 
 {% if is_host %}
-      <button class="ctrl-btn" id="btn-timer" title="Timer queue [T]">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
-        </svg>
-      </button>
+      <div class="timer-btn-wrap">
+        <button class="ctrl-btn" id="btn-timer" title="Timer queue [T]">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </button>
+        <div class="timer-panel" id="timer-panel" style="display:none">
+          <div class="timer-panel-header">Timer Queue</div>
+
+          <div class="timer-thresholds">
+            <div class="timer-threshold-row">
+              <span class="timer-threshold-swatch swatch-yellow"></span>
+              <span class="timer-threshold-label">Yellow at</span>
+              <input type="number" id="timer-yellow" value="120" min="1" max="3600" step="1">
+              <span class="timer-threshold-unit">s</span>
+            </div>
+            <div class="timer-threshold-row">
+              <span class="timer-threshold-swatch swatch-red"></span>
+              <span class="timer-threshold-label">Red at</span>
+              <input type="number" id="timer-red" value="60" min="1" max="3600" step="1">
+              <span class="timer-threshold-unit">s</span>
+            </div>
+          </div>
+
+          <div class="timer-queue-list" id="timer-queue-list">
+            <div class="timer-queue-empty">No topics yet</div>
+          </div>
+
+          <div class="timer-add-form">
+            <input type="text" id="timer-add-name" placeholder="Topic name" maxlength="60">
+            <input type="number" id="timer-add-dur" placeholder="Duration (min)" min="0.5" step="0.5">
+            <textarea id="timer-add-notes" placeholder="Show notes (optional)" rows="2" maxlength="500"></textarea>
+            <div class="timer-add-actions">
+              <button class="btn-timer-cancel-btn" id="btn-timer-cancel" style="display:none">Cancel</button>
+              <button class="btn-timer-add-btn" id="btn-timer-add">+ Add Topic</button>
+            </div>
+          </div>
+
+          <div class="timer-controls-row">
+            <button class="timer-ctrl-btn" id="btn-timer-startstop">Start</button>
+            <button class="timer-ctrl-btn timer-plus30" id="btn-timer-plus30">+30s</button>
+            <button class="timer-ctrl-btn" id="btn-timer-skip" disabled>Skip →</button>
+            <button class="timer-ctrl-btn timer-stop-btn" id="btn-timer-stop" disabled>Stop</button>
+          </div>
+        </div>
+      </div>
       {% endif %}
       <div class="alert-btn-wrap">
         <button class="ctrl-btn" id="btn-alert" title="Send alert to all participants [A]">
@@ -262,7 +362,31 @@
       {% if cloud_upload_enabled %}
       <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">Upload Local Recording</button>
       {% endif %}
-      <button class="btn-danger" id="btn-end">End Session</button>
+      <div class="notes-btn-wrap">
+        <button class="btn-share" id="btn-notes" style="display:none" onclick="toggleNotesPanel()">Notes</button>
+        {% if is_host %}
+        <div class="notes-panel" id="notes-panel">
+          <div class="notes-panel-header">
+            <span class="notes-panel-title">Show Notes</span>
+            <button class="notes-panel-close" onclick="toggleNotesPanel()" title="Close">✕</button>
+          </div>
+          {% if outline_enabled %}
+          <div class="notes-outline-row">
+            <input type="text" class="notes-outline-input" id="outline-url-input"
+                   placeholder="Outline doc URL or ID"
+                   value="{{ outline_doc_id }}"
+                   {% if not outline_enabled %}disabled{% endif %}>
+            <button class="notes-outline-btn" id="btn-outline-sync" onclick="outlineSync()">Sync</button>
+          </div>
+          <div class="notes-outline-status" id="outline-status"></div>
+          {% endif %}
+          <div class="notes-body" id="notes-body">
+            <span class="notes-body-empty" id="notes-empty-msg">{% if session.notes %}{% else %}No notes yet.{% if outline_enabled %} Enter an Outline doc URL above and click Sync.{% endif %}{% endif %}</span>{{ session.notes | e }}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+            <button class="btn-danger" id="btn-end">End Session</button>
       {% else %}
       {% if cloud_upload_enabled %}
       <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">Upload Local Recording</button>
@@ -309,10 +433,119 @@
   const BASE_URL      = "{{ base_url }}";
   const JOIN_LINK     = BASE_URL + "/join/" + SESSION_ID;
   const ASSET_V       = "{{ asset_v }}";
+
+  const OUTLINE_ENABLED = {{ "true" if outline_enabled else "false" }};
+  const OUTLINE_DOC_ID_INITIAL = "{{ outline_doc_id | e }}";
 </script>
 <script src="/static/js/recording.js?v={{ asset_v }}"></script>
 <script src="/static/js/upload.js?v={{ asset_v }}"></script>
 <script src="/static/js/chat.js?v={{ asset_v }}"></script>
 <script src="/static/js/ui.js?v={{ asset_v }}"></script>
 <script src="/static/js/studio.js?v={{ asset_v }}"></script>
+<script>
+
+// ── Notes panel ──────────────────────────────────────────────────────────────
+
+function toggleNotesPanel() {
+  const panel = document.getElementById('notes-panel');
+  const btn   = document.getElementById('btn-notes');
+  if (!panel) return;
+  const open = panel.classList.toggle('open');
+  if (btn) btn.classList.toggle('active', open);
+}
+
+function _setNotesContent(text) {
+  const body     = document.getElementById('notes-body');
+  const emptyMsg = document.getElementById('notes-empty-msg');
+  if (!body) return;
+  // Clear
+  body.textContent = '';
+  if (text && text.trim()) {
+    if (emptyMsg) emptyMsg.remove();
+    body.textContent = text;
+  } else {
+    if (!emptyMsg) {
+      const span = document.createElement('span');
+      span.className = 'notes-body-empty';
+      span.id = 'notes-empty-msg';
+      span.textContent = 'No notes yet.' + (OUTLINE_ENABLED ? ' Enter an Outline doc URL above and click Sync.' : '');
+      body.appendChild(span);
+    }
+  }
+}
+
+function _setOutlineStatus(msg, type) {
+  const el = document.getElementById('outline-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'notes-outline-status' + (type ? ' ' + type : '');
+}
+
+async function outlineSync() {
+  const input = document.getElementById('outline-url-input');
+  const btn   = document.getElementById('btn-outline-sync');
+  const docId = input?.value.trim();
+  if (!docId) { _setOutlineStatus('Enter a document URL or ID first.', 'err'); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+  if (input) input.disabled = true;
+  _setOutlineStatus('');
+
+  // Determine which endpoint to call:
+  // If the input matches the already-linked doc ID, use refresh; otherwise import.
+  const linked = OUTLINE_DOC_ID_INITIAL || '';
+  const docSlug = docId.includes('/') ? docId.split('/').pop() : docId;
+  const useRefresh = linked && (docSlug === linked || docId === linked);
+  const endpoint = useRefresh
+    ? `/api/session/${SESSION_ID}/outline/refresh`
+    : `/api/session/${SESSION_ID}/outline/import`;
+
+  try {
+    const body = useRefresh
+      ? { host_token: HOST_TOKEN }
+      : { host_token: HOST_TOKEN, doc_id: docId };
+
+    const r = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      _setOutlineStatus(data.detail || `Error ${r.status}`, 'err');
+      return;
+    }
+    // Fetch full notes from the session metadata endpoint
+    const notesResp = await fetch(`/api/session/${SESSION_ID}/notes`).catch(() => null);
+    if (notesResp && notesResp.ok) {
+      const nd = await notesResp.json().catch(() => ({}));
+      _setNotesContent(nd.notes || '');
+    } else {
+      // Fallback: show preview from the import response
+      _setNotesContent(data.notes_preview || '');
+    }
+    const charCount = data.notes_length || 0;
+
+    // Populate timer queue from parsed topics
+    let topicMsg = '';
+    if (Array.isArray(data.topics) && data.topics.length) {
+      timerQueue.splice(0, timerQueue.length, ...data.topics);
+      if (typeof renderTimerQueue === 'function') renderTimerQueue();
+      topicMsg = `, ${data.topics.length} topic${data.topics.length !== 1 ? 's' : ''} loaded`;
+    }
+
+    _setOutlineStatus(`✓ Synced from Outline (${charCount} chars${topicMsg})`, 'ok');
+    // Update the input to the canonical doc ID
+    if (data.outline_doc_id && input) input.value = data.outline_doc_id;
+  } catch (e) {
+    _setOutlineStatus('Request failed — check network or Outline config.', 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Sync'; }
+    if (input) input.disabled = false;
+  }
+}
+
+// Show Notes button once JS is ready (avoids flash before init)
+if (IS_HOST) { const nb = document.getElementById("btn-notes"); if (nb) nb.style.display = ""; }
+</script>
 {% endblock %}

@@ -145,6 +145,8 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
             "livekit_url": settings.livekit_public_url,
             "base_url": settings.base_url,
             "cloud_upload_enabled": cloud_upload_enabled(),
+            "outline_enabled": bool(settings.outline_api_url and settings.outline_api_key),
+            "outline_doc_id": session.outline_doc_id,
             "upload_token": session.upload_token,
         },
     )

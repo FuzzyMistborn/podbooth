@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     # Discord notifications
     discord_webhook_url: str = ""
 
+    # Outline wiki integration
+    outline_api_url: str = ""
+    outline_api_key: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"
