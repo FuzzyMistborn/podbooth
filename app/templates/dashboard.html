@@ -713,10 +713,12 @@ async function _pollTxStatus(sessionId) {
     if (!r.ok) return;
     const { status } = await r.json();
     if (status === 'transcribing') {
-      if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Transcribing audio…'; }
+      if (statusEl) { statusEl.style.display = ''; statusEl.className = 'tx-status'; statusEl.textContent = 'Transcribing audio…'; }
       setTimeout(() => _pollTxStatus(sessionId), 5000);
     } else if (status === 'done') {
       window.location.reload();
+    } else if (status === 'failed') {
+      if (statusEl) { statusEl.style.display = ''; statusEl.className = 'tx-status tx-status--failed'; statusEl.textContent = 'Transcription failed'; }
     }
   } catch (e) {}
 }

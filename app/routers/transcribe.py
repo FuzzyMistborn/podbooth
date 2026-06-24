@@ -29,6 +29,7 @@ router = APIRouter()
 
 _transcribe_tasks: set[asyncio.Task] = set()
 _session_transcribing: set[str] = set()
+_session_transcribe_failed: set[str] = set()
 
 
 def _gather_participant_wavs(session_dir: Path) -> dict[str, list[Path]]:
@@ -212,6 +213,7 @@ async def _run_session_transcription(session_id: str):
 
             if not tracks:
                 logger.error("All transcriptions failed for session %s", session_id)
+                _session_transcribe_failed.add(session_id)
                 return
 
             transcript = _merge_transcripts(tracks)
@@ -224,6 +226,7 @@ async def _run_session_transcription(session_id: str):
 
     except Exception as e:
         logger.error("Session transcription failed for %s: %s", session_id, e)
+        _session_transcribe_failed.add(session_id)
     finally:
         _session_transcribing.discard(session_id)
 
@@ -234,6 +237,7 @@ def schedule_session_transcription(session_id: str):
         return
     if session_id in _session_transcribing:
         return
+    _session_transcribe_failed.discard(session_id)
     _session_transcribing.add(session_id)
     task = asyncio.create_task(_run_session_transcription(session_id))
     _transcribe_tasks.add(task)
@@ -251,6 +255,8 @@ async def transcription_status(session_id: str):
         return JSONResponse({"status": "done"})
     if session_id in _session_transcribing:
         return JSONResponse({"status": "transcribing"})
+    if session_id in _session_transcribe_failed:
+        return JSONResponse({"status": "failed"})
     return JSONResponse({"status": "idle"})
 
 

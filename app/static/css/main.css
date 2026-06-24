@@ -1938,6 +1938,10 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   padding: 4px 0;
   animation: blink 1.8s ease-in-out infinite;
 }
+.tx-status--failed {
+  color: #e05252;
+  animation: none;
+}
 
 /* ── Dashboard toolbar (search / filter / sort) ──────────────── */
 .dash-toolbar {
