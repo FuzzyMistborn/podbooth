@@ -686,8 +686,8 @@ function setupControls() {
   btnFiles?.addEventListener('click', e => {
     e.stopPropagation();
     const open = filesPanel.style.display !== 'none';
-    filesPanel.style.display = open ? 'none' : 'flex';
-    if (!open) fetchFiles();
+    closeAllPanels();
+    if (!open) { filesPanel.style.display = 'flex'; fetchFiles(); }
   });
   filesPanel?.addEventListener('click', e => e.stopPropagation());
   document.addEventListener('click', () => {
@@ -778,8 +778,8 @@ function setupControls() {
   btnAlert?.addEventListener('click', e => {
     e.stopPropagation();
     const open = alertPanel?.style.display !== 'none';
-    if (alertPanel) alertPanel.style.display = open ? 'none' : 'flex';
-    btnAlert?.classList.toggle('active', !open);
+    closeAllPanels();
+    if (!open) { if (alertPanel) alertPanel.style.display = 'flex'; btnAlert?.classList.add('active'); }
   });
   btnAlertSend?.addEventListener('click', () => {
     const text = alertCustom?.value.trim();
@@ -885,6 +885,22 @@ function setupKeyboardShortcuts() {
         break;
     }
   });
+}
+
+// ── Panel helpers ─────────────────────────────────────────────────────────────
+
+function closeAllPanels() {
+  if (timerPanel && timerPanel.style.display !== 'none') {
+    timerPanel.style.display = 'none';
+    btnTimerBtn?.classList.remove('active');
+  }
+  if (alertPanel && alertPanel.style.display !== 'none') {
+    alertPanel.style.display = 'none';
+    btnAlert?.classList.remove('active');
+  }
+  if (filesPanel && filesPanel.style.display !== 'none') {
+    filesPanel.style.display = 'none';
+  }
 }
 
 // ── Alert ─────────────────────────────────────────────────────────────────────
@@ -1375,8 +1391,8 @@ function setupTimerControls() {
   btnTimerBtn?.addEventListener('click', e => {
     e.stopPropagation();
     const open = timerPanel?.style.display !== 'none';
-    if (timerPanel) timerPanel.style.display = open ? 'none' : 'flex';
-    btnTimerBtn.classList.toggle('active', !open);
+    closeAllPanels();
+    if (!open) { if (timerPanel) timerPanel.style.display = 'flex'; btnTimerBtn?.classList.add('active'); }
   });
   timerPanel?.addEventListener('click', e => e.stopPropagation());
   document.addEventListener('click', () => {
