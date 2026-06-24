@@ -2,6 +2,8 @@
 
 Self-hosted remote podcast recording studio. Each participant records locally in the browser — separate audio and video tracks, no quality loss.
 
+I made this largely because while tools like Zencastr, Riverside, and Squadcast exist, they are imperfect and most require a subscription fee.  I wanted to build something that could be self-hostable but have the same functionality.  I also wanted to add in a few things that I felt were missing (like screen sharing, sending visible alerts, clock/timer, etc.  So while this may be somewhat bespoke for me and my fellow hosts on the [BitFlip Show Podcast](https://bitflip.show), I tried to design it to be generic and usable for others.
+
 ## Screenshots
 
 <table>
