@@ -294,8 +294,14 @@ function cleanupLocalScreen() {
   removeTile(`tile-${identity}-screen`);
   layoutTiles();
   btnScreen?.classList.remove('active');
-  if (screenRecorder && screenRecorder.state !== 'inactive') {
-    screenRecorder.stop();
+  if (screenRecorder) {
+    if (screenRecorder.state !== 'inactive') {
+      screenRecorder.stop(); // onstop → finalizeTrack('screen')
+    } else {
+      // Recorder was already stopped (browser ended the track before we got here);
+      // onstop will never fire, so finalize manually to avoid losing the chunks.
+      finalizeTrack('screen', { format: 'container' });
+    }
   }
   screenRecorder = null;
 }
@@ -325,7 +331,12 @@ function startScreenRecording() {
     videoBitsPerSecond: 8_000_000,
   });
   screenRecorder.ondataavailable = e => {
-    if (e.data && e.data.size > 0) enqueueChunk(e.data, 'screen', screenExt);
+    if (e.data && e.data.size > 0) {
+      recLog('screen ondataavailable: chunk=%d size=%d bytes', chunkIndex.screen, e.data.size);
+      enqueueChunk(e.data, 'screen', screenExt);
+    } else {
+      recLog('screen ondataavailable: empty chunk (skipped)');
+    }
   };
   screenRecorder.onstop = () => {
     finalizeTrack('screen', { format: 'container' });
@@ -696,6 +707,7 @@ function startRecStatusBroadcast() {
       displayName,
       audioOk: !!(pcmCapturing || (audioRecorder && audioRecorder.state === 'recording')),
       videoOk: !videoRecorder || videoRecorder.state === 'recording',
+      screenOk: !screenRecorder || screenRecorder.state === 'recording',
       uploadBacklog: backlog,
       uploadError: uploadHasError,
     });

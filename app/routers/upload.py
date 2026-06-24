@@ -382,6 +382,7 @@ async def assemble_track(
                     await _save_run_metadata(directory, epoch_ms, nametake, "audio", output.name)
         else:
             logger.error("assemble: audio ffmpeg failed for %s/%s", directory.name, epoch)
+            source.rename(source.with_suffix(source.suffix + ".failed"))
 
     elif track_type == "video":
         # Keep epoch-based name for the intermediate (no-audio) file.
@@ -422,6 +423,7 @@ async def assemble_track(
                     await _save_run_metadata(directory, epoch_ms, nametake, "video", final_video)
         else:
             logger.error("assemble: video ffmpeg failed for %s/%s", directory.name, epoch)
+            source.rename(source.with_suffix(source.suffix + ".failed"))
 
     else:  # screen
         if nametake:
@@ -460,6 +462,9 @@ async def assemble_track(
                 epoch_ms = _decode_epoch_ms(epoch)
                 if epoch_ms is not None:
                     await _save_run_metadata(directory, epoch_ms, nametake, "screen", output.name)
+        else:
+            logger.error("assemble: screen ffmpeg failed for %s/%s", directory.name, epoch)
+            source.rename(source.with_suffix(source.suffix + ".failed"))
 
 
 async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
@@ -535,6 +540,10 @@ async def recover_orphaned_chunks(session) -> int:
         for (track_type, epoch), ext in pending.items():
             in_progress_key = (str(pdir), track_type, epoch)
             if in_progress_key in _assembly_in_progress:
+                continue
+            epoch_tag = f"_{epoch}" if epoch else ""
+            source_glob = f"{track_type}{epoch_tag}_source*.failed"
+            if any(pdir.glob(source_glob)):
                 continue
             fmt = "pcm" if ext == "raw" else "container"
             logger.info(
