@@ -1722,26 +1722,46 @@ function applyTimerUpdate(msg) {
 function _renderMd(text) {
   if (!text) return '';
   const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  const inline = s => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
   const lines = text.split('\n');
   const out = [];
-  let inList = false;
+  const listStack = []; // stack of indent levels
+  const closeListsTo = (targetDepth) => {
+    while (listStack.length > 0 && listStack[listStack.length - 1] > targetDepth) {
+      out.push('</ul>');
+      listStack.pop();
+    }
+  };
   for (const raw of lines) {
     const line = raw.trimEnd();
     const h3 = line.match(/^###\s+(.+)/);
-    const li  = line.match(/^\s*[*\-]\s+(.+)/);
-    if (h3) {
-      if (inList) { out.push('</ul>'); inList = false; }
+    const h2 = line.match(/^##\s+(.+)/);
+    const li  = line.match(/^(\s*)[*\-]\s+(.+)/);
+    if (h2) {
+      closeListsTo(-1);
+      out.push(`<div class="md-h2">${inline(h2[1])}</div>`);
+    } else if (h3) {
+      closeListsTo(-1);
       out.push(`<div class="md-h3">${inline(h3[1])}</div>`);
     } else if (li) {
-      if (!inList) { out.push('<ul>'); inList = true; }
-      out.push(`<li>${inline(li[1])}</li>`);
+      const depth = li[1].length;
+      const currentDepth = listStack.length > 0 ? listStack[listStack.length - 1] : -1;
+      if (depth > currentDepth) {
+        out.push('<ul>');
+        listStack.push(depth);
+      } else if (depth < currentDepth) {
+        closeListsTo(depth);
+      }
+      out.push(`<li>${inline(li[2])}</li>`);
     } else {
-      if (inList) { out.push('</ul>'); inList = false; }
+      closeListsTo(-1);
       if (line.trim()) out.push(`<p>${inline(line)}</p>`);
     }
   }
-  if (inList) out.push('</ul>');
+  closeListsTo(-1);
   return out.join('');
 }
 
