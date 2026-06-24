@@ -165,6 +165,9 @@
       overflow: hidden;
     }
     .file-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       padding: 7px 20px;
       font-size: 11px;
       font-weight: 600;
@@ -173,6 +176,37 @@
       color: var(--muted);
       background: var(--surface);
       border-bottom: 1px solid var(--border);
+    }
+    .btn-download-all {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      background: transparent;
+      border: 1px solid var(--accent-dim);
+      border-radius: 4px;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 500;
+      cursor: pointer;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn-download-all:hover {
+      background: rgba(255,107,0,0.1);
+      border-color: var(--accent);
+    }
+    .btn-download-all svg {
+      width: 11px;
+      height: 11px;
+      fill: currentColor;
+      flex-shrink: 0;
+    }
+    .btn-download-all:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
     .file-row {
       display: grid;
@@ -603,10 +637,47 @@
     return row;
   }
 
-  function makeGroupHeader(label) {
+  function downloadGroup(files, btn) {
+    var downloadable = files.filter(function (f) { return f.download_url; });
+    if (downloadable.length === 0) return;
+    btn.disabled = true;
+    downloadable.forEach(function (f, i) {
+      setTimeout(function () {
+        var a = document.createElement("a");
+        a.href = f.download_url;
+        a.download = f.filename || "";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        if (i === downloadable.length - 1) {
+          setTimeout(function () { btn.disabled = false; }, 500);
+        }
+      }, i * 400);
+    });
+  }
+
+  function makeGroupHeader(label, files) {
     var h = document.createElement("div");
     h.className = "file-group-header";
-    h.textContent = label;
+
+    var labelEl = document.createElement("span");
+    labelEl.textContent = label;
+    h.appendChild(labelEl);
+
+    var downloadable = (files || []).filter(function (f) { return f.download_url; });
+    if (downloadable.length > 1) {
+      var btn = document.createElement("button");
+      btn.className = "btn-download-all";
+      btn.setAttribute("aria-label", "Download all " + label + " files");
+      btn.innerHTML =
+        '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+          '<path d="M8 1v8.293l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7.5 9.293V1H8zM2 13h12v1H2v-1z"/>' +
+        '</svg>' +
+        'Download all';
+      btn.addEventListener("click", function () { downloadGroup(downloadable, btn); });
+      h.appendChild(btn);
+    }
+
     return h;
   }
 
@@ -621,18 +692,23 @@
 
     var podbooth = files.filter(function (f) { return f.source === "podbooth"; });
     var local    = files.filter(function (f) { return f.source === "local"; });
-    var other    = files.filter(function (f) { return f.source !== "podbooth" && f.source !== "local"; });
+    var exports  = files.filter(function (f) { return f.source === "exports"; });
+    var other    = files.filter(function (f) { return f.source !== "podbooth" && f.source !== "local" && f.source !== "exports"; });
 
     if (podbooth.length > 0) {
-      list.appendChild(makeGroupHeader("PodBooth Recordings"));
+      list.appendChild(makeGroupHeader("PodBooth Recordings", podbooth));
       podbooth.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (local.length > 0) {
-      list.appendChild(makeGroupHeader("Local Uploads"));
+      list.appendChild(makeGroupHeader("Local Uploads", local));
       local.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
+    if (exports.length > 0) {
+      list.appendChild(makeGroupHeader("Editor Project Files", exports));
+      exports.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
     if (other.length > 0) {
-      list.appendChild(makeGroupHeader("Other"));
+      list.appendChild(makeGroupHeader("Other", other));
       other.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
   }

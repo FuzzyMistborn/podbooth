@@ -222,6 +222,29 @@ def list_session_objects(
     return objects
 
 
+_CONTENT_TYPES = {
+    ".wav": "audio/wav",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".txt": "text/plain",
+    ".otio": "application/json",
+    ".fcpxml": "application/xml",
+    ".rpp": "text/plain",
+}
+
+
+def upload_file(key: str, local_path) -> int:
+    """Server-side upload of a local file to the editor bucket. Returns size in bytes."""
+    from pathlib import Path as _Path
+    p = _Path(local_path)
+    _validate_key(key)
+    content_type = _CONTENT_TYPES.get(p.suffix.lower(), "application/octet-stream")
+    client = get_client()
+    client.upload_file(str(p), _bucket(), key, ExtraArgs={"ContentType": content_type})
+    return p.stat().st_size
+
+
 def put_object(key: str, body: str | bytes, content_type: str = "application/json") -> None:
     """Write a small object directly (used for manifest.json)."""
     _validate_key(key)

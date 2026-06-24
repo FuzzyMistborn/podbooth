@@ -35,6 +35,8 @@ def _file_source(key: str) -> str:
         return "local"
     if "podbooth" in parts:
         return "podbooth"
+    if "exports" in parts:
+        return "exports"
     return ""
 
 
@@ -91,6 +93,54 @@ async def _build_manifest_files(loop, objs: list[dict], r2_meta: dict, expiry_se
             "source": _file_source(key),
         })
     return manifest_files
+
+
+async def _upload_export_files(session_id: str, session) -> None:
+    """Generate OTIO/FCPXML/Reaper project files and upload to sessions/{id}/exports/."""
+    from app.routers.export import _resolve_runs, _build_otio_json, _build_fcpxml, _build_reaper_rpp, _safe_name
+
+    try:
+        runs = await _resolve_runs(session)
+    except Exception:
+        logger.exception("Export generation failed: could not resolve runs for session %s", session_id)
+        return
+
+    if not runs:
+        return
+
+    safe = _safe_name(session.title)
+    exports = {
+        f"{safe}.otio":   ("application/json", _build_otio_json(session.title, runs)),
+        f"{safe}.fcpxml": ("application/xml",  _build_fcpxml(session.title, runs)),
+        f"{safe}.rpp":    ("text/plain",        _build_reaper_rpp(session.title, runs)),
+    }
+
+    loop = asyncio.get_running_loop()
+    existing_keys = {f["key"] for f in session.r2_files}
+    now = datetime.now(tz=timezone.utc).isoformat()
+    changed = False
+
+    for filename, (content_type, content) in exports.items():
+        key = f"sessions/{session_id}/exports/{filename}"
+        try:
+            await loop.run_in_executor(None, lambda k=key, c=content, ct=content_type: s3.put_object(k, c, ct))
+            logger.info("Uploaded export file: %s", key)
+        except Exception:
+            logger.exception("Failed to upload export file %s", key)
+            continue
+        if key not in existing_keys:
+            session.r2_files.append({
+                "key": key,
+                "filename": filename,
+                "size_bytes": len(content.encode() if isinstance(content, str) else content),
+                "uploaded_at": now,
+                "uploader": "podbooth",
+            })
+            existing_keys.add(key)
+            changed = True
+
+    if changed:
+        await models.touch(session_id)
 
 
 class UploadUrlRequest(BaseModel):
@@ -227,6 +277,9 @@ async def create_editor_link(session_id: str, _: None = Depends(require_host)):
         None, lambda: s3.put_object(manifest_key, json.dumps(manifest), "application/json")
     )
 
+    # Generate and upload NLE/DAW export files
+    await _upload_export_files(session_id, session)
+
     # Store only the hash — the raw token is never persisted to disk
     session.editor_token_hash = token_hash
     session.r2_expires_at = expires_at
@@ -290,6 +343,9 @@ async def manifest_refresh(session_id: str, _: None = Depends(require_host)):
     await loop.run_in_executor(
         None, lambda: s3.put_object(manifest_key, json.dumps(manifest), "application/json")
     )
+
+    # Regenerate export files with fresh presigned paths
+    await _upload_export_files(session_id, session)
 
     session.r2_expires_at = expires_at
     await models.touch(session_id)
