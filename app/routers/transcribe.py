@@ -127,14 +127,32 @@ def _merge_transcripts(tracks: list[tuple[str, dict]]) -> str:
     return "\n".join(lines)
 
 
-async def _transcribe_one(
-    client: httpx.AsyncClient,
-    speaker: str,
-    audio_path: Path,
-) -> tuple[str, dict] | None:
-    """POST one participant's audio to WhisperX; return (speaker, verbose_json) or None."""
+async def _split_mp3_chunks(src: Path, chunk_secs: int = 600) -> list[Path] | None:
+    """Split an MP3 into fixed-duration chunks; returns list of temp Paths or None on error."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pb_chunks_"))
+    out_pattern = str(tmp_dir / "chunk_%03d.mp3")
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-f", "segment", "-segment_time", str(chunk_secs),
+        "-c", "copy", "-reset_timestamps", "1",
+        out_pattern,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error("MP3 chunk split failed: %s", stderr.decode()[-1000:])
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+    chunks = sorted(tmp_dir.glob("chunk_*.mp3"))
+    logger.info("Split %s into %d chunk(s) of ~%ds", src.name, len(chunks), chunk_secs)
+    return chunks
+
+
+async def _post_to_whisperx(client: httpx.AsyncClient, audio_path: Path) -> dict | None:
+    """POST one audio file to WhisperX and return verbose_json or None on error."""
     try:
-        logger.info("Sending %s to WhisperX (%s)", speaker, audio_path.name)
         with audio_path.open("rb") as f:
             form: dict = {
                 "model": settings.whisperx_model,
@@ -151,12 +169,45 @@ async def _transcribe_one(
                 data=form,
             )
         if r.status_code != 200:
-            logger.error("WhisperX %d for %s: %s", r.status_code, speaker, r.text[:500])
+            logger.error("WhisperX %d (%s): %s", r.status_code, audio_path.name, r.text[:500])
             return None
-        return speaker, r.json()
+        return r.json()
     except Exception as e:
-        logger.error("Transcription failed for %s: %s", speaker, e)
+        logger.error("WhisperX request failed (%s): %s", audio_path.name, e)
         return None
+
+
+async def _transcribe_chunked(
+    client: httpx.AsyncClient,
+    speaker: str,
+    audio_path: Path,
+    chunk_secs: int = 600,
+) -> tuple[str, dict] | None:
+    """Transcribe audio in chunks and merge results with corrected timestamps."""
+    chunks = await _split_mp3_chunks(audio_path, chunk_secs)
+    if chunks is None:
+        return None
+    chunk_dir = chunks[0].parent if chunks else None
+
+    try:
+        all_segments: list[dict] = []
+        for i, chunk in enumerate(chunks):
+            offset = i * chunk_secs
+            logger.info("Transcribing %s chunk %d/%d (offset %ds)", speaker, i + 1, len(chunks), offset)
+            result = await _post_to_whisperx(client, chunk)
+            if result is None:
+                return None
+            for seg in result.get("segments", []):
+                seg = dict(seg)
+                seg["start"] = seg.get("start", 0.0) + offset
+                if "end" in seg:
+                    seg["end"] = seg["end"] + offset
+                all_segments.append(seg)
+
+        return speaker, {"segments": all_segments}
+    finally:
+        if chunk_dir:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
 async def _wait_for_assembly(session_dir: Path, timeout_s: int = 600):
@@ -232,7 +283,7 @@ async def _run_session_transcription(session_id: str):
                 timeout=httpx.Timeout(connect=10.0, read=3600.0, write=300.0, pool=10.0)
             ) as client:
                 for speaker, audio_path in to_transcribe:
-                    result = await _transcribe_one(client, speaker, audio_path)
+                    result = await _transcribe_chunked(client, speaker, audio_path)
                     if result:
                         tracks.append(result)
 
