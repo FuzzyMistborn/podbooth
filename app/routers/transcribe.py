@@ -72,6 +72,22 @@ async def _concat_wavs(wav_files: list[Path], output: Path) -> bool:
     return True
 
 
+async def _transcode_to_mp3(src: Path, output: Path, bitrate: str = "128k") -> bool:
+    """Transcode audio to MP3 to reduce upload size."""
+    cmd = ["ffmpeg", "-y", "-i", str(src), "-c:a", "libmp3lame", "-b:a", bitrate, str(output)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error("MP3 transcode failed: %s", stderr.decode()[-1000:])
+        return False
+    logger.info("Transcoded %s → %s (%.1f MB → %.1f MB)",
+                src.name, output.name,
+                src.stat().st_size / 1e6, output.stat().st_size / 1e6)
+    return True
+
+
 def _fmt_time(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -128,9 +144,10 @@ async def _transcribe_one(
             }
             if settings.whisperx_language:
                 form["language"] = settings.whisperx_language
+            mime = "audio/mpeg" if audio_path.suffix == ".mp3" else "audio/wav"
             r = await client.post(
                 f"{settings.whisperx_api_url.rstrip('/')}/v1/audio/transcriptions",
-                files={"file": (audio_path.name, f, "audio/wav")},
+                files={"file": (audio_path.name, f, mime)},
                 data=form,
             )
         if r.status_code != 200:
@@ -191,16 +208,24 @@ async def _run_session_transcription(session_id: str):
         try:
             for speaker, wavs in participant_wavs.items():
                 if len(wavs) == 1:
-                    to_transcribe.append((speaker, wavs[0]))
+                    wav_path = wavs[0]
                 else:
                     fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="pb_concat_")
                     os.close(fd)
-                    tmp_path = Path(tmp)
-                    tmp_files.append(tmp_path)
+                    wav_path = Path(tmp)
+                    tmp_files.append(wav_path)
                     logger.info("Concatenating %d takes for %s", len(wavs), speaker)
-                    if not await _concat_wavs(wavs, tmp_path):
+                    if not await _concat_wavs(wavs, wav_path):
                         return
-                    to_transcribe.append((speaker, tmp_path))
+
+                fd, tmp = tempfile.mkstemp(suffix=".mp3", prefix="pb_mp3_")
+                os.close(fd)
+                mp3_path = Path(tmp)
+                tmp_files.append(mp3_path)
+                logger.info("Transcoding %s to MP3 for upload", speaker)
+                if not await _transcode_to_mp3(wav_path, mp3_path):
+                    return
+                to_transcribe.append((speaker, mp3_path))
 
             tracks: list[tuple[str, dict]] = []
             async with httpx.AsyncClient(
