@@ -242,6 +242,10 @@ async function init() {
       autoGainControl: true,
       channelCount: 2,
     },
+    audioPublishDefaults: {
+      audioBitrate: 96000,
+      dtx: false,
+    },
   });
 
   if (IS_HOST && shareLink) {

@@ -391,7 +391,8 @@ async def assemble_track(
         if codec == "h264":
             cmd = [
                 "ffmpeg", "-y",
-                "-fflags", "+genpts",
+                "-fflags", "+genpts+discardcorrupt",
+                "-err_detect", "ignore_err",
                 "-i", str(source),
                 "-c:v", "copy",
                 "-an",
@@ -401,7 +402,8 @@ async def assemble_track(
         else:
             cmd = [
                 "ffmpeg", "-y",
-                "-fflags", "+genpts",
+                "-fflags", "+genpts+discardcorrupt",
+                "-err_detect", "ignore_err",
                 "-i", str(source),
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
@@ -411,10 +413,14 @@ async def assemble_track(
             ]
         ok = await _run_ffmpeg(cmd, directory, track_type)
         if ok:
-            logger.info("assemble: video noaudio %s size=%d", noaudio.name, noaudio.stat().st_size)
-            for chunk in chunks:
-                chunk.unlink(missing_ok=True)
-            source.unlink(missing_ok=True)
+            ok = await _probe_has_video(noaudio)
+            if not ok:
+                logger.error("assemble: video noaudio %s exists but has no readable video stream — keeping source", noaudio.name)
+            else:
+                logger.info("assemble: video noaudio %s size=%d", noaudio.name, noaudio.stat().st_size)
+                for chunk in chunks:
+                    chunk.unlink(missing_ok=True)
+                source.unlink(missing_ok=True)
             await _try_merge_av(directory, epoch, nametake)
             if epoch and nametake:
                 epoch_ms = _decode_epoch_ms(epoch)
@@ -434,7 +440,8 @@ async def assemble_track(
         if codec == "h264":
             cmd = [
                 "ffmpeg", "-y",
-                "-fflags", "+genpts",
+                "-fflags", "+genpts+discardcorrupt",
+                "-err_detect", "ignore_err",
                 "-i", str(source),
                 "-c:v", "copy",
                 "-an",
@@ -444,7 +451,8 @@ async def assemble_track(
         else:
             cmd = [
                 "ffmpeg", "-y",
-                "-fflags", "+genpts",
+                "-fflags", "+genpts+discardcorrupt",
+                "-err_detect", "ignore_err",
                 "-i", str(source),
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
@@ -485,6 +493,10 @@ async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
         if not audio.exists() or not video_noaudio.exists():
             logger.info("merge_av: skipping — audio=%s video_noaudio=%s",
                         audio.exists(), video_noaudio.exists())
+            return
+        if not await _probe_has_video(video_noaudio):
+            logger.error("merge_av: %s is not a readable video file (moov atom missing or corrupt) — skipping merge",
+                         video_noaudio.name)
             return
         if video_out.exists():
             return
@@ -560,6 +572,26 @@ async def recover_orphaned_chunks(session) -> int:
             queued += 1
 
     return queued
+
+
+async def _probe_has_video(path: Path) -> bool:
+    """Return True if ffprobe can open the file and finds at least one video stream."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return stdout.decode().strip() == "video"
+    except Exception:
+        return False
 
 
 async def _probe_video_codec(source: Path) -> str:

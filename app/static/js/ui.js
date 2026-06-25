@@ -1,3 +1,25 @@
+// ── Tile state ───────────────────────────────────────────────────────────────
+
+const hiddenVideoTiles = new Set(); // tile.id values whose video is hidden
+let _dragSrcTileId = null;
+
+function toggleVideoHide(fullTileId) {
+  if (hiddenVideoTiles.has(fullTileId)) {
+    hiddenVideoTiles.delete(fullTileId);
+  } else {
+    hiddenVideoTiles.add(fullTileId);
+  }
+  const tile = document.getElementById(fullTileId);
+  if (!tile) return;
+  const hidden = hiddenVideoTiles.has(fullTileId);
+  tile.classList.toggle('video-hidden', hidden);
+  const btn = tile.querySelector('.tile-hide-video');
+  if (btn) {
+    btn.classList.toggle('active', hidden);
+    btn.title = hidden ? 'Show video' : 'Hide video';
+  }
+}
+
 // ── Audio waveform state ─────────────────────────────────────────────────────
 // Architecture: fast polling captures speech peaks; slow slot commits drive the
 // display. Each display slot stores the PEAK of all fast polls within its window,
@@ -72,9 +94,15 @@ function waveTickSample() {
   }
   waveLastSlot = performance.now();
 }
-function waveDrawFrame() {
+const WAVE_MAX_FPS = 20;
+const WAVE_FRAME_MS = 1000 / WAVE_MAX_FPS;
+let _waveLastFrameTs = 0;
+
+function waveDrawFrame(ts) {
   if (!waveTimerId) return;
   waveRafId = requestAnimationFrame(waveDrawFrame);
+  if (ts - _waveLastFrameTs < WAVE_FRAME_MS) return;
+  _waveLastFrameTs = ts;
   if (!waveBuffers.size) return;
 
   // Fraction of current slot elapsed — drives the sub-pixel scroll offset
@@ -269,6 +297,35 @@ function createTile(tileId, isLocal, labelText) {
     startWaveAnimation();
   }
 
+  // Video cover — shown when video is hidden; stays invisible until toggled
+  if (!tileId.endsWith('-screen')) {
+    const cover = document.createElement('div');
+    cover.className = 'tile-video-cover';
+    const avatar = document.createElement('div');
+    avatar.className = 'tile-cover-avatar';
+    avatar.textContent = labelText.replace(/\s*\(you\)\s*$/, '').trim().charAt(0) || '?';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'tile-cover-name';
+    nameEl.textContent = labelText.replace(/\s*\(you\)\s*$/, '').trim();
+    cover.appendChild(avatar);
+    cover.appendChild(nameEl);
+    tile.appendChild(cover);
+
+    // Hide / show video button
+    const hideBtn = document.createElement('button');
+    hideBtn.className = 'tile-hide-video';
+    hideBtn.title = 'Hide video';
+    hideBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>`;
+    hideBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleVideoHide(tile.id);
+    });
+    tile.appendChild(hideBtn);
+  }
+
   // Pin / unpin this tile to the stage (per-user, local only)
   const pinBtn = document.createElement('button');
   pinBtn.className = 'tile-pin';
@@ -352,6 +409,46 @@ function createTile(tileId, isLocal, labelText) {
     tile.appendChild(modOverlay);
   }
 
+  // Drag to reorder (grid mode only; disabled on any interactive child)
+  tile.draggable = true;
+  tile.addEventListener('dragstart', e => {
+    if (e.target.closest('button, .mod-overlay')) { e.preventDefault(); return; }
+    _dragSrcTileId = tile.id;
+    tile.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tile.id);
+  });
+  tile.addEventListener('dragend', () => {
+    tile.classList.remove('dragging');
+    document.querySelectorAll('.participant-tile.drag-over')
+      .forEach(t => t.classList.remove('drag-over'));
+    _dragSrcTileId = null;
+  });
+  tile.addEventListener('dragover', e => {
+    if (!_dragSrcTileId || _dragSrcTileId === tile.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (!tile.classList.contains('drag-over')) {
+      document.querySelectorAll('.participant-tile.drag-over')
+        .forEach(t => t.classList.remove('drag-over'));
+      tile.classList.add('drag-over');
+    }
+  });
+  tile.addEventListener('dragleave', e => {
+    if (!tile.contains(e.relatedTarget)) tile.classList.remove('drag-over');
+  });
+  tile.addEventListener('drop', e => {
+    e.preventDefault();
+    tile.classList.remove('drag-over');
+    if (!_dragSrcTileId || _dragSrcTileId === tile.id) return;
+    const srcIdx = tileOrder.indexOf(_dragSrcTileId);
+    const dstIdx = tileOrder.indexOf(tile.id);
+    if (srcIdx < 0 || dstIdx < 0) return;
+    tileOrder.splice(srcIdx, 1);
+    tileOrder.splice(dstIdx, 0, _dragSrcTileId);
+    layoutTiles();
+  });
+
   tileOrder.push(tile.id);
   return tile;
 }
@@ -361,6 +458,7 @@ function removeTile(id) {
   waveHeads.delete(id);
   wavePeakAccum.delete(id);
   waveLiveLvl.delete(id);
+  hiddenVideoTiles.delete(id);
   if (waveBuffers.size === 0) stopWaveAnimation();
   document.getElementById(id)?.remove();
   const idx = tileOrder.indexOf(id);
