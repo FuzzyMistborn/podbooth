@@ -794,6 +794,21 @@ function setupControls() {
     }
   });
 
+  const btnWaitroom   = document.getElementById('btn-waitroom');
+  const waitroomPanel = document.getElementById('waitroom-panel');
+  btnWaitroom?.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = waitroomPanel?.style.display !== 'none';
+    closeAllPanels();
+    if (!open && waitroomPanel) waitroomPanel.style.display = 'flex';
+  });
+  waitroomPanel?.addEventListener('click', e => e.stopPropagation());
+  document.addEventListener('click', () => {
+    if (waitroomPanel && waitroomPanel.style.display !== 'none') {
+      waitroomPanel.style.display = 'none';
+    }
+  });
+
   recIndicator?.addEventListener('click', e => {
     e.stopPropagation();
     recIndicator.classList.toggle('popover-open');
@@ -999,6 +1014,8 @@ function closeAllPanels() {
   if (filesPanel && filesPanel.style.display !== 'none') {
     filesPanel.style.display = 'none';
   }
+  const wp = document.getElementById('waitroom-panel');
+  if (wp && wp.style.display !== 'none') wp.style.display = 'none';
 }
 
 // ── Alert ─────────────────────────────────────────────────────────────────────

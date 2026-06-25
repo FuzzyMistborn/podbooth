@@ -659,6 +659,103 @@ function onBeforeUnload(e) {
   }
 }
 
+// ── Waiting room (host only) ──────────────────────────────────────────────────
+
+let _waitroomTimer = null;
+let _waitroomKnown = new Set(); // identities we've already shown a toast for
+
+async function pollPendingGuests() {
+  if (!IS_HOST) return;
+  try {
+    const r = await fetch(`/api/session/${SESSION_ID}/pending-guests?host_token=${encodeURIComponent(HOST_TOKEN)}`);
+    if (!r.ok) return;
+    const { guests } = await r.json();
+    renderWaitroomPanel(guests);
+    // toast for newly-arrived guests
+    guests.forEach(g => {
+      if (!_waitroomKnown.has(g.identity)) {
+        _waitroomKnown.add(g.identity);
+        showToast(`${g.display_name} is waiting to join`, 5000);
+        const panel = document.getElementById('waitroom-panel');
+        const btn   = document.getElementById('btn-waitroom');
+        if (panel) panel.style.display = 'flex';
+        if (btn)   btn.style.display   = '';
+      }
+    });
+  } catch (e) {
+    // silent — network blips shouldn't spam console
+  }
+  _waitroomTimer = setTimeout(pollPendingGuests, 3000);
+}
+
+function renderWaitroomPanel(guests) {
+  const list  = document.getElementById('waitroom-list');
+  const badge = document.getElementById('waitroom-badge');
+  const btn   = document.getElementById('btn-waitroom');
+  if (!list) return;
+  list.innerHTML = '';
+  if (badge) badge.textContent = guests.length || '';
+  if (guests.length === 0) {
+    // auto-hide when queue drains
+    const panel = document.getElementById('waitroom-panel');
+    if (panel) panel.style.display = 'none';
+    if (btn)   btn.style.display   = 'none';
+    return;
+  }
+  if (btn) btn.style.display = '';
+  guests.forEach(g => {
+    const li = document.createElement('li');
+    li.className = 'waitroom-item';
+    const name = document.createElement('span');
+    name.textContent = g.display_name;
+    const admitBtn = document.createElement('button');
+    admitBtn.className = 'waitroom-admit';
+    admitBtn.textContent = 'Admit';
+    admitBtn.addEventListener('click', async () => {
+      admitBtn.disabled = true;
+      await fetch(`/api/session/${SESSION_ID}/admit/${encodeURIComponent(g.identity)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_token: HOST_TOKEN }),
+      });
+      li.remove();
+      const remaining = list.querySelectorAll('.waitroom-item').length;
+      if (badge) badge.textContent = remaining || '';
+      if (remaining === 0) {
+        const panel = document.getElementById('waitroom-panel');
+        if (panel) panel.style.display = 'none';
+        const btnW = document.getElementById('btn-waitroom');
+        if (btnW) btnW.style.display = 'none';
+      }
+    });
+    const denyBtn = document.createElement('button');
+    denyBtn.className = 'waitroom-deny';
+    denyBtn.textContent = 'Deny';
+    denyBtn.addEventListener('click', async () => {
+      denyBtn.disabled = true;
+      await fetch(`/api/session/${SESSION_ID}/deny/${encodeURIComponent(g.identity)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_token: HOST_TOKEN }),
+      });
+      li.remove();
+      const remaining = list.querySelectorAll('.waitroom-item').length;
+      if (badge) badge.textContent = remaining || '';
+      if (remaining === 0) {
+        const panel = document.getElementById('waitroom-panel');
+        if (panel) panel.style.display = 'none';
+        const btnW = document.getElementById('btn-waitroom');
+        if (btnW) btnW.style.display = 'none';
+      }
+    });
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:6px;flex-shrink:0';
+    actions.appendChild(admitBtn);
+    actions.appendChild(denyBtn);
+    li.appendChild(name);
+    li.appendChild(actions);
+    list.appendChild(li);
+  });
+}
+
 // ── Local upload (host + guest) ───────────────────────────────────────────────
 
 function showLocalUploadButton() {
