@@ -58,24 +58,11 @@ templates.env.globals["app_version"] = APP_VERSION
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 UPLOAD_TOKEN_TTL = timedelta(days=30)
 
-# Extension → allowed Content-Types (standard + common browser variants).
-# application/octet-stream is handled as a universal fallback below — browsers
-# frequently send it for MKV, WAV, and other binary formats they don't recognise.
-_ALLOWED: dict[str, frozenset[str]] = {
-    ".wav":  frozenset({"audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave", "audio/x-pn-wav"}),
-    ".mp3":  frozenset({"audio/mp3", "audio/mpeg", "audio/x-mpeg", "audio/x-mp3", "audio/mpeg3"}),
-    ".mp4":  frozenset({"video/mp4", "video/x-mp4", "application/mp4"}),
-    ".m4a":  frozenset({"audio/m4a", "audio/x-m4a", "audio/mp4"}),
-    ".mkv":  frozenset({"video/x-matroska", "video/matroska", "video/mkv", "video/x-mkv"}),
-    ".mov":  frozenset({"video/quicktime", "video/mov"}),
-    ".avi":  frozenset({"video/x-msvideo", "video/avi", "video/msvideo", "video/x-avi"}),
-    ".webm": frozenset({"video/webm", "audio/webm"}),
-    ".flac": frozenset({"audio/flac", "audio/x-flac"}),
-    ".ogg":  frozenset({"audio/ogg", "video/ogg", "application/ogg", "audio/vorbis"}),
-    ".aac":  frozenset({"audio/aac", "audio/x-aac", "audio/aacp"}),
-    ".opus": frozenset({"audio/opus", "audio/ogg"}),
-}
-_ALL_ALLOWED_TYPES: frozenset[str] = frozenset(t for s in _ALLOWED.values() for t in s)
+# Accepted extensions — the extension check is the primary file-type gate.
+_ALLOWED: frozenset[str] = frozenset({
+    ".wav", ".mp3", ".mp4", ".m4a", ".mkv", ".mov",
+    ".avi", ".webm", ".flac", ".ogg", ".aac", ".opus",
+})
 
 # Filename: starts with alphanumeric, then alphanumeric / space / - / _ / .
 # No more than 255 chars total.
@@ -128,32 +115,26 @@ def _validate_filename(raw: str) -> str:
 
 
 def _validate_content_type(content_type: str | None, filename: str) -> None:
-    """Raise 415 if the Content-Type is not on the allowlist for this extension."""
+    """Raise 415 if the Content-Type is not audio/*, video/*, or a known application/ variant."""
     if not content_type:
         raise HTTPException(status_code=415, detail="Content-Type header required")
 
-    # Strip parameters like "; charset=utf-8"
     mime = content_type.split(";")[0].strip().lower()
 
-    # Browsers often send application/octet-stream for binary formats they don't
-    # recognise (MKV, WAV, etc.). The extension check already validated the file
-    # type, so pass it through rather than rejecting legitimate uploads.
-    if mime == "application/octet-stream":
+    # Pass audio/* and video/* unconditionally.
+    if mime.startswith("audio/") or mime.startswith("video/"):
         return
 
-    if mime not in _ALL_ALLOWED_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Content-Type '{mime}' is not allowed. Accepted: {', '.join(sorted(_ALL_ALLOWED_TYPES))}",
-        )
+    # application/octet-stream: generic binary — browsers send this for many
+    # formats they don't recognise (MKV, WAV, etc.). Extension check gates type.
+    # application/mp4 / application/ogg: legitimate registered MIME types.
+    if mime in {"application/octet-stream", "application/mp4", "application/ogg"}:
+        return
 
-    # Cross-check: the MIME type must be valid for the file's extension.
-    ext = Path(filename).suffix.lower()
-    if mime not in _ALLOWED.get(ext, frozenset()):
-        raise HTTPException(
-            status_code=415,
-            detail=f"Content-Type '{mime}' does not match file extension '{ext}'",
-        )
+    raise HTTPException(
+        status_code=415,
+        detail=f"Content-Type '{mime}' is not allowed. File must be audio or video.",
+    )
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────

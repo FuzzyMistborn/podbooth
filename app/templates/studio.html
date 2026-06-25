@@ -12,8 +12,8 @@
   right: 0;
   width: 300px;
   max-height: 480px;
-  background: #0d1117;
-  border: 1px solid #1e293b;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 4px 24px rgba(0,0,0,0.5);
   display: none;
@@ -26,8 +26,8 @@
   padding: 0.65rem 0.9rem;
   font-size: 0.85rem;
   font-weight: 600;
-  color: #94a3b8;
-  border-bottom: 1px solid #1e293b;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -38,38 +38,38 @@
 .notes-panel-close {
   background: none;
   border: none;
-  color: #475569;
+  color: var(--text-3);
   font-size: 1rem;
   cursor: pointer;
   padding: 0 0.2rem;
   line-height: 1;
 }
-.notes-panel-close:hover { color: #94a3b8; }
+.notes-panel-close:hover { color: var(--text-2); }
 .notes-outline-row {
   display: flex;
   gap: 0.4rem;
   align-items: center;
   padding: 0.55rem 0.75rem;
-  border-bottom: 1px solid #1e293b;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .notes-outline-input {
   flex: 1;
-  background: #1e2533;
-  border: 1px solid #334155;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #e2e8f0;
+  color: var(--text);
   font-size: 0.78rem;
   padding: 0.3rem 0.5rem;
   min-width: 0;
 }
-.notes-outline-input::placeholder { color: #475569; }
+.notes-outline-input::placeholder { color: var(--text-3); }
 .notes-outline-input:disabled { opacity: 0.5; }
 .notes-outline-btn {
-  background: #1e293b;
-  border: 1px solid #334155;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #94a3b8;
+  color: var(--text-2);
   font-size: 0.78rem;
   padding: 0.3rem 0.55rem;
   cursor: pointer;
@@ -77,29 +77,29 @@
   flex-shrink: 0;
   transition: background 0.15s, color 0.15s;
 }
-.notes-outline-btn:hover:not(:disabled) { background: #273344; color: #e2e8f0; }
+.notes-outline-btn:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
 .notes-outline-btn:disabled { opacity: 0.5; cursor: default; }
 .notes-outline-status {
   padding: 0 0.75rem 0.4rem;
   font-size: 0.72rem;
-  color: #475569;
+  color: var(--text-3);
   min-height: 1.2em;
   flex-shrink: 0;
 }
-.notes-outline-status.ok  { color: #4ade80; }
-.notes-outline-status.err { color: #f87171; }
+.notes-outline-status.ok  { color: var(--green); }
+.notes-outline-status.err { color: var(--red); }
 .notes-body {
   flex: 1;
   overflow-y: auto;
   padding: 0.75rem;
   font-size: 0.82rem;
-  color: #94a3b8;
+  color: var(--text-2);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .notes-body-empty {
-  color: #334155;
+  color: var(--text-3);
   font-style: italic;
 }
 </style>
@@ -263,9 +263,6 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
       </button>
 
-      <button class="ctrl-btn" id="btn-wave" title="Toggle audio waveform">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2,12 5,6 8,18 11,4 14,20 17,8 20,14 22,12"/></svg>
-      </button>
 
 {% if is_host %}
       <div class="timer-btn-wrap">
@@ -372,7 +369,6 @@
       {% endif %}
       <div class="notes-btn-wrap">
         <button class="btn-share" id="btn-notes" style="display:none" onclick="toggleNotesPanel()">Notes</button>
-        {% if is_host %}
         <div class="notes-panel" id="notes-panel">
           <div class="notes-panel-header">
             <span class="notes-panel-title">Show Notes</span>
@@ -392,9 +388,8 @@
             <span class="notes-body-empty" id="notes-empty-msg">{% if session.notes %}{% else %}No notes yet.{% if outline_enabled %} Enter an Outline doc URL above and click Sync.{% endif %}{% endif %}</span>{{ session.notes | e }}
           </div>
         </div>
-        {% endif %}
       </div>
-            <button class="btn-danger" id="btn-end">End Session</button>
+      <button class="btn-danger" id="btn-end">End Session</button>
       {% else %}
       {% if cloud_upload_enabled %}
       <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">Upload Local Recording</button>

@@ -4,15 +4,15 @@
 <style>
 .s3-delivery-section {
   margin: 0.75rem 0;
-  border: 1px solid #1e293b;
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
 }
 .s3-toggle-btn {
   width: 100%;
   text-align: left;
-  background: #111827;
-  color: #94a3b8;
+  background: var(--bg-1);
+  color: var(--text-2);
   border: none;
   padding: 0.6rem 0.9rem;
   font-size: 0.85rem;
@@ -20,36 +20,36 @@
   cursor: pointer;
   transition: background 0.15s;
 }
-.s3-toggle-btn:hover { background: #1e293b; }
+.s3-toggle-btn:hover { background: var(--bg-3); }
 .s3-panel {
   padding: 0.75rem 0.9rem;
-  background: #0f1117;
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
 }
 .s3-subsection { display: flex; flex-direction: column; gap: 0.4rem; }
-.s3-subsection-title { font-size: 0.78rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.15rem; }
-.s3-danger .s3-subsection-title { color: #7f1d1d; }
+.s3-subsection-title { font-size: 0.78rem; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+.s3-danger .s3-subsection-title { color: rgba(239,68,68,0.65); }
 .s3-url-input {
   flex: 1;
-  background: #1e2533;
-  border: 1px solid #334155;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #e2e8f0;
+  color: var(--text);
   font-size: 0.8rem;
   padding: 0.35rem 0.6rem;
   min-width: 0;
 }
 .s3-participant-url, .s3-editor-result { display: flex; gap: 0.4rem; align-items: center; margin-top: 0.25rem; }
 .s3-editor-existing { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
-.s3-expiry-label { font-size: 0.8rem; color: #94a3b8; }
-.s3-no-portal { font-size: 0.78rem; color: #64748b; font-style: italic; }
+.s3-expiry-label { font-size: 0.8rem; color: var(--text-2); }
+.s3-no-portal { font-size: 0.78rem; color: var(--text-3); font-style: italic; }
 .btn-sm { font-size: 0.8rem; padding: 0.3rem 0.75rem; }
 .s3-file-list { margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.3rem; }
-.s3-file-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; padding: 0.3rem 0; border-bottom: 1px solid #1e293b; }
+.s3-file-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
 .s3-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.s3-file-meta { color: #64748b; white-space: nowrap; }
+.s3-file-meta { color: var(--text-3); white-space: nowrap; }
 </style>
 {% endblock %}
 {% block content %}
@@ -665,17 +665,23 @@ document.querySelectorAll('.btn-export-grid').forEach(btn => {
 
 let _pendingDelete = null;
 
+function _deleteModalEsc(e) {
+  if (e.key === 'Escape') cancelDelete();
+}
+
 function deleteSession(sessionId, hostToken, title) {
   _pendingDelete = { sessionId, hostToken };
   document.getElementById('delete-modal-name').textContent = title;
   const chk = document.getElementById('delete-cloud-chk');
   if (chk) chk.checked = false;
   document.getElementById('delete-modal').style.display = 'flex';
+  document.addEventListener('keydown', _deleteModalEsc);
 }
 
 function cancelDelete(e) {
   if (e && e.target !== document.getElementById('delete-modal')) return;
   document.getElementById('delete-modal').style.display = 'none';
+  document.removeEventListener('keydown', _deleteModalEsc);
   _pendingDelete = null;
 }
 
@@ -686,6 +692,7 @@ document.getElementById('delete-modal-confirm').addEventListener('click', async 
   const deleteCloud = chk ? chk.checked : false;
 
   document.getElementById('delete-modal').style.display = 'none';
+  document.removeEventListener('keydown', _deleteModalEsc);
   _pendingDelete = null;
 
   const r = await fetch(`/api/session/${sessionId}/delete`, {
@@ -914,15 +921,39 @@ async function loadS3Files(sessionId, btn) {
     const r = await fetch(`/api/session/${sessionId}/s3/files`, { credentials: 'include' });
     if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Error: ' + (d.detail || r.status)); btn.disabled = false; btn.textContent = 'Show uploaded files'; return; }
     const { files } = await r.json();
-    if (!files.length) { container.innerHTML = '<p style="color:#94a3b8;font-size:0.85rem">No files uploaded yet.</p>'; }
-    else {
-      container.innerHTML = files.map(f => `
-        <div class="s3-file-row">
-          <span class="s3-file-name">${f.filename}</span>
-          <span class="s3-file-meta">${(f.size_bytes / 1048576).toFixed(1)} MB${f.uploader ? ' · ' + f.uploader : ''}</span>
-          ${f.download_url ? `<a class="btn-download" href="${f.download_url}" target="_blank">Download</a>` : ''}
-        </div>
-      `).join('');
+    container.innerHTML = '';
+    if (!files.length) {
+      const p = document.createElement('p');
+      p.style.cssText = 'color:var(--text-2);font-size:0.85rem';
+      p.textContent = 'No files uploaded yet.';
+      container.appendChild(p);
+    } else {
+      files.forEach(f => {
+        const row = document.createElement('div');
+        row.className = 's3-file-row';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 's3-file-name';
+        nameSpan.textContent = f.filename;
+        row.appendChild(nameSpan);
+
+        const metaSpan = document.createElement('span');
+        metaSpan.className = 's3-file-meta';
+        metaSpan.textContent = `${(f.size_bytes / 1048576).toFixed(1)} MB${f.uploader ? ' · ' + f.uploader : ''}`;
+        row.appendChild(metaSpan);
+
+        if (f.download_url) {
+          const a = document.createElement('a');
+          a.className = 'btn-download';
+          a.href = f.download_url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = 'Download';
+          row.appendChild(a);
+        }
+
+        container.appendChild(row);
+      });
     }
     container.style.display = '';
     btn.disabled = false;
