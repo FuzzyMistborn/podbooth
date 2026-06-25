@@ -2,9 +2,14 @@
 Outline wiki integration.
 
 Pulls show notes from an Outline document into a session's notes field.
-Only the content between the '# Show Topics' heading and the end of the
-'## Closing/Reminders' section is imported — pre-show planning and
-post-production content are intentionally excluded.
+Only the content between the marker tags:
+
+    <!- podbooth-!>
+    ...
+    <!- /podbooth -!>
+
+is imported.  Anything outside those tags (pre-show planning, post-production
+notes, etc.) is intentionally excluded.
 
 Required env vars:
     OUTLINE_API_URL   - Base URL of your Outline instance, e.g. https://wiki.example.com
@@ -34,63 +39,35 @@ router = APIRouter()
 # Outline document content extraction
 # ---------------------------------------------------------------------------
 
-# Heading that marks the start of the content we want to import.
-# Tolerates an optional trailing colon (e.g. "# Show Topics:").
-_START_HEADING = re.compile(r"^#\s+Show Topics\s*:?\s*$", re.IGNORECASE)
-
-# Heading that marks the end of the content we want to import (inclusive).
-_END_HEADING = re.compile(r"^##\s+Closing/Reminders\s*:?\s*$", re.IGNORECASE)
-
-# Any heading (H1/H2) or horizontal rule signals we have passed the
-# Closing/Reminders section's content and should stop.
-_SECTION_END = re.compile(r"^#{1,2}\s|^---\s*$")
+_TAG_OPEN = "<!- podbooth-!>"
+_TAG_CLOSE = "<!- /podbooth -!>"
 
 
 def _extract_show_notes(text: str) -> str:
     """
-    Extract the content from '# Show Topics' through the end of the
-    '## Closing/Reminders' section (inclusive of that section's content).
+    Extract the content between ``<!- podbooth-!>`` and ``<!- /podbooth -!>``
+    tags (exclusive of the tag lines themselves).
 
-    Returns the extracted markdown, or raises ValueError if the expected
-    headings are not found.
+    Returns the extracted markdown, or raises ValueError if the tags are not
+    found or the enclosed content is empty.
     """
-    lines = text.splitlines()
+    start = text.find(_TAG_OPEN)
+    if start == -1:
+        raise ValueError(
+            f"Could not find opening tag '{_TAG_OPEN}' in document."
+        )
 
-    start_idx: int | None = None
-    end_idx: int | None = None
-    in_closing = False
+    content_start = start + len(_TAG_OPEN)
+    end = text.find(_TAG_CLOSE, content_start)
+    if end == -1:
+        raise ValueError(
+            f"Could not find closing tag '{_TAG_CLOSE}' in document."
+        )
 
-    for i, line in enumerate(lines):
-        stripped = line.rstrip()
-
-        if start_idx is None:
-            if _START_HEADING.match(stripped):
-                start_idx = i
-            continue
-
-        # We're past the start — look for Closing/Reminders
-        if not in_closing:
-            if _END_HEADING.match(stripped):
-                in_closing = True
-            continue
-
-        # We're inside Closing/Reminders — stop at the next H1/H2 or '---'
-        if _SECTION_END.match(stripped):
-            end_idx = i  # exclusive
-            break
-
-    if start_idx is None:
-        raise ValueError("Could not find '# Show Topics' heading in document.")
-
-    if end_idx is None:
-        # Closing/Reminders runs to end of file, or the heading wasn't present
-        # but we still captured everything from Show Topics onward.
-        end_idx = len(lines)
-
-    extracted = "\n".join(lines[start_idx:end_idx]).strip()
+    extracted = text[content_start:end].strip()
 
     if not extracted:
-        raise ValueError("Extracted content is empty.")
+        raise ValueError("Extracted content between podbooth tags is empty.")
 
     return extracted
 
@@ -116,9 +93,6 @@ _LINKS_H3_RE = re.compile(r"^###\s+Links\s*:?\s*$", re.IGNORECASE)
 
 # A line that is a bare URL or a bullet containing only a URL
 _URL_LINE_RE = re.compile(r"^\s*[*\-]?\s*<?https?://\S+>?\s*$")
-
-# Closing/Reminders H2 (stop processing topics at this point)
-_CLOSING_H2_RE = re.compile(r"^##\s+Closing/Reminders\s*:?", re.IGNORECASE)
 
 
 def _parse_timer_topics(notes_text: str) -> list[dict]:
@@ -149,9 +123,6 @@ def _parse_timer_topics(notes_text: str) -> list[dict]:
 
     for line in lines:
         s = line.rstrip()
-
-        if _CLOSING_H2_RE.match(s):
-            break
 
         m2 = _H2_RE.match(s)
         if m2:

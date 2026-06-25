@@ -171,6 +171,31 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `WHISPERX_MODEL` | No | Faster-Whisper model to use. Default: `large-v3-turbo` |
 | `WHISPERX_LANGUAGE` | No | Force a language code (e.g. `en`, `fr`). Leave unset for automatic detection |
 
+### Outline Wiki Integration
+
+Set both variables to enable pulling show notes from an [Outline](https://www.getoutline.com) document into a session before recording.
+
+| Variable | Required | Description |
+|---|---|---|
+| `OUTLINE_API_URL` | Yes (to enable) | Base URL of your Outline instance, e.g. `https://wiki.example.com` |
+| `OUTLINE_API_KEY` | Yes (to enable) | Outline API token (read-only scope is sufficient) |
+
+Once configured, the host can click **Sync Outline** in the studio, paste an Outline document ID or full document URL, and import the show notes in one click. A **Refresh** button re-pulls from the same document without re-entering the ID.
+
+**Document tagging** — only the content between the following marker tags is imported; everything else in the document (pre-show planning, post-production notes, etc.) is ignored:
+
+```
+<!- podbooth-!>
+## Topic One (10 min)
+Notes for topic one.
+
+## Topic Two (5 min)
+Notes for topic two.
+<!- /podbooth -!>
+```
+
+H2 headings inside the tagged region are parsed as **timer topics**. A duration in parentheses (e.g. `(10 min)`) is extracted as the topic's countdown time and stripped from the display name. `### Links` sub-sections and bare URLs are excluded from the imported notes body.
+
 ### Cloud Upload — Nextcloud
 
 Set all three required variables to enable uploading recordings to a Nextcloud instance via WebDAV.
@@ -285,7 +310,8 @@ Files are organized under the configured upload path as:
 11. Files are assembled server-side and downloadable from `/dashboard`
 12. If transcription is configured, a single `transcript.txt` is generated automatically once the session ends — combining all participants' audio into one file and sending it to WhisperX. A "Transcribing…" indicator appears on the dashboard card while it runs; the transcript can be viewed inline or downloaded when complete
 13. If cloud upload is configured, an **Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **Upload Local Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
-14. If R2 is configured and files have been uploaded, the host can click **Generate Editor Link** on the session card to produce a time-limited link for a remote editor. The link gives the editor direct download access to all R2 files without needing a PodBooth account. Generating a new link immediately invalidates the previous one
+14. If Outline is configured, the host can click **Sync Outline** before recording to import show notes from a linked document. Only content between the `<!- podbooth-!>` / `<!- /podbooth -!>` tags is pulled in; H2 headings become timer topics
+15. If R2 is configured and files have been uploaded, the host can click **Generate Editor Link** on the session card to produce a time-limited link for a remote editor. The link gives the editor direct download access to all R2 files without needing a PodBooth account. Generating a new link immediately invalidates the previous one
 
 ---
 
