@@ -1637,7 +1637,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   left: 50%;
   transform: translateX(-50%);
   width: 288px;
-  max-height: calc(100vh - 200px);
+  max-height: min(520px, calc(100vh - 120px));
   overflow-y: auto;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -1694,6 +1694,8 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   flex-direction: column;
   gap: 3px;
   min-height: 36px;
+  max-height: 180px;
+  overflow-y: auto;
 }
 .timer-queue-empty {
   font-size: 13px;

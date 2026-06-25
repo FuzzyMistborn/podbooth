@@ -29,7 +29,16 @@ function appendChatMessage(senderIdentity, senderName, text, own) {
 
 // ── Raise hand ───────────────────────────────────────────────────────────────
 
+const HAND_COOLDOWN_MS = 5000;
+let _handCooldownUntil = 0;
+
 async function toggleHand() {
+  const now = Date.now();
+  if (!handRaised && now < _handCooldownUntil) {
+    const remaining = Math.ceil((_handCooldownUntil - now) / 1000);
+    showToast(`Wait ${remaining}s before raising your hand again`);
+    return;
+  }
   if (handRaised) {
     handRaised = false;
     btnRaiseHand?.classList.remove('active');
@@ -40,6 +49,7 @@ async function toggleHand() {
     await broadcastData({ type: 'hand_lowered', identity });
   } else {
     handRaised = true;
+    _handCooldownUntil = Date.now() + HAND_COOLDOWN_MS;
     btnRaiseHand?.classList.add('active');
     if (!raisedHands.has(identity)) {
       handQueue.push({ identity, displayName });
