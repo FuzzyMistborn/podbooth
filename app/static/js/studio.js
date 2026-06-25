@@ -240,6 +240,7 @@ async function init() {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
+      channelCount: 2,
     },
   });
 
@@ -335,8 +336,8 @@ function attachRoomEvents() {
       showToast('Host disconnected — recording stopped');
       await stopLocalRecording();
       setRecordingUI(false);
-      await waitForUploads();
       showLocalUploadButton();
+      await waitForUploads();
     }
   });
 
@@ -447,8 +448,8 @@ function attachRoomEvents() {
     if (msg.type === 'recording_stopped' && !IS_HOST) {
       await stopLocalRecording();
       setRecordingUI(false);
-      await waitForUploads();
       showLocalUploadButton();
+      await waitForUploads();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
       handleSessionEnded();
@@ -561,8 +562,8 @@ function pollSessionStatus() {
         } else if (isRecording) {
           await stopLocalRecording();
           setRecordingUI(false);
-          await waitForUploads();
           showLocalUploadButton();
+          await waitForUploads();
         }
       }
     } catch (e) {}

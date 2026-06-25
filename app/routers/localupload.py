@@ -56,7 +56,7 @@ templates.env.globals["app_version"] = APP_VERSION
 # ── Security constants ─────────────────────────────────────────────────────────
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
-UPLOAD_TOKEN_TTL = timedelta(hours=48)
+UPLOAD_TOKEN_TTL = timedelta(days=30)
 
 # Extension → allowed Content-Types (standard + common browser variants).
 # application/octet-stream is handled as a universal fallback below — browsers
@@ -66,7 +66,7 @@ _ALLOWED: dict[str, frozenset[str]] = {
     ".mp3":  frozenset({"audio/mp3", "audio/mpeg", "audio/x-mpeg", "audio/x-mp3", "audio/mpeg3"}),
     ".mp4":  frozenset({"video/mp4", "video/x-mp4", "application/mp4"}),
     ".m4a":  frozenset({"audio/m4a", "audio/x-m4a", "audio/mp4"}),
-    ".mkv":  frozenset({"video/x-matroska", "video/mkv", "video/x-mkv"}),
+    ".mkv":  frozenset({"video/x-matroska", "video/matroska", "video/mkv", "video/x-mkv"}),
     ".mov":  frozenset({"video/quicktime", "video/mov"}),
     ".avi":  frozenset({"video/x-msvideo", "video/avi", "video/msvideo", "video/x-avi"}),
     ".webm": frozenset({"video/webm", "audio/webm"}),

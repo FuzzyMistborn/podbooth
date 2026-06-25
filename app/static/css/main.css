@@ -553,7 +553,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 
 .tile-label {
   position: absolute;
-  bottom: 48px;
+  top: 10px;
   left: 12px;
   font-size: 12px;
   font-family: var(--font-mono);
