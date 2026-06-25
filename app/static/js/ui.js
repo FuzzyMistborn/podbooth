@@ -12,12 +12,29 @@ function toggleVideoHide(fullTileId) {
   const tile = document.getElementById(fullTileId);
   if (!tile) return;
   const hidden = hiddenVideoTiles.has(fullTileId);
-  tile.classList.toggle('video-hidden', hidden);
-  const btn = tile.querySelector('.tile-hide-video');
-  if (btn) {
-    btn.classList.toggle('active', hidden);
-    btn.title = hidden ? 'Show video' : 'Hide video';
+  tile.style.display = hidden ? 'none' : '';
+  layoutTiles();
+  updateHiddenChip();
+}
+
+function updateHiddenChip() {
+  let chip = document.getElementById('hidden-tiles-chip');
+  const count = hiddenVideoTiles.size;
+  if (count === 0) {
+    if (chip) chip.remove();
+    return;
   }
+  if (!chip) {
+    chip = document.createElement('button');
+    chip.id = 'hidden-tiles-chip';
+    chip.className = 'hidden-tiles-chip';
+    chip.addEventListener('click', () => {
+      for (const id of [...hiddenVideoTiles]) toggleVideoHide(id);
+    });
+    const stageEl = document.getElementById('stage');
+    if (stageEl) stageEl.appendChild(chip);
+  }
+  chip.textContent = count === 1 ? '1 hidden — Show' : `${count} hidden — Show all`;
 }
 
 // ── Audio waveform state ─────────────────────────────────────────────────────
@@ -459,6 +476,7 @@ function removeTile(id) {
   wavePeakAccum.delete(id);
   waveLiveLvl.delete(id);
   hiddenVideoTiles.delete(id);
+  updateHiddenChip();
   if (waveBuffers.size === 0) stopWaveAnimation();
   document.getElementById(id)?.remove();
   const idx = tileOrder.indexOf(id);
@@ -510,7 +528,7 @@ function updateQualityIndicator(tile, quality) {
 // tile element keeps its attached <video> stream playing — no re-subscribe.
 
 function focusTileIds() {
-  const ids = tileOrder.filter(id => document.getElementById(id));
+  const ids = tileOrder.filter(id => document.getElementById(id) && !hiddenVideoTiles.has(id));
 
   // Grid mode with nothing pinned: every tile is equal — all on the stage.
   if (viewMode === 'grid' && pinnedIds.size === 0) {
@@ -551,7 +569,7 @@ function applyRegion(container, desiredIds) {
 
 function layoutTiles() {
   if (!stage || !filmstrip) return;
-  const ids = tileOrder.filter(id => document.getElementById(id));
+  const ids = tileOrder.filter(id => document.getElementById(id) && !hiddenVideoTiles.has(id));
   const focus = focusTileIds();
   const onStage = ids.filter(id => focus.has(id));
   const thumbs  = ids.filter(id => !focus.has(id));
