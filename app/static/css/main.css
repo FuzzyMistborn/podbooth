@@ -171,6 +171,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   padding: 9px 18px;
   font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
   transition: border-color 0.15s, color 0.15s;
 }
 .btn-secondary:hover,
@@ -185,6 +186,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   padding: 8px 16px;
   font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.15s, color 0.15s;
 }
 .btn-danger:hover { background: var(--red); color: #fff; }
@@ -1181,8 +1183,14 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   padding-top: 16px;
   border-top: 1px solid var(--border);
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
+}
+.session-card-actions .btn-secondary,
+.session-card-actions .btn-danger {
+  padding: 7px 13px;
+  font-size: 12px;
 }
 
 /* ── Toast ───────────────────────────────────────────────────── */
@@ -2738,7 +2746,7 @@ body.is-fullscreen.controls-peek .controls-bar {
   .dashboard-layout { padding: 24px 16px; }
   .dash-header { flex-direction: column; align-items: flex-start; gap: 12px; }
   .session-card { padding: 18px; }
-  .session-card-actions { flex-wrap: wrap; }
+  .session-card-actions { gap: 6px; }
 }
 
 /* ── Keyboard shortcuts hover trigger ───────────────────────── */

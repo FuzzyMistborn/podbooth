@@ -258,7 +258,7 @@ async function fetchFiles() {
           const s = document.createElement('span'); s.className = 'files-size'; s.textContent = `${f.size_mb} MB`;
           children.push(s);
         }
-        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = '↓';
+        const a = document.createElement('a'); a.href = `/download/${f.path}`; a.download = ''; a.textContent = 'Download';
         children.push(a);
         row.append(...children);
         filesList.appendChild(row);

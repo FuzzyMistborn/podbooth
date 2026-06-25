@@ -129,7 +129,7 @@
 
       {% if session.description or session.notes %}
       <div class="session-notes-wrap">
-        <button class="session-notes-toggle" onclick="this.parentElement.classList.toggle('open')">Notes ▾</button>
+        <button class="session-notes-toggle" onclick="this.parentElement.classList.toggle('open')">Notes</button>
         <div class="session-notes-body">
           {% if session.description %}<p class="session-desc">{{ session.description }}</p>{% endif %}
           {% if session.notes %}<pre class="session-note-text">{{ session.notes }}</pre>{% endif %}
@@ -176,7 +176,7 @@
           <button class="btn-play" onclick="openPreview('/download/{{ f.path }}', '{{ f.type }}', '{{ f.participant }}', '{{ f.filename }}')">▶ Play</button>
           {% endif %}
           {% if f.type != 'marker' %}
-          <a class="btn-download" href="/download/{{ f.path }}">↓ Download</a>
+          <a class="btn-download" href="/download/{{ f.path }}">Download</a>
           {% endif %}
         </div>
         {% endfor %}
@@ -198,7 +198,7 @@
 
       {% if s3_enabled %}
       <div class="s3-delivery-section">
-        <button class="s3-toggle-btn" onclick="toggleS3Panel('{{ session.id }}', this)">☁ File Delivery ▾</button>
+        <button class="s3-toggle-btn" onclick="toggleS3Panel('{{ session.id }}', this)">☁ File Delivery</button>
         <div class="s3-panel" id="s3-panel-{{ session.id }}" style="display:none">
 
           <!-- Editor link subsection -->
@@ -263,7 +263,7 @@
         </div>
         {% endif %}
         {% if not session.ended %}
-        <a href="/join/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Join as Host →</a>
+        <a href="/join/{{ session.id }}?host_token={{ session.host_token }}" class="btn-secondary">Join as Host</a>
         <button class="btn-secondary" onclick="copyJoinLink('{{ session.id }}', this)">Copy Guest Link</button>
         {% endif %}
 
@@ -425,7 +425,7 @@ async function saveMetadata(sessionId) {
       if (!notesWrap) {
         notesWrap = document.createElement('div');
         notesWrap.className = 'session-notes-wrap';
-        notesWrap.innerHTML = `<button class="session-notes-toggle" onclick="this.parentElement.classList.toggle('open')">Notes ▾</button><div class="session-notes-body"></div>`;
+        notesWrap.innerHTML = `<button class="session-notes-toggle" onclick="this.parentElement.classList.toggle('open')">Notes</button><div class="session-notes-body"></div>`;
         card.querySelector('.meta-edit-form').insertAdjacentElement('afterend', notesWrap);
       }
       const body = notesWrap.querySelector('.session-notes-body');
@@ -571,7 +571,7 @@ function _setExportState(sessionId, status, path, size_mb) {
     if (dropdown) dropdown.style.display = 'none';
     setTimeout(() => _pollExportProgress(sessionId), 2000);
   } else if (status === 'ready') {
-    btn.textContent = `↓ Grid (${size_mb} MB)`;
+    btn.textContent = `Grid (${size_mb} MB)`;
     btn.disabled = false;
     btn.onclick = () => { window.location.href = '/download/' + path; };
     if (caret) caret.style.display = 'flex';
@@ -790,13 +790,13 @@ async function startCloudUpload(sessionId, btn) {
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       btn.disabled = false;
-      btn.textContent = '↑ Upload to Cloud';
+      btn.textContent = 'Upload to Cloud';
       alert('Upload failed: ' + (d.detail || r.status));
       return;
     }
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '↑ Upload to Cloud';
+    btn.textContent = 'Upload to Cloud';
     return;
   }
   _pollCloudUpload(sessionId, btn);
@@ -817,7 +817,7 @@ async function _pollCloudUpload(sessionId, btn) {
       btn.textContent = '✓ Uploaded';
     } else if (status === 'error') {
       btn.disabled = false;
-      btn.textContent = '↑ Upload to Cloud';
+      btn.textContent = 'Upload to Cloud';
       alert('Upload error: ' + (message || 'unknown error'));
     }
   } catch (e) {}
@@ -847,7 +847,7 @@ function toggleS3Panel(sessionId, btn) {
   if (!panel) return;
   const open = panel.style.display !== 'none';
   panel.style.display = open ? 'none' : '';
-  btn.textContent = open ? '☁ File Delivery ▾' : '☁ File Delivery ▴';
+  btn.textContent = '☁ File Delivery';
 }
 
 function copyS3Url(inputId, btn) {
@@ -920,7 +920,7 @@ async function loadS3Files(sessionId, btn) {
         <div class="s3-file-row">
           <span class="s3-file-name">${f.filename}</span>
           <span class="s3-file-meta">${(f.size_bytes / 1048576).toFixed(1)} MB${f.uploader ? ' · ' + f.uploader : ''}</span>
-          ${f.download_url ? `<a class="btn-download" href="${f.download_url}" target="_blank">↓</a>` : ''}
+          ${f.download_url ? `<a class="btn-download" href="${f.download_url}" target="_blank">Download</a>` : ''}
         </div>
       `).join('');
     }
