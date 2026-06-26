@@ -237,9 +237,9 @@ async function init() {
     },
     audioCaptureDefaults: {
       deviceId: micDeviceId || undefined,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
       channelCount: 2,
     },
     audioPublishDefaults: {

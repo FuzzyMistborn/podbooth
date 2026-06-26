@@ -298,7 +298,17 @@ async def finalize_track(request: Request):
 
     directory = participant_dir(session, participant, identity)
 
-    logger.info("finalize: %s/%s epoch=%r fmt=%s", track_type, participant, epoch, fmt)
+    # Persist start_time_ms so _try_merge_av can align audio to video.
+    start_time_ms = data.get("start_time_ms")
+    if start_time_ms is not None and epoch:
+        try:
+            start_time_ms = float(start_time_ms)
+            sidecar = directory / f"{track_type}_{epoch}_start.json"
+            sidecar.write_text(json.dumps({"start_time_ms": start_time_ms}))
+        except (TypeError, ValueError, OSError):
+            start_time_ms = None
+
+    logger.info("finalize: %s/%s epoch=%r fmt=%s start_time_ms=%s", track_type, participant, epoch, fmt, start_time_ms)
     in_progress_key = (str(directory), track_type, epoch)
     if in_progress_key not in _assembly_in_progress:
         _assembly_in_progress.add(in_progress_key)
@@ -500,21 +510,62 @@ async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
             return
         if video_out.exists():
             return
-        logger.info("merge_av: merging %s + %s → %s", audio.name, video_noaudio.name, video_out.name)
+        # Compute A/V start-time offset so the merge is temporally aligned.
+        # Both timestamps come from performance.now() on the same client machine,
+        # so their difference is the real delay between when video and audio
+        # capture began. A positive offset means audio started later than video.
+        audio_offset_ms = 0.0
+        if epoch:
+            try:
+                v_meta = json.loads((directory / f"video_{epoch}_start.json").read_text())
+                a_meta = json.loads((directory / f"audio_{epoch}_start.json").read_text())
+                audio_offset_ms = a_meta["start_time_ms"] - v_meta["start_time_ms"]
+            except (FileNotFoundError, KeyError, ValueError, OSError):
+                audio_offset_ms = 0.0
+        logger.info("merge_av: merging %s + %s → %s (audio_offset_ms=%.1f)",
+                    audio.name, video_noaudio.name, video_out.name, audio_offset_ms)
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_noaudio),
-            "-i", str(audio),
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "320k",
-            "-movflags", "+faststart",
-            str(video_out),
-        ]
+        if audio_offset_ms > 0:
+            # Audio started later: pad the front of the audio stream.
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_noaudio),
+                "-i", str(audio),
+                "-c:v", "copy",
+                "-filter:a", f"adelay={audio_offset_ms:.0f}:all=1",
+                "-c:a", "aac", "-b:a", "320k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ]
+        elif audio_offset_ms < 0:
+            # Audio started earlier: trim the head of the audio stream.
+            trim_s = -audio_offset_ms / 1000.0
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_noaudio),
+                "-ss", f"{trim_s:.6f}",
+                "-i", str(audio),
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "320k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_noaudio),
+                "-i", str(audio),
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "320k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ]
         ok = await _run_ffmpeg(cmd, directory, "merge")
         if ok:
             logger.info("merge_av: done %s size=%d", video_out.name, video_out.stat().st_size)
             video_noaudio.unlink(missing_ok=True)
+            for track in ("audio", "video"):
+                (directory / f"{track}_{epoch}_start.json").unlink(missing_ok=True)
             _merge_locks.pop(key, None)
         else:
             logger.error("merge_av: ffmpeg failed for %s", video_out.name)
