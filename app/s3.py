@@ -119,9 +119,15 @@ def generate_download_url(key: str, expires_in: int = 604800) -> str:
     """Presigned GET URL."""
     _validate_key(key)
     s3 = get_client()
+    filename = key.rsplit("/", 1)[-1]
     url = s3.generate_presigned_url(
         "get_object",
-        Params={"Bucket": _bucket(), "Key": key},
+        Params={
+            "Bucket": _bucket(),
+            "Key": key,
+            "ResponseContentDisposition": f'attachment; filename="{filename}"',
+            "ResponseContentType": "application/octet-stream",
+        },
         ExpiresIn=expires_in,
     )
     return url

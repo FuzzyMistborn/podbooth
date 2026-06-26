@@ -617,6 +617,8 @@
       link.className = "btn-download";
       link.href = file.download_url;
       link.setAttribute("download", file.filename || "");
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
       link.setAttribute("aria-label", "Download " + (file.filename || "file"));
       link.innerHTML =
         '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
@@ -643,12 +645,7 @@
     btn.disabled = true;
     downloadable.forEach(function (f, i) {
       setTimeout(function () {
-        var a = document.createElement("a");
-        a.href = f.download_url;
-        a.download = f.filename || "";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        window.open(f.download_url, "_blank", "noopener,noreferrer");
         if (i === downloadable.length - 1) {
           setTimeout(function () { btn.disabled = false; }, 500);
         }
