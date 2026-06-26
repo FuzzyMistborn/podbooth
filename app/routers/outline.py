@@ -4,7 +4,7 @@ Outline wiki integration.
 Pulls show notes from an Outline document into a session's notes field.
 Only the content between the marker tags:
 
-    <!- podbooth-!>
+    <!- podbooth -!>
     ...
     <!- /podbooth -!>
 
@@ -39,13 +39,13 @@ router = APIRouter()
 # Outline document content extraction
 # ---------------------------------------------------------------------------
 
-_TAG_OPEN = "<!- podbooth-!>"
+_TAG_OPEN = "<!- podbooth -!>"
 _TAG_CLOSE = "<!- /podbooth -!>"
 
 
 def _extract_show_notes(text: str) -> str:
     """
-    Extract the content between ``<!- podbooth-!>`` and ``<!- /podbooth -!>``
+    Extract the content between ``<!- podbooth -!>`` and ``<!- /podbooth -!>``
     tags (exclusive of the tag lines themselves).
 
     Returns the extracted markdown, or raises ValueError if the tags are not

@@ -185,7 +185,7 @@ Once configured, the host can click **Sync Outline** in the studio, paste an Out
 **Document tagging** — only the content between the following marker tags is imported; everything else in the document (pre-show planning, post-production notes, etc.) is ignored:
 
 ```
-<!- podbooth-!>
+<!- podbooth -!>
 ## Topic One (10 min)
 Notes for topic one.
 
@@ -310,7 +310,7 @@ Files are organized under the configured upload path as:
 11. Files are assembled server-side and downloadable from `/dashboard`
 12. If transcription is configured, a single `transcript.txt` is generated automatically once the session ends — combining all participants' audio into one file and sending it to WhisperX. A "Transcribing…" indicator appears on the dashboard card while it runs; the transcript can be viewed inline or downloaded when complete
 13. If cloud upload is configured, an **Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **Upload Local Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
-14. If Outline is configured, the host can click **Sync Outline** before recording to import show notes from a linked document. Only content between the `<!- podbooth-!>` / `<!- /podbooth -!>` tags is pulled in; H2 headings become timer topics
+14. If Outline is configured, the host can click **Sync Outline** before recording to import show notes from a linked document. Only content between the `<!- podbooth -!>` / `<!- /podbooth -!>` tags is pulled in; H2 headings become timer topics
 15. If R2 is configured and files have been uploaded, the host can click **Generate Editor Link** on the session card to produce a time-limited link for a remote editor. The link gives the editor direct download access to all R2 files without needing a PodBooth account. Generating a new link immediately invalidates the previous one
 
 ---
