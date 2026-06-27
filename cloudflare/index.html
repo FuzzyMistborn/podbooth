@@ -146,6 +146,11 @@
       justify-content: space-between;
       margin-bottom: 12px;
     }
+    .files-header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
     .files-count {
       font-size: 12px;
       color: var(--muted);
@@ -424,8 +429,16 @@
     </div>
 
     <div class="files-header">
-      <span class="files-label">Files</span>
-      <span class="files-count" id="files-count"></span>
+      <div class="files-header-left">
+        <span class="files-label">Files</span>
+        <span class="files-count" id="files-count"></span>
+      </div>
+      <a id="btn-zip-all" class="btn-download" style="display:none;" aria-label="Download all files as ZIP">
+        <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M8 1v8.293l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7.5 9.293V1H8zM2 13h12v1H2v-1z"/>
+        </svg>
+        Download ZIP
+      </a>
     </div>
 
     <div class="file-list" id="file-list" role="list"></div>
@@ -450,6 +463,16 @@
 <script>
 (function () {
   "use strict";
+
+  // Session context set once the URL is parsed; used by render helpers.
+  var _sessionId = "";
+  var _token     = "";
+
+  function zipUrl(source) {
+    var u = "/api/zip/" + encodeURIComponent(_sessionId) + "?token=" + encodeURIComponent(_token);
+    if (source) u += "&source=" + encodeURIComponent(source);
+    return u;
+  }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -639,21 +662,8 @@
     return row;
   }
 
-  function downloadGroup(files, btn) {
-    var downloadable = files.filter(function (f) { return f.download_url; });
-    if (downloadable.length === 0) return;
-    btn.disabled = true;
-    downloadable.forEach(function (f, i) {
-      setTimeout(function () {
-        window.open(f.download_url, "_blank", "noopener,noreferrer");
-        if (i === downloadable.length - 1) {
-          setTimeout(function () { btn.disabled = false; }, 500);
-        }
-      }, i * 400);
-    });
-  }
-
-  function makeGroupHeader(label, files) {
+  // source: R2 source label used to filter the ZIP endpoint (null = no button)
+  function makeGroupHeader(label, files, source) {
     var h = document.createElement("div");
     h.className = "file-group-header";
 
@@ -662,17 +672,17 @@
     h.appendChild(labelEl);
 
     var downloadable = (files || []).filter(function (f) { return f.download_url; });
-    if (downloadable.length > 1) {
-      var btn = document.createElement("button");
-      btn.className = "btn-download-all";
-      btn.setAttribute("aria-label", "Download all " + label + " files");
-      btn.innerHTML =
+    if (source && downloadable.length > 1) {
+      var link = document.createElement("a");
+      link.className = "btn-download-all";
+      link.href = zipUrl(source);
+      link.setAttribute("aria-label", "Download all " + label + " files as ZIP");
+      link.innerHTML =
         '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
           '<path d="M8 1v8.293l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7.5 9.293V1H8zM2 13h12v1H2v-1z"/>' +
         '</svg>' +
-        'Download all';
-      btn.addEventListener("click", function () { downloadGroup(downloadable, btn); });
-      h.appendChild(btn);
+        'Download ZIP';
+      h.appendChild(link);
     }
 
     return h;
@@ -693,19 +703,19 @@
     var other    = files.filter(function (f) { return f.source !== "podbooth" && f.source !== "local" && f.source !== "exports"; });
 
     if (podbooth.length > 0) {
-      list.appendChild(makeGroupHeader("PodBooth Recordings", podbooth));
+      list.appendChild(makeGroupHeader("PodBooth Recordings", podbooth, "podbooth"));
       podbooth.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (local.length > 0) {
-      list.appendChild(makeGroupHeader("Local Uploads", local));
+      list.appendChild(makeGroupHeader("Local Uploads", local, "local"));
       local.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (exports.length > 0) {
-      list.appendChild(makeGroupHeader("Editor Project Files", exports));
+      list.appendChild(makeGroupHeader("Editor Project Files", exports, "exports"));
       exports.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (other.length > 0) {
-      list.appendChild(makeGroupHeader("Other", other));
+      list.appendChild(makeGroupHeader("Other", other, null));
       other.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
   }
@@ -748,6 +758,13 @@
     // Footer session ID
     document.getElementById("footer-session-id").textContent = "Session " + manifest.session_id;
 
+    // Global ZIP button (all files, no source filter)
+    var zipAll = document.getElementById("btn-zip-all");
+    if (zipAll) {
+      zipAll.href = zipUrl(null);
+      zipAll.style.display = "";
+    }
+
     // Files
     renderFileList(manifest.files);
 
@@ -760,6 +777,8 @@
     showState("loading");
 
     var parsed = parseUrl();
+    _sessionId = parsed.sessionId;
+    _token     = parsed.token;
 
     if (!parsed.sessionId || !parsed.token) {
       showError(

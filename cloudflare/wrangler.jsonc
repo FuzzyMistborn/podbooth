@@ -2,8 +2,16 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "editor-portal",
   "compatibility_date": "2026-06-23",
+  "main": "worker.js",
   "assets": {
     "directory": ".",
     "not_found_handling": "single-page-application"
-  }
+  },
+  "r2_buckets": [
+    {
+      "binding": "R2_BUCKET",
+      // Must match R2_BUCKET in your .env (the bucket that holds session files)
+      "bucket_name": "YOUR_R2_BUCKET_NAME"
+    }
+  ]
 }

@@ -259,6 +259,17 @@ async def create_editor_link(session_id: str, _: None = Depends(require_host)):
     expiry_secs = _expiry_secs()
     expires_at = (datetime.now(tz=timezone.utc) + timedelta(seconds=expiry_secs)).isoformat()
 
+    # Generate and upload NLE/DAW export files before building the manifest
+    # so they get presigned download URLs included in it
+    await _upload_export_files(session_id, session)
+
+    # Re-list after export upload so export keys are included
+    try:
+        extra2 = [f["key"] for f in session.r2_files]
+        objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra2, extra_pfx))
+    except RuntimeError:
+        pass  # fall through with original objs list
+
     r2_meta = {f["key"]: f for f in session.r2_files}
     manifest_files = await _build_manifest_files(loop, objs, r2_meta, expiry_secs)
 
@@ -276,9 +287,6 @@ async def create_editor_link(session_id: str, _: None = Depends(require_host)):
     await loop.run_in_executor(
         None, lambda: s3.put_object(manifest_key, json.dumps(manifest), "application/json")
     )
-
-    # Generate and upload NLE/DAW export files
-    await _upload_export_files(session_id, session)
 
     # Store only the hash — the raw token is never persisted to disk
     session.editor_token_hash = token_hash
@@ -326,6 +334,17 @@ async def manifest_refresh(session_id: str, _: None = Depends(require_host)):
     expiry_secs = _expiry_secs()
     expires_at = (datetime.now(tz=timezone.utc) + timedelta(seconds=expiry_secs)).isoformat()
 
+    # Regenerate export files before building manifest so they get presigned URLs
+    await _upload_export_files(session_id, session)
+
+    # Re-list after export upload
+    try:
+        extra2 = [f["key"] for f in session.r2_files]
+        extra_pfx = _cloudsync_prefixes(session.title)
+        objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra2, extra_pfx))
+    except RuntimeError:
+        pass
+
     r2_meta = {f["key"]: f for f in session.r2_files}
     manifest_files = await _build_manifest_files(loop, objs, r2_meta, expiry_secs)
 
@@ -343,9 +362,6 @@ async def manifest_refresh(session_id: str, _: None = Depends(require_host)):
     await loop.run_in_executor(
         None, lambda: s3.put_object(manifest_key, json.dumps(manifest), "application/json")
     )
-
-    # Regenerate export files with fresh presigned paths
-    await _upload_export_files(session_id, session)
 
     session.r2_expires_at = expires_at
     await models.touch(session_id)
