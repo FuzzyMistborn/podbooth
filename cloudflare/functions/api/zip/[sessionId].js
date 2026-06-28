@@ -1,8 +1,8 @@
-// Cloudflare Worker: streams a ZIP64 archive of session files directly from R2.
-// Handles GET /api/zip/{sessionId}?token=...&source=<optional>
-// All other requests fall through to the static assets (index.html).
+// Cloudflare Pages Function: streams a ZIP64 archive of session files from R2.
+// Route: GET /api/zip/{sessionId}?token=...&source=<optional>
 //
-// ZIP64 is used throughout so there are no per-file or archive size limits.
+// R2 binding "R2_BUCKET" must be configured in the Pages dashboard:
+//   Settings → Functions → R2 bucket bindings → add "R2_BUCKET"
 
 // ── CRC-32 ────────────────────────────────────────────────────────────────────
 
@@ -24,133 +24,104 @@ function crcFinal(s)       { return (s ^ 0xFFFFFFFF) >>> 0; }
 
 function u16(dv, off, v) { dv.setUint16(off, v, true); }
 function u32(dv, off, v) { dv.setUint32(off, v, true); }
-
-// Write a 64-bit unsigned integer as two 32-bit halves (little-endian).
-// Safe for values up to Number.MAX_SAFE_INTEGER (~8 PB), well beyond any
-// real session size.
 function u64(dv, off, v) {
-  dv.setUint32(off,     v >>> 0,                        true);
+  dv.setUint32(off,     v >>> 0,                          true);
   dv.setUint32(off + 4, Math.floor(v / 0x100000000) >>> 0, true);
 }
 
 // ── ZIP64 record builders ─────────────────────────────────────────────────────
 
-// Local file header.
-// Sizes are deferred to the data descriptor (bit 3 flag), so the ZIP64 extra
-// field carries zeros here — but its presence signals to unzippers that
-// this is a ZIP64 entry and that the data descriptor uses 8-byte fields.
 function localHeader(nameBytes) {
-  // 30 bytes fixed + 20 bytes ZIP64 extra field + filename
-  const buf = new Uint8Array(30 + 20 + nameBytes.length);
+  const buf = new Uint8Array(30 + nameBytes.length + 20);
   const dv  = new DataView(buf.buffer);
-
-  u32(dv,  0, 0x04034b50);        // local file signature
-  u16(dv,  4, 45);                // version needed: 4.5 (ZIP64)
-  u16(dv,  6, 0x0008);            // flags: data descriptor present
-  u16(dv,  8, 0);                 // compression: store
-  u16(dv, 10, 0); u16(dv, 12, 0); // mod time / mod date
-  u32(dv, 14, 0);                 // CRC-32 (deferred)
-  u32(dv, 18, 0xFFFFFFFF);        // compressed size  → ZIP64
-  u32(dv, 22, 0xFFFFFFFF);        // uncompressed size → ZIP64
+  u32(dv,  0, 0x04034b50);
+  u16(dv,  4, 45);
+  u16(dv,  6, 0x0008);             // data descriptor flag
+  u16(dv,  8, 0);                  // store
+  u16(dv, 10, 0); u16(dv, 12, 0);
+  u32(dv, 14, 0);                  // CRC deferred
+  u32(dv, 18, 0xFFFFFFFF);         // compressed size → ZIP64
+  u32(dv, 22, 0xFFFFFFFF);         // uncompressed size → ZIP64
   u16(dv, 26, nameBytes.length);
-  u16(dv, 28, 20);                // extra field length: 20 bytes
-
-  // ZIP64 extra field
-  u16(dv, 30, 0x0001);            // tag
-  u16(dv, 32, 16);                // data size (two 8-byte fields)
-  u64(dv, 34, 0);                 // original size  (deferred)
-  u64(dv, 42, 0);                 // compressed size (deferred)
-
-  buf.set(nameBytes, 50);
+  u16(dv, 28, 20);                 // extra field length
+  buf.set(nameBytes, 30);          // filename
+  const x = 30 + nameBytes.length; // extra field offset
+  u16(dv, x,     0x0001);          // ZIP64 tag
+  u16(dv, x + 2, 16);
+  u64(dv, x + 4, 0);               // original size deferred
+  u64(dv, x + 12, 0);              // compressed size deferred
   return buf;
 }
 
-// Data descriptor written after each file's data.
-// Uses 8-byte size fields (ZIP64 variant).
 function dataDescriptor(crc, size) {
   const buf = new Uint8Array(24);
   const dv  = new DataView(buf.buffer);
-  u32(dv,  0, 0x08074b50); // signature
+  u32(dv,  0, 0x08074b50);
   u32(dv,  4, crc);
-  u64(dv,  8, size);        // compressed size
-  u64(dv, 16, size);        // uncompressed size (same as compressed: store mode)
+  u64(dv,  8, size);
+  u64(dv, 16, size);
   return buf;
 }
 
-// Central directory entry for one file.
 function centralDirEntry({ nameBytes, crc, size, headerOffset }) {
-  // 46 bytes fixed + 32 bytes ZIP64 extra field + filename
-  const buf = new Uint8Array(46 + 32 + nameBytes.length);
+  const buf = new Uint8Array(46 + nameBytes.length + 32);
   const dv  = new DataView(buf.buffer);
-
-  u32(dv,  0, 0x02014b50);        // central dir sig
-  u16(dv,  4, 45);                // version made by
-  u16(dv,  6, 45);                // version needed
-  u16(dv,  8, 0x0008);            // flags
-  u16(dv, 10, 0);                 // compression: store
-  u16(dv, 12, 0); u16(dv, 14, 0); // mod time / date
+  u32(dv,  0, 0x02014b50);
+  u16(dv,  4, 45); u16(dv, 6, 45);
+  u16(dv,  8, 0x0008);
+  u16(dv, 10, 0);
+  u16(dv, 12, 0); u16(dv, 14, 0);
   u32(dv, 16, crc);
-  u32(dv, 20, 0xFFFFFFFF);        // compressed size  → ZIP64
-  u32(dv, 24, 0xFFFFFFFF);        // uncompressed size → ZIP64
+  u32(dv, 20, 0xFFFFFFFF);
+  u32(dv, 24, 0xFFFFFFFF);
   u16(dv, 28, nameBytes.length);
-  u16(dv, 30, 32);                // extra field length: 32 bytes
-  u16(dv, 32, 0);                 // comment length
-  u16(dv, 34, 0);                 // disk number start
-  u16(dv, 36, 0);                 // internal attrs
-  u32(dv, 38, 0);                 // external attrs
-  u32(dv, 42, 0xFFFFFFFF);        // local header offset → ZIP64
-
-  // ZIP64 extra field
-  u16(dv, 46, 0x0001);            // tag
-  u16(dv, 48, 28);                // data size (three 8-byte fields)
-  u64(dv, 50, size);              // original size
-  u64(dv, 58, size);              // compressed size
-  u64(dv, 66, headerOffset);      // local header offset
-
-  buf.set(nameBytes, 78);
+  u16(dv, 30, 32);
+  u16(dv, 32, 0); u16(dv, 34, 0); u16(dv, 36, 0);
+  u32(dv, 38, 0);
+  u32(dv, 42, 0xFFFFFFFF);
+  buf.set(nameBytes, 46);          // filename
+  const x = 46 + nameBytes.length; // extra field offset
+  u16(dv, x,      0x0001);
+  u16(dv, x +  2, 28);
+  u64(dv, x +  4, size);
+  u64(dv, x + 12, size);
+  u64(dv, x + 20, headerOffset);
   return buf;
 }
 
-// ZIP64 end of central directory record.
 function zip64EocdRecord(count, cdSize, cdOffset) {
   const buf = new Uint8Array(56);
   const dv  = new DataView(buf.buffer);
-  u32(dv,  0, 0x06064b50);  // ZIP64 EOCD sig
-  u64(dv,  4, 44);          // size of this record after this field (fixed: 44)
-  u16(dv, 12, 45);          // version made by
-  u16(dv, 14, 45);          // version needed
-  u32(dv, 16, 0);           // disk number
-  u32(dv, 20, 0);           // disk with CD start
-  u64(dv, 24, count);       // entries on this disk
-  u64(dv, 32, count);       // total entries
-  u64(dv, 40, cdSize);      // central dir size
-  u64(dv, 48, cdOffset);    // central dir offset
+  u32(dv,  0, 0x06064b50);
+  u64(dv,  4, 44);
+  u16(dv, 12, 45); u16(dv, 14, 45);
+  u32(dv, 16, 0); u32(dv, 20, 0);
+  u64(dv, 24, count);
+  u64(dv, 32, count);
+  u64(dv, 40, cdSize);
+  u64(dv, 48, cdOffset);
   return buf;
 }
 
-// ZIP64 end of central directory locator.
 function zip64EocdLocator(zip64EocdOffset) {
   const buf = new Uint8Array(20);
   const dv  = new DataView(buf.buffer);
-  u32(dv,  0, 0x07064b50);      // locator sig
-  u32(dv,  4, 0);               // disk with ZIP64 EOCD
-  u64(dv,  8, zip64EocdOffset); // offset of ZIP64 EOCD record
-  u32(dv, 16, 1);               // total disks
+  u32(dv,  0, 0x07064b50);
+  u32(dv,  4, 0);
+  u64(dv,  8, zip64EocdOffset);
+  u32(dv, 16, 1);
   return buf;
 }
 
-// Standard EOCD — required even with ZIP64; sentinel values point to ZIP64 records.
 function endOfCentralDir() {
   const buf = new Uint8Array(22);
   const dv  = new DataView(buf.buffer);
   u32(dv,  0, 0x06054b50);
-  u16(dv,  4, 0xFFFF);     // disk number (ZIP64 sentinel)
-  u16(dv,  6, 0xFFFF);     // start disk  (ZIP64 sentinel)
-  u16(dv,  8, 0xFFFF);     // entries on disk (ZIP64 sentinel)
-  u16(dv, 10, 0xFFFF);     // total entries   (ZIP64 sentinel)
-  u32(dv, 12, 0xFFFFFFFF); // CD size   (ZIP64 sentinel)
-  u32(dv, 16, 0xFFFFFFFF); // CD offset (ZIP64 sentinel)
-  u16(dv, 20, 0);          // comment length
+  u16(dv,  4, 0xFFFF); u16(dv, 6, 0xFFFF);
+  u16(dv,  8, 0xFFFF); u16(dv, 10, 0xFFFF);
+  u32(dv, 12, 0xFFFFFFFF);
+  u32(dv, 16, 0xFFFFFFFF);
+  u16(dv, 20, 0);
   return buf;
 }
 
@@ -166,9 +137,6 @@ function safeFilename(str) {
   return (str || 'session').replace(/[^\w\s\-]/g, '_').trim().replace(/\s+/g, '_');
 }
 
-// Strip sessions/{id}/ prefix so archive paths are relative and meaningful.
-//   sessions/{id}/Alice/recording.wav  →  Alice/recording.wav
-//   sessions/{id}/exports/show.otio    →  exports/show.otio
 function archivePath(key, sessionId, fallback) {
   const prefix = `sessions/${sessionId}/`;
   return key.startsWith(prefix) ? key.slice(prefix.length) : fallback;
@@ -178,9 +146,10 @@ function err(status, msg) {
   return new Response(msg, { status, headers: { 'Content-Type': 'text/plain' } });
 }
 
-// ── ZIP stream handler ────────────────────────────────────────────────────────
+// ── Request handler ───────────────────────────────────────────────────────────
 
-async function handleZip(request, env, sessionId) {
+export async function onRequestGet({ request, env, params }) {
+  const sessionId    = params.sessionId;
   const url          = new URL(request.url);
   const token        = url.searchParams.get('token') || '';
   const sourceFilter = url.searchParams.get('source') || null;
@@ -250,8 +219,8 @@ async function handleZip(request, env, sessionId) {
       const cdSize = offset - cdStart;
 
       const z64Rec = zip64EocdRecord(central.length, cdSize, cdStart);
-      controller.enqueue(z64Rec);
       const z64RecOffset = offset;
+      controller.enqueue(z64Rec);
       offset += z64Rec.length;
 
       controller.enqueue(zip64EocdLocator(z64RecOffset));
@@ -269,14 +238,3 @@ async function handleZip(request, env, sessionId) {
     },
   });
 }
-
-// ── Entry point ───────────────────────────────────────────────────────────────
-
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    const m   = url.pathname.match(/^\/api\/zip\/([A-Za-z0-9_-]+)$/);
-    if (m) return handleZip(request, env, m[1]);
-    return env.ASSETS.fetch(request);
-  },
-};
