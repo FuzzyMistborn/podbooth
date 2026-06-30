@@ -16,6 +16,7 @@ env:
 
 jobs:
   build:
+    if: github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
