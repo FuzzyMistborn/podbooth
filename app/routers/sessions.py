@@ -157,6 +157,63 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
     return resp
 
 
+@router.get("/obs/{session_id}", response_class=HTMLResponse)
+async def obs_view(request: Request, session_id: str, host_token: str = ""):
+    session = get_session(session_id)
+    if not session or session.ended:
+        return templates.TemplateResponse(
+            request, "error.html",
+            {"message": "Session not found or ended."},
+            status_code=404,
+        )
+    if not host_token:
+        host_token = request.cookies.get(f"ht_{session_id}", "")
+    if not _is_host(host_token, session):
+        return templates.TemplateResponse(
+            request, "error.html",
+            {"message": "Access denied."},
+            status_code=403,
+        )
+    return templates.TemplateResponse(
+        request, "obs.html",
+        {
+            "session": session,
+            "host_token": host_token,
+            "livekit_url": settings.livekit_public_url,
+            "base_url": settings.base_url,
+        },
+    )
+
+
+@router.get("/api/session/{session_id}/obs-token")
+@limiter.limit("20/minute")
+async def obs_token(request: Request, session_id: str, host_token: str = ""):
+    session = get_session(session_id)
+    if not session or session.ended:
+        raise HTTPException(status_code=404, detail="Session not found or ended")
+    if not _is_host(host_token, session):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    import uuid
+    identity = f"obs-{uuid.uuid4().hex[:8]}"
+    grants = VideoGrants(
+        room_join=True,
+        room=session_id,
+        can_publish=False,
+        can_subscribe=True,
+        can_publish_data=False,
+    )
+    token = (
+        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity(identity)
+        .with_name("OBS View")
+        .with_grants(grants)
+        .with_ttl(timedelta(hours=12))
+        .to_jwt()
+    )
+    return JSONResponse({"token": token})
+
+
 @router.post("/api/token")
 @limiter.limit("30/minute")
 async def get_token(request: Request):

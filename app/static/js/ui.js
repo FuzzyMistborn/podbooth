@@ -914,12 +914,24 @@ function setupControls() {
     btnRecord?.addEventListener('click', startRecording);
     btnStopRec?.addEventListener('click', stopRecording);
     btnEnd?.addEventListener('click', endSession);
-    btnShowShare?.addEventListener('click', () => {
-      shareWrap.style.display = shareWrap.style.display === 'none' ? 'flex' : 'none';
+    btnShowShare?.addEventListener('click', e => {
+      e.stopPropagation();
+      const menu = document.getElementById('share-menu');
+      if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
     });
     btnCopy?.addEventListener('click', () => {
       navigator.clipboard.writeText(JOIN_LINK);
-      showToast('Link copied!');
+      showToast('Join link copied!');
+    });
+    btnCopyObs?.addEventListener('click', () => {
+      const obsLinkEl = document.getElementById('obs-link');
+      if (obsLinkEl) navigator.clipboard.writeText(obsLinkEl.value);
+      showToast('OBS link copied!');
+    });
+    document.addEventListener('click', e => {
+      const wrap = document.getElementById('share-menu-wrap');
+      const menu = document.getElementById('share-menu');
+      if (menu && wrap && !wrap.contains(e.target)) menu.style.display = 'none';
     });
   }
 
@@ -983,6 +995,8 @@ function setupKeyboardShortcuts() {
 // ── Panel helpers ─────────────────────────────────────────────────────────────
 
 function closeAllPanels() {
+  const shareMenuEl = document.getElementById('share-menu');
+  if (shareMenuEl) shareMenuEl.style.display = 'none';
   if (timerPanel && timerPanel.style.display !== 'none') {
     timerPanel.style.display = 'none';
     btnTimerBtn?.classList.remove('active');
@@ -1559,6 +1573,7 @@ function cancelEditTopic() {
 
 function jumpToTopic(i) {
   if (!timerState.active || i < 0 || i >= timerQueue.length) return;
+  const prevName = timerQueue[timerState.topicIndex]?.name;
   timerState.topicIndex = i;
   timerState.remaining  = timerQueue[i].duration;
   timerState.total      = timerQueue[i].duration;
@@ -1566,6 +1581,10 @@ function jumpToTopic(i) {
   timerState.expired    = false;
   timerState.overtime   = 0;
   if (!timerInterval) startTimerTick();
+  if (typeof isRecording !== 'undefined' && isRecording) {
+    if (prevName) createMarkerWithLabel(`End: ${prevName}`);
+    createMarkerWithLabel(`Start: ${timerQueue[i].name}`);
+  }
   broadcastTimerState();
   updateTimerBar();
   syncTimerButtons();
@@ -1687,6 +1706,8 @@ function timerStartStop() {
     timerState.expired    = false;
     timerState.overtime   = 0;
     startTimerTick();
+    if (typeof isRecording !== 'undefined' && isRecording)
+      createMarkerWithLabel(`Start: ${timerQueue[0].name}`);
   } else if (timerState.expired) {
     // Restart the current topic with its original duration
     const i = timerState.topicIndex;
@@ -1725,6 +1746,7 @@ function timerSkip() {
     showToast('Timer queue finished');
     return;
   }
+  const prevName = timerQueue[timerState.topicIndex]?.name;
   timerState.topicIndex = next;
   timerState.remaining  = timerQueue[next].duration;
   timerState.total      = timerQueue[next].duration;
@@ -1732,6 +1754,10 @@ function timerSkip() {
   timerState.expired    = false;
   timerState.overtime   = 0;
   if (!timerInterval) startTimerTick();
+  if (typeof isRecording !== 'undefined' && isRecording) {
+    if (prevName) createMarkerWithLabel(`End: ${prevName}`);
+    createMarkerWithLabel(`Start: ${timerQueue[next].name}`);
+  }
   broadcastTimerState();
   updateTimerBar();
   syncTimerButtons();

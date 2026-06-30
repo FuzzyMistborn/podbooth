@@ -146,9 +146,11 @@ const alertBanner  = document.getElementById('alert-banner');
 const alertBannerText = document.getElementById('alert-banner-text');
 const btnAlertDismiss = document.getElementById('btn-alert-dismiss');
 const btnShowShare = document.getElementById('btn-show-share');
-const shareWrap    = document.getElementById('share-wrap');
+const shareMenu    = document.getElementById('share-menu');
 const shareLink    = document.getElementById('share-link');
+const obsLink      = document.getElementById('obs-link');
 const btnCopy      = document.getElementById('btn-copy');
+const btnCopyObs   = document.getElementById('btn-copy-obs');
 const toast        = document.getElementById('toast');
 const btnChat      = document.getElementById('btn-chat');
 const chatPanel    = document.getElementById('chat-panel');
@@ -251,6 +253,9 @@ async function init() {
   if (IS_HOST && shareLink) {
     shareLink.value = JOIN_LINK;
   }
+  if (IS_HOST && obsLink) {
+    obsLink.value = `${BASE_URL}/obs/${SESSION_ID}?host_token=${encodeURIComponent(HOST_TOKEN)}`;
+  }
   setupControls();
   pollSessionStatus();
   pollPendingGuests();
@@ -286,7 +291,7 @@ async function init() {
 
     renderLocalParticipant();
     for (const p of room.remoteParticipants.values()) {
-      renderRemoteParticipant(p);
+      if (!p.identity.startsWith('obs-')) renderRemoteParticipant(p);
     }
     startLatencyMeasure();
   } catch (e) {
@@ -312,6 +317,7 @@ async function init() {
 
 function attachRoomEvents() {
   room.on(RoomEvent.ParticipantConnected, p => {
+    if (p.identity.startsWith('obs-')) return;
     showToast(`${labelFor(p)} joined`);
     renderRemoteParticipant(p);
     if (handRaised) {
@@ -326,6 +332,7 @@ function attachRoomEvents() {
   });
 
   room.on(RoomEvent.ParticipantDisconnected, async p => {
+    if (p.identity.startsWith('obs-')) return;
     showToast(`${labelFor(p)} left`);
     removeTile(`tile-${p.identity}`);
     removeTile(`tile-${p.identity}-screen`);

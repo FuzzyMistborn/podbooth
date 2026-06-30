@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OBS View — {{ session.title }}</title>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: 'Inter', sans-serif;
+    }
+
+    #grid {
+      display: grid;
+      width: 100vw;
+      height: 100vh;
+      gap: 4px;
+      padding: 4px;
+    }
+
+    .obs-tile {
+      position: relative;
+      background: #111;
+      overflow: hidden;
+      border-radius: 4px;
+    }
+
+    .obs-tile video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .obs-tile .tile-label {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      font-size: 40px;
+      font-weight: 500;
+      padding: 4px 12px;
+      border-radius: 4px;
+      pointer-events: none;
+    }
+
+    .obs-tile .tile-cover {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: #1a1a1a;
+    }
+
+    .obs-tile .tile-cover-avatar {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: #333;
+      color: #fff;
+      font-size: 28px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-transform: uppercase;
+    }
+
+    .obs-tile .tile-cover-name {
+      color: #aaa;
+      font-size: 14px;
+    }
+
+    #error-msg {
+      color: #f55;
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+<div id="grid"></div>
+<div id="error-msg"></div>
+
+<script>
+  const SESSION_ID  = "{{ session.id }}";
+  const HOST_TOKEN  = "{{ host_token }}";
+  const LIVEKIT_URL = "{{ livekit_url }}";
+</script>
+<script src="/static/js/obs.js?v={{ asset_v }}"></script>
+</body>
+</html>

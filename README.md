@@ -281,7 +281,7 @@ Files are organized under the configured upload path as:
 
 1. Go to `/` → enter a session title → **Create Session**
 2. You land in the studio as host with a share link
-3. Click **Share Link** → copy the guest URL → send to participants
+3. Click **Share** → copy the **Join Link** → send to participants; the same menu also has an **OBS Browser Source** link (see below)
 4. Guests open the link, check their devices (mic/camera selections are saved for future sessions), enter their name, and join
 5. Host clicks **REC** to start — all participants record locally and upload in real time; a live input level meter and clip indicator appear on each tile during recording
 
@@ -303,6 +303,7 @@ Files are organized under the configured upload path as:
    - Click **PAUSE** on a participant tile to force-mute them, or **KICK** to remove them
    - Click the bell icon to send a text alert to all participants
    - Click **Topic** to stamp a named topic marker — saved as a downloadable `.txt` and listed in the Files panel
+   - When a **timer segment** starts or advances, a topic marker is automatically stamped with the segment name (`Start: Topic` / `End: Topic`) so segment boundaries are captured in `markers.txt` without manual intervention
 7. The **Files** panel shows recordings assembling in real time and lists any topic marker files; the upload banner shows per-chunk progress and an assembling state
 8. Incoming join requests play a chime and can be **Accepted** or **Denied** by the host; each participant tile shows connection latency
 9. Hover over the top right corner to see stats (WebRTC diagnostics for things like bitrate, packet loss, jitter, round-trip time), and when recording see the health of the recording
@@ -312,6 +313,21 @@ Files are organized under the configured upload path as:
 13. If cloud upload is configured, an **Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **Upload Local Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
 14. If Outline is configured, the host can click **Sync Outline** before recording to import show notes from a linked document. Only content between the `<!- podbooth -!>` / `<!- /podbooth -!>` tags is pulled in; H2 headings become timer topics
 15. If R2 is configured and files have been uploaded, the host can click **Generate Editor Link** on the session card to produce a time-limited link for a remote editor. The link gives the editor direct download access to all R2 files without needing a PodBooth account. Generating a new link immediately invalidates the previous one
+
+---
+
+## OBS Browser Source
+
+The host can stream the live video grid directly into OBS by adding a **Browser Source** pointed at the OBS link.
+
+1. In the studio, click **Share** → copy the **OBS Browser Source** URL
+2. In OBS, add a **Browser Source** and paste the URL
+3. Set the width/height to match your stream resolution (e.g. 1920×1080)
+4. The page renders a clean, chrome-free grid — no controls, no header — and updates automatically as participants join, leave, or start screen sharing
+
+The OBS view joins the session as a silent observer (no camera or microphone) and is invisible to other participants. The link is tied to the host token and will not work for anyone who does not have it. Screen share tiles appear alongside camera tiles in the same grid.
+
+> **Note:** OBS Browser Source caches pages aggressively. If you make layout changes or the grid looks stale, right-click the source in OBS and choose **Refresh cache of current page**.
 
 ---
 
@@ -355,7 +371,7 @@ The **transcript** (when `WHISPERX_API_URL` is set) is generated automatically w
 - **Resumable uploads**: Each recording run gets a unique epoch tag stored in `sessionStorage`. If the page reloads mid-session, the client queries the server for the last received chunk and resumes from there rather than re-uploading. The upload banner tracks per-chunk progress and transitions to an "assembling" state once all chunks have landed.
 - **Device persistence**: Mic and camera selections are saved to `localStorage` on the pre-join page and restored automatically on the next visit, so participants don't have to re-select their devices each session.
 - **Input level meter**: During recording, each participant tile displays a live audio level bar sourced from the same AudioWorklet stream used for capture. A clip indicator lights when the signal saturates.
-- **Topic markers**: The host can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `markers.txt` file in the session folder and shown in the Files panel for immediate download.
+- **Topic markers**: The host can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `markers.txt` file in the session folder and shown in the Files panel for immediate download. When using the clock timer, segment transitions automatically stamp `Start:` and `End:` markers so segment boundaries are captured without manual input.
 - **Nerd stats panel**: A collapsible panel exposes live WebRTC statistics (inbound/outbound bitrate, packet loss, jitter, round-trip time) polled from `RTCPeerConnection.getStats()` every second.
 - **Host moderation**: Force-mute and kick are issued via the LiveKit server API. Force-unmute is sent as a `force_unmute` data-channel message so the guest's browser re-enables its mic track client-side.
 - **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes, they are stream-copied (no re-encode) into a single temp file before compositing.

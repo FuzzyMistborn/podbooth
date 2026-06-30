@@ -752,6 +752,28 @@ function stopRecStatus() {
 
 // ── Topic markers ─────────────────────────────────────────────────────────────
 
+async function createMarkerWithLabel(label) {
+  const elapsedMs = recordingStartTime
+    ? (Date.now() - recordingStartTime + cumulativeElapsedMs)
+    : cumulativeElapsedMs;
+  try {
+    const r = await fetch(`/api/session/${SESSION_ID}/marker`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host_token: HOST_TOKEN,
+        identity: typeof identity !== 'undefined' ? identity : '',
+        label,
+        recording_time_s: Math.floor(elapsedMs / 1000),
+      }),
+    });
+    if (r.ok) {
+      showToast(label ? `Marker: "${label}"` : 'Marker saved');
+      await broadcastData({ type: 'marker', label, recording_time_s: Math.floor(elapsedMs / 1000) });
+    }
+  } catch (e) {}
+}
+
 async function createMarker() {
   const label = (topicInput?.value || '').trim();
   const elapsedMs = recordingStartTime

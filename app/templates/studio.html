@@ -355,15 +355,28 @@
     </div>
 
     <div class="controls-right">
-      <div class="share-wrap" id="share-wrap" style="display:none">
-        <input type="text" id="share-link" readonly />
-        <button class="btn-copy" id="btn-copy">Copy</button>
-      </div>
-
       {% if is_host %}
       <button class="btn-share" id="btn-waitroom" style="display:none">Waiting <span id="waitroom-badge" class="files-badge"></span></button>
       <button class="btn-share" id="btn-files">Files <span id="files-badge" class="files-badge" style="display:none"></span></button>
-      <button class="btn-share" id="btn-show-share">Share Link</button>
+      <div class="share-menu-wrap" id="share-menu-wrap">
+        <button class="btn-share" id="btn-show-share">Share</button>
+        <div class="share-menu" id="share-menu" style="display:none">
+          <div class="share-menu-item">
+            <span class="share-menu-label">Join Link</span>
+            <div class="share-menu-row">
+              <input type="text" id="share-link" readonly />
+              <button class="btn-copy" id="btn-copy">Copy</button>
+            </div>
+          </div>
+          <div class="share-menu-item">
+            <span class="share-menu-label">OBS Browser Source</span>
+            <div class="share-menu-row">
+              <input type="text" id="obs-link" readonly />
+              <button class="btn-copy" id="btn-copy-obs">Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
       {% if cloud_upload_enabled %}
       <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">Upload Local Recording</button>
       {% endif %}
