@@ -39,6 +39,18 @@ _tasks: set[asyncio.Task] = set()
 # Per-directory+epoch locks so the merge step runs at most once per epoch.
 _merge_locks: dict[str, asyncio.Lock] = {}
 
+# Directory+epoch keys with an audio+video merge (ffmpeg mux) currently
+# running. assembly_status checks this so it doesn't report "done" — and let
+# the client probe files for verify-recordings — while the final video is
+# still being written.
+_merge_in_progress: set[str] = set()
+
+
+def is_merging(directory: Path) -> bool:
+    """True if any epoch under this directory currently has a merge running."""
+    prefix = f"{directory}|"
+    return any(key.startswith(prefix) for key in _merge_in_progress)
+
 # Tracks (str(directory), track_type, epoch) tuples currently being assembled.
 # Prevents recover_orphaned_chunks from queuing duplicate tasks while ffmpeg runs.
 _assembly_in_progress: set[tuple[str, str, str]] = set()
@@ -560,7 +572,11 @@ async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
                 "-movflags", "+faststart",
                 str(video_out),
             ]
-        ok = await _run_ffmpeg(cmd, directory, "merge")
+        _merge_in_progress.add(key)
+        try:
+            ok = await _run_ffmpeg(cmd, directory, "merge")
+        finally:
+            _merge_in_progress.discard(key)
         if ok:
             logger.info("merge_av: done %s size=%d", video_out.name, video_out.stat().st_size)
             video_noaudio.unlink(missing_ok=True)

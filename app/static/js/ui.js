@@ -1583,7 +1583,7 @@ function jumpToTopic(i) {
   if (!timerInterval) startTimerTick();
   if (typeof isRecording !== 'undefined' && isRecording) {
     if (prevName) createMarkerWithLabel(`End: ${prevName}`);
-    createMarkerWithLabel(`Start: ${timerQueue[i].name}`);
+    setTimeout(() => createMarkerWithLabel(`Start: ${timerQueue[i].name}`), 1000);
   }
   broadcastTimerState();
   updateTimerBar();
@@ -1756,7 +1756,7 @@ function timerSkip() {
   if (!timerInterval) startTimerTick();
   if (typeof isRecording !== 'undefined' && isRecording) {
     if (prevName) createMarkerWithLabel(`End: ${prevName}`);
-    createMarkerWithLabel(`Start: ${timerQueue[next].name}`);
+    setTimeout(() => createMarkerWithLabel(`Start: ${timerQueue[next].name}`), 1000);
   }
   broadcastTimerState();
   updateTimerBar();
@@ -1767,6 +1767,10 @@ function timerSkip() {
 function timerStopAll() {
   clearInterval(timerInterval);
   timerInterval = null;
+  if (typeof isRecording !== 'undefined' && isRecording && timerState.active) {
+    const name = timerQueue[timerState.topicIndex]?.name;
+    if (name) createMarkerWithLabel(`End: ${name}`);
+  }
   timerState = { active: false, paused: false, expired: false, topicIndex: -1, remaining: 0, total: 0 };
   broadcastTimerState();
   updateTimerBar();

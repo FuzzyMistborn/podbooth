@@ -170,14 +170,12 @@
           {% if f.take %}<span class="file-take">Take {{ f.take }}</span>{% endif %}
           <span class="file-type {{ f.type }}">{{ f.type }}</span>
           {% if f.size_mb is not none %}<span class="file-size">{{ f.size_mb }} MB</span>{% endif %}
-          {% if f.type == 'transcript' %}
+          {% if f.type == 'transcript' or f.type == 'marker' %}
           <button class="btn-play" onclick="openTranscriptView('/download/{{ f.path }}', '{{ f.filename }}')">View</button>
-          {% elif f.type != 'marker' %}
+          {% else %}
           <button class="btn-play" onclick="openPreview('/download/{{ f.path }}', '{{ f.type }}', '{{ f.participant }}', '{{ f.filename }}')">▶ Play</button>
           {% endif %}
-          {% if f.type != 'marker' %}
           <a class="btn-download" href="/download/{{ f.path }}">Download</a>
-          {% endif %}
         </div>
         {% endfor %}
       </div>

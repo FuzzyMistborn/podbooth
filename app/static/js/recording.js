@@ -263,10 +263,8 @@ function startVideoRecording() {
     mimeType: mime,
     videoBitsPerSecond: 12_000_000,
   });
-  videoStartTime = null;
   videoRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
-      if (videoStartTime === null) videoStartTime = performance.now();
       const idx = chunkIndex.video;
       recLog('video ondataavailable: chunk=%d size=%d bytes', idx, e.data.size);
       enqueueChunk(e.data, 'video', videoExt);
@@ -283,6 +281,11 @@ function startVideoRecording() {
     });
   };
   recLog('video recorder started: mime=%s', mime);
+  // Record the actual capture-start instant here, not in ondataavailable —
+  // that callback only fires after the first 5s timeslice flushes, which
+  // would make video appear to start ~5s later than audio and cause
+  // _try_merge_av (server side) to trim real audio content off the front.
+  videoStartTime = performance.now();
   videoRecorder.start(5000);
 }
 
@@ -575,16 +578,17 @@ function startOpusFallback() {
     mimeType: mime,
     audioBitsPerSecond: 320000,
   });
-  audioStartTime = null;
   audioRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
-      if (audioStartTime === null) audioStartTime = performance.now();
       enqueueChunk(e.data, 'audio', ext);
     }
   };
   audioRecorder.onstop = () => {
     finalizeTrack('audio', { format: 'container', start_time_ms: audioStartTime });
   };
+  // Same reasoning as videoStartTime: capture at .start() time, not the
+  // delayed first ondataavailable, so the server-side offset vs. video is accurate.
+  audioStartTime = performance.now();
   audioRecorder.start(5000);
 }
 
@@ -684,8 +688,27 @@ async function restartPcmCapture() {
   pcmCloneTrack?.stop();
   pcmCtx = pcmNode = pcmSource = pcmStream = pcmCloneTrack = null;
   pcmCapturing = false;
+  // Rebuilding the AudioContext/worklet below takes real wall-clock time
+  // (addModule, node setup) during which no audio frames are captured. If we
+  // don't account for that gap, every frame captured after the restart is
+  // shifted earlier than it really occurred, and the recording drifts out of
+  // sync with video from this point on. Measure the gap and pad it with
+  // silence so the frame count stays wall-clock-accurate.
+  const gapStart = performance.now();
   try {
     await startPcmCapture();
+    const gapMs = performance.now() - gapStart;
+    const channels = pcmChannels || 2;
+    const silenceFrames = Math.round((gapMs / 1000) * pcmCtx.sampleRate);
+    if (silenceFrames > 0) {
+      const silenceBlock = Array.from({ length: channels }, () => new Float32Array(silenceFrames));
+      // Safe to mutate here, ahead of any queued worklet messages: this runs
+      // synchronously right after startPcmCapture() resolves, before the
+      // event loop can deliver the next port.onmessage.
+      pcmBuffers.unshift(silenceBlock);
+      pcmFrames += silenceFrames;
+      recLog('restartPcmCapture: padded %dms gap (%d silence frames)', gapMs, silenceFrames);
+    }
   } catch (e) {
     console.warn('Could not restart PCM after mic switch:', e);
     startOpusFallback();

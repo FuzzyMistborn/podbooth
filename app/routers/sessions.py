@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
-from app.routers.upload import recover_orphaned_chunks
+from app.routers.upload import recover_orphaned_chunks, is_merging
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host
 from app.limiter import limiter
@@ -723,11 +723,18 @@ async def assembly_status_route(session_id: str):
     session_path = recordings_path / session.dir_name
     if not session_path.is_dir():
         return JSONResponse({"assembling": False})
-    has_chunks = False
+    assembling = False
     for pdir in session_path.iterdir():
         if not pdir.is_dir():
             continue
         if any("_chunk_" in f.name for f in pdir.iterdir() if f.is_file()):
-            has_chunks = True
+            assembling = True
             break
-    return JSONResponse({"assembling": has_chunks})
+        # Chunks are deleted as soon as the audio/video transcode finishes,
+        # but the audio+video merge (ffmpeg mux) can still be running after
+        # that — check for it too, or the client can conclude uploads are
+        # "done" and probe files that are still being written.
+        if is_merging(pdir):
+            assembling = True
+            break
+    return JSONResponse({"assembling": assembling})
