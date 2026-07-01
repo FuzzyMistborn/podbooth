@@ -48,6 +48,34 @@ let audioFormat = 'pcm';
 let audioRecorder = null;
 let micMuted = false;
 
+let downmixCtx = null;
+
+// Explicitly sums the published mic track's channels down to mono instead of
+// relying on the browser's implicit channelCount downmix, which is
+// implementation-defined and was observed to alias to a single fixed
+// channel rather than sum both — silent on hardware where only the other
+// channel carries signal. Summing (not averaging) also avoids halving the
+// level of hardware that only has one live channel.
+async function applyMonoDownmix() {
+  const pub = room?.localParticipant?.getTrackPublication(Track.Source.Microphone);
+  const track = pub?.track;
+  if (!track?.mediaStreamTrack) return;
+  try {
+    downmixCtx?.close();
+    downmixCtx = new AudioContext();
+    const source = downmixCtx.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+    const splitter = downmixCtx.createChannelSplitter(2);
+    const dest = downmixCtx.createMediaStreamDestination();
+    dest.channelCount = 1;
+    source.connect(splitter);
+    splitter.connect(dest, 0, 0);
+    splitter.connect(dest, 1, 0);
+    await track.replaceTrack(dest.stream.getAudioTracks()[0]);
+  } catch (e) {
+    console.warn('Mono downmix failed, publishing raw capture:', e);
+  }
+}
+
 let _warmCtx = null;
 let _warmModuleReady = null;
 
@@ -242,6 +270,12 @@ async function init() {
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false,
+      // Some XLR/USB interfaces only carry signal on one physical channel.
+      // We capture real stereo here and explicitly sum it down to mono in
+      // applyMonoDownmix() below — relying on the browser's own implicit
+      // mono downmix isn't safe: it's implementation-defined and was
+      // observed to alias to a single fixed channel (silence on hardware
+      // where only the other channel carries signal) rather than sum both.
       channelCount: 2,
     },
     audioPublishDefaults: {
@@ -281,6 +315,7 @@ async function init() {
   try {
     await room.connect(LIVEKIT_URL, token);
     await room.localParticipant.enableCameraAndMicrophone();
+    await applyMonoDownmix();
 
     // Build the PCM source→worklet graph now so it's already flowing real
     // audio by the time startPcmCapture() wants frames. On Firefox,

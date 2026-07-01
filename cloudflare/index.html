@@ -280,6 +280,76 @@
       flex-shrink: 0;
     }
 
+    /* ── Upload (production files) ── */
+    .upload-section {
+      margin-top: 28px;
+    }
+    .upload-dropzone {
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 24px 20px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .upload-dropzone:hover,
+    .upload-dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(255,107,0,0.05);
+    }
+    .upload-dropzone input[type="file"] {
+      display: none;
+    }
+    .upload-hint {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .upload-progress-list {
+      margin-top: 10px;
+    }
+    .upload-progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 4px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      color: var(--muted);
+    }
+    .upload-progress-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text);
+    }
+    .upload-progress-bar-track {
+      width: 80px;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .upload-progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.1s;
+    }
+    .upload-progress-status {
+      flex-shrink: 0;
+      min-width: 60px;
+      text-align: right;
+    }
+    .upload-progress-status.upload-error { color: var(--error-text); }
+    .upload-progress-status.upload-done { color: var(--success); }
+
     /* ── Footer ── */
     .portal-footer {
       margin-top: 40px;
@@ -442,6 +512,15 @@
     </div>
 
     <div class="file-list" id="file-list" role="list"></div>
+
+    <div class="upload-section">
+      <label class="upload-dropzone" id="upload-dropzone" for="upload-input">
+        <div>Drop finished files here, or click to upload</div>
+        <div class="upload-hint">Uploaded to the production folder for the host to pick up</div>
+        <input type="file" id="upload-input" multiple />
+      </label>
+      <div class="upload-progress-list" id="upload-progress-list"></div>
+    </div>
 
     <div class="portal-footer">
       <span class="footer-warning">
@@ -697,10 +776,13 @@
       return;
     }
 
-    var podbooth = files.filter(function (f) { return f.source === "podbooth"; });
-    var local    = files.filter(function (f) { return f.source === "local"; });
-    var exports  = files.filter(function (f) { return f.source === "exports"; });
-    var other    = files.filter(function (f) { return f.source !== "podbooth" && f.source !== "local" && f.source !== "exports"; });
+    var podbooth   = files.filter(function (f) { return f.source === "podbooth"; });
+    var local      = files.filter(function (f) { return f.source === "local"; });
+    var exports    = files.filter(function (f) { return f.source === "exports"; });
+    var production = files.filter(function (f) { return f.source === "production"; });
+    var other      = files.filter(function (f) {
+      return f.source !== "podbooth" && f.source !== "local" && f.source !== "exports" && f.source !== "production";
+    });
 
     if (podbooth.length > 0) {
       list.appendChild(makeGroupHeader("PodBooth Recordings", podbooth, "podbooth"));
@@ -713,6 +795,10 @@
     if (exports.length > 0) {
       list.appendChild(makeGroupHeader("Editor Project Files", exports, "exports"));
       exports.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (production.length > 0) {
+      list.appendChild(makeGroupHeader("Production Files", production, "production"));
+      production.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (other.length > 0) {
       list.appendChild(makeGroupHeader("Other", other, null));
@@ -769,6 +855,107 @@
     renderFileList(manifest.files);
 
     showState("content");
+  }
+
+  // ── Upload (production files) ─────────────────────────────────────────────
+
+  function uploadUrl() {
+    return "/api/upload/" + encodeURIComponent(_sessionId) + "?token=" + encodeURIComponent(_token);
+  }
+
+  function addUploadRow(filename) {
+    var list = document.getElementById("upload-progress-list");
+    var row = document.createElement("div");
+    row.className = "upload-progress-row";
+    row.innerHTML =
+      '<div class="upload-progress-name"></div>' +
+      '<div class="upload-progress-bar-track"><div class="upload-progress-bar-fill"></div></div>' +
+      '<div class="upload-progress-status">0%</div>';
+    row.querySelector(".upload-progress-name").textContent = filename;
+    list.appendChild(row);
+    return {
+      fill:   row.querySelector(".upload-progress-bar-fill"),
+      status: row.querySelector(".upload-progress-status"),
+    };
+  }
+
+  function uploadFile(file) {
+    var ui = addUploadRow(file.name);
+
+    return new Promise(function (resolve) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", uploadUrl());
+
+      xhr.upload.addEventListener("progress", function (e) {
+        if (e.lengthComputable) {
+          var pct = Math.round((e.loaded / e.total) * 100);
+          ui.fill.style.width = pct + "%";
+          ui.status.textContent = pct + "%";
+        }
+      });
+
+      xhr.addEventListener("load", function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          ui.fill.style.width = "100%";
+          ui.status.textContent = "Done";
+          ui.status.className = "upload-progress-status upload-done";
+        } else {
+          var msg = "Failed";
+          try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
+          ui.status.textContent = msg;
+          ui.status.className = "upload-progress-status upload-error";
+        }
+        resolve();
+      });
+
+      xhr.addEventListener("error", function () {
+        ui.status.textContent = "Failed";
+        ui.status.className = "upload-progress-status upload-error";
+        resolve();
+      });
+
+      var form = new FormData();
+      form.append("file", file, file.name);
+      xhr.send(form);
+    });
+  }
+
+  async function handleFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList);
+    for (var i = 0; i < files.length; i++) {
+      await uploadFile(files[i]);
+    }
+  }
+
+  function initUpload() {
+    var dropzone = document.getElementById("upload-dropzone");
+    var input    = document.getElementById("upload-input");
+    if (!dropzone || !input) return;
+
+    input.addEventListener("change", function () {
+      if (input.files && input.files.length > 0) {
+        handleFiles(input.files);
+        input.value = "";
+      }
+    });
+
+    ["dragenter", "dragover"].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault();
+        dropzone.classList.add("dragover");
+      });
+    });
+    ["dragleave", "drop"].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault();
+        dropzone.classList.remove("dragover");
+      });
+    });
+    dropzone.addEventListener("drop", function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFiles(e.dataTransfer.files);
+      }
+    });
   }
 
   // ── Main ───────────────────────────────────────────────────────────────────
@@ -870,6 +1057,7 @@
 
     // ── Render ──
     renderContent(manifest);
+    initUpload();
   }
 
   // Run after DOM is ready

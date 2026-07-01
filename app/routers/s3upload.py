@@ -37,6 +37,8 @@ def _file_source(key: str) -> str:
         return "podbooth"
     if "exports" in parts:
         return "exports"
+    if "production" in parts:
+        return "production"
     return ""
 
 

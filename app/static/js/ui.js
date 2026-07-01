@@ -613,6 +613,7 @@ async function openDeviceDropdown(kind) {
           activeMicDeviceId = d.deviceId;
           try { localStorage.setItem(DEVICE_KEY_MIC, d.deviceId); } catch (_e) {}
           try { await room.switchActiveDevice('audioinput', d.deviceId); } catch (err) {}
+          await applyMonoDownmix();
           if (isRecording && pcmNode) await restartPcmCapture();
         } else {
           activeCamDeviceId = d.deviceId;
