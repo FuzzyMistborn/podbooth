@@ -49,6 +49,8 @@ let audioRecorder = null;
 let micMuted = false;
 
 let downmixCtx = null;
+let downmixAnalyser = null;
+let downmixAnalyserBuf = null;
 
 // Explicitly sums the published mic track's channels down to mono instead of
 // relying on the browser's implicit channelCount downmix, which is
@@ -62,6 +64,7 @@ async function applyMonoDownmix() {
   if (!track?.mediaStreamTrack) return;
   try {
     downmixCtx?.close();
+    downmixAnalyser = null;
     downmixCtx = new AudioContext();
     const source = downmixCtx.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
     const splitter = downmixCtx.createChannelSplitter(2);
@@ -70,10 +73,33 @@ async function applyMonoDownmix() {
     source.connect(splitter);
     splitter.connect(dest, 0, 0);
     splitter.connect(dest, 1, 0);
+
+    // LiveKit's LocalParticipant.audioLevel isn't guaranteed to re-target
+    // itself onto the track we just swapped in via replaceTrack(), so the
+    // on-screen waveform meter can keep reading stale pre-downmix levels.
+    // Tap our own analyser straight off the post-downmix signal so the
+    // meter always reflects what's actually being published.
+    downmixAnalyser = downmixCtx.createAnalyser();
+    downmixAnalyser.fftSize = 256;
+    downmixAnalyserBuf = new Float32Array(downmixAnalyser.fftSize);
+    splitter.connect(downmixAnalyser, 0);
+    splitter.connect(downmixAnalyser, 1);
+
     await track.replaceTrack(dest.stream.getAudioTracks()[0]);
   } catch (e) {
     console.warn('Mono downmix failed, publishing raw capture:', e);
   }
+}
+
+function getLocalMicLevel() {
+  if (!downmixAnalyser) return null;
+  downmixAnalyser.getFloatTimeDomainData(downmixAnalyserBuf);
+  let peak = 0;
+  for (let i = 0; i < downmixAnalyserBuf.length; i++) {
+    const v = Math.abs(downmixAnalyserBuf[i]);
+    if (v > peak) peak = v;
+  }
+  return Math.min(1, peak);
 }
 
 let _warmCtx = null;

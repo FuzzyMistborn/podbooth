@@ -34,7 +34,10 @@ function waveTickSample() {
   if (typeof room === 'undefined' || !room) return;
   const levels = new Map();
   const lp = room.localParticipant;
-  if (lp) levels.set(`tile-${lp.identity}`, lp.audioLevel || 0);
+  if (lp) {
+    const localLvl = typeof getLocalMicLevel === 'function' ? getLocalMicLevel() : null;
+    levels.set(`tile-${lp.identity}`, (localLvl != null ? localLvl : lp.audioLevel) || 0);
+  }
   room.remoteParticipants?.forEach(p => levels.set(`tile-${p.identity}`, p.audioLevel || 0));
 
   for (const [tileId] of waveBuffers) {
