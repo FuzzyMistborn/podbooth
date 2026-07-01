@@ -31,15 +31,28 @@ _PRESIGNED_MAX_SECS = 604800
 def _file_source(key: str) -> str:
     """Derive file source label from its storage key path."""
     parts = key.replace("\\", "/").lower().split("/")
+    if "production" in parts:
+        idx = parts.index("production")
+        sub = parts[idx + 1] if idx + 1 < len(parts) - 1 else ""
+        if sub == "full":
+            return "production_full"
+        if sub == "speakers":
+            return "production_speakers"
+        return "production"
     if "local" in parts:
         return "local"
     if "podbooth" in parts:
         return "podbooth"
     if "exports" in parts:
         return "exports"
-    if "production" in parts:
-        return "production"
     return ""
+
+
+def _production_prefix(session_title: str) -> str:
+    """R2/B2 key prefix for editor-uploaded production files: {upload_path}/{slug}/production."""
+    base = settings.r2_upload_path.strip("/")
+    slug = _session_slug(session_title)
+    return f"{base}/{slug}/production" if base else f"{slug}/production"
 
 
 def _cloudsync_prefixes(session_title: str) -> list[str]:
@@ -282,6 +295,7 @@ async def create_editor_link(session_id: str, _: None = Depends(require_host)):
         "created_at": session.created_at.isoformat(),
         "editor_token_hash": token_hash,
         "expires_at": expires_at,
+        "production_prefix": _production_prefix(session.title),
         "files": manifest_files,
     }
 
@@ -357,6 +371,7 @@ async def manifest_refresh(session_id: str, _: None = Depends(require_host)):
         "created_at": session.created_at.isoformat(),
         "editor_token_hash": session.editor_token_hash,
         "expires_at": expires_at,
+        "production_prefix": _production_prefix(session.title),
         "files": manifest_files,
     }
 

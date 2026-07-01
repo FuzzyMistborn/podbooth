@@ -515,12 +515,21 @@
     <div class="file-list" id="file-list" role="list"></div>
 
     <div class="upload-section">
-      <label class="upload-dropzone" id="upload-dropzone" for="upload-input">
-        <div>Drop finished files here, or click to upload</div>
-        <div class="upload-hint">Uploaded to the production folder for the host to pick up</div>
-        <input type="file" id="upload-input" multiple />
+      <label class="upload-dropzone" id="upload-dropzone-full" for="upload-input-full">
+        <div>Drop the full mix here, or click to upload</div>
+        <div class="upload-hint">Uploaded to production/full for the host to pick up</div>
+        <input type="file" id="upload-input-full" multiple />
       </label>
-      <div class="upload-progress-list" id="upload-progress-list"></div>
+      <div class="upload-progress-list" id="upload-progress-list-full"></div>
+    </div>
+
+    <div class="upload-section">
+      <label class="upload-dropzone" id="upload-dropzone-speakers" for="upload-input-speakers">
+        <div>Drop individual speaker tracks here, or click to upload</div>
+        <div class="upload-hint">Optional — helps with diarization/transcription. Uploaded to production/speakers</div>
+        <input type="file" id="upload-input-speakers" multiple />
+      </label>
+      <div class="upload-progress-list" id="upload-progress-list-speakers"></div>
     </div>
 
     <div class="portal-footer">
@@ -777,13 +786,14 @@
       return;
     }
 
-    var podbooth   = files.filter(function (f) { return f.source === "podbooth"; });
-    var local      = files.filter(function (f) { return f.source === "local"; });
-    var exports    = files.filter(function (f) { return f.source === "exports"; });
-    var production = files.filter(function (f) { return f.source === "production"; });
-    var other      = files.filter(function (f) {
-      return f.source !== "podbooth" && f.source !== "local" && f.source !== "exports" && f.source !== "production";
-    });
+    var knownSources     = ["podbooth", "local", "exports", "production", "production_full", "production_speakers"];
+    var podbooth         = files.filter(function (f) { return f.source === "podbooth"; });
+    var local            = files.filter(function (f) { return f.source === "local"; });
+    var exports          = files.filter(function (f) { return f.source === "exports"; });
+    var productionFull   = files.filter(function (f) { return f.source === "production_full"; });
+    var productionTracks = files.filter(function (f) { return f.source === "production_speakers"; });
+    var production       = files.filter(function (f) { return f.source === "production"; });
+    var other            = files.filter(function (f) { return knownSources.indexOf(f.source) === -1; });
 
     if (podbooth.length > 0) {
       list.appendChild(makeGroupHeader("PodBooth Recordings", podbooth, "podbooth"));
@@ -796,6 +806,14 @@
     if (exports.length > 0) {
       list.appendChild(makeGroupHeader("Editor Project Files", exports, "exports"));
       exports.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (productionFull.length > 0) {
+      list.appendChild(makeGroupHeader("Production — Full Mix", productionFull, "production_full"));
+      productionFull.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (productionTracks.length > 0) {
+      list.appendChild(makeGroupHeader("Production — Speaker Tracks", productionTracks, "production_speakers"));
+      productionTracks.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (production.length > 0) {
       list.appendChild(makeGroupHeader("Production Files", production, "production"));
@@ -860,12 +878,14 @@
 
   // ── Upload (production files) ─────────────────────────────────────────────
 
-  function uploadUrl() {
-    return "/api/upload/" + encodeURIComponent(_sessionId) + "?token=" + encodeURIComponent(_token);
+  function uploadUrl(folder) {
+    return "/api/upload/" + encodeURIComponent(_sessionId) +
+      "?token=" + encodeURIComponent(_token) +
+      "&folder=" + encodeURIComponent(folder);
   }
 
-  function addUploadRow(filename) {
-    var list = document.getElementById("upload-progress-list");
+  function addUploadRow(listId, filename) {
+    var list = document.getElementById(listId);
     var row = document.createElement("div");
     row.className = "upload-progress-row";
     row.innerHTML =
@@ -880,12 +900,12 @@
     };
   }
 
-  function uploadFile(file) {
-    var ui = addUploadRow(file.name);
+  function uploadFile(file, folder, listId) {
+    var ui = addUploadRow(listId, file.name);
 
     return new Promise(function (resolve) {
       var xhr = new XMLHttpRequest();
-      xhr.open("POST", uploadUrl());
+      xhr.open("POST", uploadUrl(folder));
 
       xhr.upload.addEventListener("progress", function (e) {
         if (e.lengthComputable) {
@@ -921,21 +941,21 @@
     });
   }
 
-  async function handleFiles(fileList) {
+  async function handleFiles(fileList, folder, listId) {
     var files = Array.prototype.slice.call(fileList);
     for (var i = 0; i < files.length; i++) {
-      await uploadFile(files[i]);
+      await uploadFile(files[i], folder, listId);
     }
   }
 
-  function initUpload() {
-    var dropzone = document.getElementById("upload-dropzone");
-    var input    = document.getElementById("upload-input");
+  function initUploadZone(dropzoneId, inputId, listId, folder) {
+    var dropzone = document.getElementById(dropzoneId);
+    var input    = document.getElementById(inputId);
     if (!dropzone || !input) return;
 
     input.addEventListener("change", function () {
       if (input.files && input.files.length > 0) {
-        handleFiles(input.files);
+        handleFiles(input.files, folder, listId);
         input.value = "";
       }
     });
@@ -954,9 +974,14 @@
     });
     dropzone.addEventListener("drop", function (e) {
       if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        handleFiles(e.dataTransfer.files);
+        handleFiles(e.dataTransfer.files, folder, listId);
       }
     });
+  }
+
+  function initUpload() {
+    initUploadZone("upload-dropzone-full", "upload-input-full", "upload-progress-list-full", "full");
+    initUploadZone("upload-dropzone-speakers", "upload-input-speakers", "upload-progress-list-speakers", "speakers");
   }
 
   // ── Main ───────────────────────────────────────────────────────────────────
