@@ -671,6 +671,28 @@ function onBeforeUnload(e) {
 let _waitroomTimer = null;
 let _waitroomKnown = new Set(); // identities we've already shown a toast for
 
+function playAdmitChime() {
+  try {
+    const ctx = new AudioContext();
+    const freqs = [880, 1100, 1320];
+    freqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'sine';
+      const t = ctx.currentTime + i * 0.12;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.25, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+      osc.start(t);
+      osc.stop(t + 0.35);
+    });
+    setTimeout(() => ctx.close(), 1500);
+  } catch (e) {}
+}
+
 async function pollPendingGuests() {
   if (!IS_HOST) return;
   try {
@@ -682,6 +704,7 @@ async function pollPendingGuests() {
     guests.forEach(g => {
       if (!_waitroomKnown.has(g.identity)) {
         _waitroomKnown.add(g.identity);
+        playAdmitChime();
         showToast(`${g.display_name} is waiting to join`, 5000);
         const panel = document.getElementById('waitroom-panel');
         const btn   = document.getElementById('btn-waitroom');
