@@ -233,9 +233,12 @@ async function startLocalRecording() {
 function startVideoRecording() {
   const camTrack = getLocalTrack('video');
   if (!camTrack) return;
+  // NOTE: mp4 is deliberately not offered here. Chrome's fragmented-mp4
+  // MediaRecorder output cannot be safely byte-concatenated across chunks
+  // (trex/track-id mismatches, missing moov) the way webm/matroska clusters
+  // can — see the assembly design note at the top of upload.py. ffmpeg
+  // transcodes webm to mp4 at assembly time anyway.
   const candidates = [
-    ['video/mp4;codecs=avc1', 'mp4'],
-    ['video/mp4', 'mp4'],
     ['video/webm;codecs=h264,opus', 'webm'],
     ['video/webm;codecs=vp9,opus', 'webm'],
     ['video/webm;codecs=vp8,opus', 'webm'],
@@ -313,9 +316,8 @@ function startScreenRecording() {
   const screenTrack = getScreenTrack();
   if (!screenTrack) return;
 
+  // See note in startVideoRecording: mp4 chunks can't be safely concatenated.
   const candidates = [
-    ['video/mp4;codecs=avc1', 'mp4'],
-    ['video/mp4', 'mp4'],
     ['video/webm;codecs=h264', 'webm'],
     ['video/webm;codecs=vp9', 'webm'],
     ['video/webm;codecs=vp8', 'webm'],
