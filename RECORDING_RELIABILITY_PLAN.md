@@ -34,14 +34,45 @@ and what's next.
   it's produced, and deleted once the server ACKs the upload; a backstop
   epoch-sweep runs after a clean `waitForUploads()` finish. Also does a
   pre-flight `navigator.storage.estimate()` quota check at recording start.
-  This phase is **purely additive** — the uploader still reads from the
-  in-memory closures, so no upload behavior has changed yet. Its only job is
-  to validate storage/quota/schema in production before phase 2 depends on it.
+- **IndexedDB persistence — phase 2 (uploader pump reads from IndexedDB)** —
+  `enqueueChunk` no longer closes the promise-chain over the blob itself;
+  it writes through to IndexedDB, then queues a lightweight
+  `uploadIdbChunkWithRetry` call that fetches the blob back via `idbGetChunk`
+  immediately before sending it and deletes it on success. A large
+  backpressure backlog now costs disk, not RAM (falls back to holding the
+  blob directly only if IndexedDB itself is unavailable). Backpressure
+  watermarks still track byte counts, which now mirror the IndexedDB backlog
+  1:1 rather than an independent in-memory tally.
+- **IndexedDB persistence — phase 3 (resume on reload + multi-tab lock)** —
+  `recoverOrphanedChunks()` (`upload.js`) runs on every join. It sweeps all
+  leftover IndexedDB chunks (metadata-only scan via `idbGetAllChunks`),
+  groups them by `(sessionId, identity, epoch, trackType)`, and resends each
+  group — this is what actually fulfills prejoin's "your upload will resume
+  automatically" banner, which previously had no code behind it. Each group
+  is wrapped in a `navigator.locks.request(..., { ifAvailable: true })` call
+  keyed by the group's identity so two tabs recovering the same leftover
+  epoch can't double-send (falls back to running unlocked if Web Locks isn't
+  available). The interrupted-session marker moved from `sessionStorage` to
+  `localStorage` — `sessionStorage` doesn't survive a tab close/reopen, which
+  is exactly the crash scenario this exists for, so the recovery banner could
+  never actually fire. A marker with no matching IndexedDB chunks (nothing to
+  recover, or already-clean) is cleared automatically rather than firing the
+  banner forever.
+- **Resumable uploads via `/api/upload/chunks`** — `recoverOrphanedChunks`
+  calls `get_chunk_progress` before resending a group and skips any chunk
+  index the server already has, only resending the tail that's actually
+  missing. Fixed a latent bug in `get_chunk_progress` along the way: it
+  computed the participant directory using `identity`-first `_safe_name`
+  logic that didn't match `participant_dir`'s `participant`-first
+  `_display_slug` logic, so it was silently checking the wrong directory and
+  always reporting `next_chunk: 0`.
 
 All of the above were verified against real execution (not just read), see
 conversation history: FastAPI `TestClient` + real `ffmpeg`/`ffprobe` for the
 size-check/duration-check paths, and `fake-indexeddb` in Node for the
-IndexedDB put/delete/sweep operations.
+IndexedDB put/delete/sweep operations, plus a dedicated Node harness (stubbed
+`fetch`/`localStorage`/`navigator.locks`) exercising the live pump, crash
+recovery with gap-skip, and concurrent-tab lock contention end-to-end.
 
 ## Not done / deferred, with reasoning
 
@@ -70,31 +101,7 @@ IndexedDB put/delete/sweep operations.
 
 ## Next up, in priority order
 
-1. **IndexedDB persistence — phase 2 (uploader reads from IndexedDB)**
-   Replace the in-memory promise-chain queue in `upload.js` with an uploader
-   pump per track that pulls the oldest un-uploaded chunk from IndexedDB,
-   uploads it, and deletes/marks it uploaded on success. Capture writes to
-   IndexedDB and returns immediately — never blocked by upload speed.
-   Needs: per-track pump loop, backpressure watermark logic ported to read
-   IndexedDB backlog size instead of in-memory bytes.
-
-2. **IndexedDB persistence — phase 3 (resume on reload + multi-tab lock)**
-   On page load, scan IndexedDB for any `(sessionId, identity, epoch)` with
-   un-uploaded chunks and resume the uploader pump automatically — this is
-   what turns "recording became unusable after a crash" into "recording
-   quietly finishes uploading when the tab reopens." Needs a Web Lock (or
-   heartbeat-timestamp ownership flag) so only one tab's pump runs per
-   epoch when the same origin is open in multiple tabs. Depends on phase 2.
-
-3. **Resumable uploads via `/api/upload/chunks`** — the server already
-   exposes a "next expected chunk index" endpoint
-   (`app/routers/upload.py::get_chunk_progress`) that nothing calls today.
-   Have the phase-2/3 uploader pump call it on startup/reconnect to detect
-   gaps early rather than relying solely on the post-hoc gap check in
-   `assemble_track`. Most valuable once phases 1–2 exist (something durable
-   to actually resume from after a real crash, not just a network blip).
-
-4. **Live recording health monitoring** — frozen video (via
+1. **Live recording health monitoring** — frozen video (via
    `requestVideoFrameCallback`, warn after ~5s with no new frame) and silent
    audio (RMS computed in the existing AudioWorklet, warn on near-zero levels
    for several seconds). A recording that silently captured a black frame or
@@ -102,7 +109,7 @@ IndexedDB put/delete/sweep operations.
    error at all — this closes that gap. Independent of the IndexedDB work,
    can be done in parallel.
 
-5. **Surface assembly/ffmpeg failures + staged completion status** —
+2. **Surface assembly/ffmpeg failures + staged completion status** —
    `assemble_track` already renames failed sources to `.failed` but this is
    only visible in server logs. Extend `verify-recordings` (or a new status
    field) to report those, and split the upload banner's single "done" state
@@ -110,21 +117,29 @@ IndexedDB put/delete/sweep operations.
    transcode failure is visible immediately rather than discoverable only by
    SSHing into the server.
 
-6. **"Panic save" — download raw chunks locally** — once phase 1/2 IndexedDB
-   work exists, the chunks already live in a queryable local store; offering
-   a "download recording locally" button when uploads keep failing becomes a
-   small feature (zip the IndexedDB blobs) rather than a new one.
+3. **"Panic save" — download raw chunks locally** — the chunks already live
+   in a queryable local store (IndexedDB); offering a "download recording
+   locally" button when uploads keep failing is now a small feature (zip the
+   IndexedDB blobs) rather than a new one.
 
-7. **Safari `ondataavailable`/`onstop` ordering test pass** — needs actual
+4. **Safari `ondataavailable`/`onstop` ordering test pass** — needs actual
    Safari testing under a deliberately slow network; can't be resolved by
    reading code. If the final chunk really can arrive after `onstop` in some
    Safari version, the stop handler needs a short grace-period wait for one
    more `dataavailable` before treating the recording as flushed.
 
+5. **Multi-tab lock for the *live* recording epoch, not just recovery** —
+   `recoverOrphanedChunks` locks per leftover group, but the live pump
+   (`enqueueChunk`/`uploadIdbChunkWithRetry`) doesn't take a Web Lock itself.
+   Not currently exploitable (each tab's `identity` includes a random
+   per-join suffix, so two tabs never share a live epoch), but if that
+   assumption ever changes this gap would let two tabs double-upload.
+
 ## Reference: key files
 
-- `app/static/js/upload.js` — chunk/finalize upload queues, retry, backpressure.
+- `app/static/js/upload.js` — chunk/finalize upload pump, retry, backpressure, crash recovery.
 - `app/static/js/recording.js` — MediaRecorder/PCM capture, finalize call sites.
-- `app/static/js/idb-store.js` — IndexedDB persistence (phase 1).
-- `app/routers/upload.py` — chunk/finalize endpoints, ffmpeg assembly, orphan recovery.
+- `app/static/js/idb-store.js` — IndexedDB persistence and pump/recovery reads.
+- `app/static/js/prejoin.js` — interrupted-session banner (`checkInterruptedSession`).
+- `app/routers/upload.py` — chunk/finalize/progress endpoints, ffmpeg assembly, orphan recovery.
 - `app/routers/sessions.py::verify_recordings` — post-assembly integrity checks.

@@ -274,6 +274,11 @@ async function init() {
 
   identity = `${displayName}-${Math.random().toString(36).slice(2, 7)}`;
 
+  // Phase 2 crash recovery: resend anything a previous tab/crash left
+  // stranded in IndexedDB (write-through copies whose upload never
+  // completed). Fire-and-forget — never block joining on it.
+  if (typeof recoverOrphanedChunks === 'function') recoverOrphanedChunks();
+
   const resp = await fetch('/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

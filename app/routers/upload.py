@@ -228,8 +228,10 @@ async def get_chunk_progress(
         raise HTTPException(status_code=400, detail="Invalid track_type")
     _validate_epoch(epoch)
 
-    raw = identity if identity else participant
-    name = _safe_name(raw) if raw else None
+    # Must match participant_dir's naming exactly (participant/display-name
+    # slug takes priority over identity) or this looks in the wrong directory
+    # and always reports next_chunk=0 even when chunks already landed.
+    name = _display_slug(participant) if participant else _safe_name(identity or "")
     if not name:
         return JSONResponse({"next_chunk": 0})
 

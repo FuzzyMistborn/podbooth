@@ -200,8 +200,8 @@ async function checkBrowserCapabilities() {
 
 function checkInterruptedSession() {
   const prefix = `podbooth:epoch:${SESSION_ID}:`;
-  for (let i = 0; i < sessionStorage.length; i++) {
-    const key = sessionStorage.key(i);
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
     if (key && key.startsWith(prefix)) {
       const banner = document.getElementById('recovery-banner');
       if (banner) banner.style.display = 'flex';

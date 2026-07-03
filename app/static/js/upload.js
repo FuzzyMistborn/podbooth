@@ -35,27 +35,213 @@ function _applyBackpressure(trackType) {
   }
 }
 
+// Fetch a chunk's blob back out of IndexedDB and upload it — the pump reads
+// one blob at a time this way instead of the promise chain closing over
+// every queued blob directly, so a large backpressure backlog costs disk,
+// not RAM. `fallbackBlob` is only non-null when IndexedDB wasn't available
+// to write through to in the first place (see enqueueChunk below), in which
+// case there's nothing durable to read back and the direct reference is the
+// only copy that exists.
+async function uploadIdbChunkWithRetry(sessionId, uploadIdentity, epoch, trackType, index, ext, meta, fallbackBlob, participant) {
+  let blob = fallbackBlob;
+  if (!blob) {
+    const rec = await idbGetChunk(sessionId, uploadIdentity, epoch, trackType, index);
+    blob = rec ? rec.blob : null;
+  }
+  if (!blob) {
+    console.error(`uploadIdbChunkWithRetry: ${trackType}#${index} missing from IndexedDB — chunk lost`);
+    uploadHasError = true;
+    return;
+  }
+  await uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta, sessionId, uploadIdentity, participant);
+  idbDeleteChunk(sessionId, uploadIdentity, epoch, trackType, index);
+}
+
 function enqueueChunk(blob, trackType, ext, meta = {}) {
   const index = chunkIndex[trackType]++;
   const epoch = recordingEpoch;
+  const size = blob.size;
+  const sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName;
   uploadStats.queued++;
-  uploadQueuedBytes[trackType] += blob.size;
+  uploadQueuedBytes[trackType] += size;
   _applyBackpressure(trackType);
   refreshUploadBanner();
-  // Phase 1 IndexedDB write-through (see idb-store.js): persist durably
-  // alongside the in-memory queue below. Fire-and-forget — never block
-  // capture on a disk write, and never let it affect upload behavior.
-  idbPutChunk({ sessionId: SESSION_ID, identity, epoch, trackType, chunkIndex: index, ext, meta, blob });
+  // Write-through to IndexedDB first — the pump below reads the blob back
+  // from there rather than closing over it, so the in-memory queue only
+  // needs to retain small scalars, not the backlog's actual bytes. The pump
+  // is chained onto this same write promise (not fired independently) so it
+  // can never race ahead of the write and find nothing there yet.
+  const putPromise = idbPutChunk({ sessionId, identity: uploadIdentity, participant, epoch, trackType, chunkIndex: index, ext, meta, blob });
+  const fallbackBlob = _idbAvailable() ? null : blob;
   uploadQueues[trackType] = uploadQueues[trackType]
-    .then(() => uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta))
+    .then(() => putPromise)
+    .then(() => uploadIdbChunkWithRetry(sessionId, uploadIdentity, epoch, trackType, index, ext, meta, fallbackBlob, participant))
     .then(() => {
       uploadStats.completed++;
-      uploadQueuedBytes[trackType] -= blob.size;
+      uploadQueuedBytes[trackType] -= size;
       _applyBackpressure(trackType);
       refreshUploadBanner();
-      idbDeleteChunk(SESSION_ID, identity, epoch, trackType, index);
     });
   return uploadQueues[trackType];
+}
+
+// ── Crash recovery (resume on reload) ───────────────────────────────────────
+// A tab crash, browser close, or hard reload during recording abandons
+// whatever's still sitting in the in-memory upload queue — but the
+// write-through above (idbPutChunk in enqueueChunk) means an on-disk copy
+// survives in IndexedDB. On every join, sweep the whole store and resend
+// anything still there: it belongs to a run that never finished uploading,
+// since a successful run always cleans up after itself (idbDeleteChunk /
+// idbDeleteEpoch). The chunks' own stored session/identity/epoch are used
+// rather than the current join's — orphaned capture is very likely from a
+// previous browser session with a different randomized identity.
+
+// Recover one (sessionId, identity, epoch, trackType) group: ask the server
+// how far it already got (item 3 — /api/upload/chunks), resend only the
+// tail it's missing, then finalize. Returns true if the group is fully
+// resolved (nothing left to retry later), so the caller can safely clear
+// its interrupted-session marker.
+async function _recoverGroup(chunks) {
+  chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+  const { sessionId, identity: recIdentity, participant, epoch, trackType, ext: firstExt } = chunks[0];
+  const recParticipant = participant || recIdentity;
+
+  // get_chunk_progress 404s if the session itself is gone, which doubles as
+  // a cheap "is there anywhere left to recover this into" preflight — no
+  // need to discover that mid-upload on a per-chunk basis.
+  let nextChunk = 0;
+  let sessionGone = false;
+  try {
+    const r = await fetch('/api/upload/chunks?' + new URLSearchParams({
+      session_id: sessionId, identity: recIdentity, participant: recParticipant,
+      track_type: trackType, epoch: epoch || '',
+    }));
+    if (r.status === 404) {
+      sessionGone = true;
+    } else if (r.ok) {
+      nextChunk = (await r.json()).next_chunk ?? 0;
+    }
+  } catch (e) {
+    // Unknown server progress — fall back to resending everything; the
+    // server just overwrites same-index files, so this is safe, only wasteful.
+  }
+
+  if (sessionGone) {
+    for (const c of chunks) idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+    try {
+      const markerKey = `podbooth:epoch:${sessionId}:${recIdentity}`;
+      if (localStorage.getItem(markerKey) === epoch) localStorage.removeItem(markerKey);
+    } catch (e) {}
+    return true;
+  }
+
+  let uploadedAny = nextChunk > 0;
+  let failed = false;
+
+  for (const c of chunks) {
+    if (c.chunkIndex < nextChunk) {
+      // Server already has this one from before the crash — just clear it.
+      idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+      continue;
+    }
+    const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+    if (!rec) continue; // already gone — nothing to resend
+    // Reuse the same retrying uploader the live pipeline uses, rather than a
+    // one-shot POST — a transient network blip during recovery shouldn't
+    // abandon the rest of the group any more readily than it would live.
+    const ok = await uploadChunkWithRetry(rec.blob, c.trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, sessionId, c.identity, recParticipant);
+    if (!ok) {
+      console.warn(`recoverOrphanedChunks: gave up resending ${trackType}#${c.chunkIndex}, will retry next join`);
+      failed = true;
+      break;
+    }
+    idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+    uploadedAny = true;
+  }
+
+  if (uploadedAny && !failed) {
+    const fmt = trackType === 'audio' && firstExt === 'raw' ? 'pcm' : 'container';
+    const body = {
+      session_id: sessionId, participant: recParticipant, identity: recIdentity,
+      track_type: trackType, format: fmt, epoch: epoch || '',
+    };
+    if (fmt === 'pcm') { body.sample_rate = 48000; body.channels = 2; }
+    try {
+      const r = await fetch('/api/upload/finalize', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!r.ok) console.warn(`recoverOrphanedChunks: finalize failed for ${trackType} (${sessionId}/${recIdentity}/${epoch}): HTTP ${r.status}`);
+    } catch (e) {
+      console.warn(`recoverOrphanedChunks: finalize request failed for ${trackType}:`, e);
+    }
+  }
+
+  if (!failed) {
+    try {
+      const markerKey = `podbooth:epoch:${sessionId}:${recIdentity}`;
+      if (localStorage.getItem(markerKey) === epoch) localStorage.removeItem(markerKey);
+    } catch (e) {}
+  }
+  return !failed;
+}
+
+async function recoverOrphanedChunks() {
+  const all = await idbGetAllChunks();
+  if (all.length === 0) return;
+  recLog('recoverOrphanedChunks: found %d leftover chunk(s) in IndexedDB', all.length);
+
+  const groups = new Map();
+  for (const rec of all) {
+    const gkey = `${rec.sessionId}::${rec.identity}::${rec.epoch}::${rec.trackType}`;
+    if (!groups.has(gkey)) groups.set(gkey, []);
+    groups.get(gkey).push(rec);
+  }
+
+  // A group's (sessionId, identity, epoch, trackType) tuple only ever comes
+  // from one specific browser tab's earlier recording — but if that tab is
+  // still alive (e.g. it's mid-retry itself, or the user has the same
+  // session open in two tabs), two tabs racing to resend the same chunks
+  // would be wasted work at best. Web Locks makes each group exclusive:
+  // whichever tab grabs the lock recovers it, the other skips it outright.
+  await Promise.all([...groups.values()].map(async (chunks) => {
+    const { sessionId, identity: recIdentity, epoch, trackType } = chunks[0];
+    const lockName = `podbooth-recover:${sessionId}:${recIdentity}:${epoch}:${trackType}`;
+    if (navigator.locks && navigator.locks.request) {
+      try {
+        await navigator.locks.request(lockName, { ifAvailable: true }, async (lock) => {
+          if (!lock) { recLog('recoverOrphanedChunks: %s held by another tab, skipping', lockName); return; }
+          await _recoverGroup(chunks);
+        });
+      } catch (e) {
+        console.warn('recoverOrphanedChunks: lock request failed, recovering unlocked:', e);
+        await _recoverGroup(chunks);
+      }
+    } else {
+      await _recoverGroup(chunks);
+    }
+  }));
+
+  // Anything still marked "interrupted" in localStorage but with no matching
+  // IndexedDB chunks either finished uploading in the same instant the tab
+  // died (after Promise.all in waitForUploads, before its removeItem call),
+  // or never captured a single chunk before crashing. Either way there's
+  // nothing to recover — clear it so the banner stops firing forever.
+  try {
+    const liveMarkers = new Set(
+      [...groups.values()].map(chunks => {
+        const { sessionId, identity: recIdentity, epoch } = chunks[0];
+        return `podbooth:epoch:${sessionId}:${recIdentity}::${epoch}`;
+      })
+    );
+    const stale = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith('podbooth:epoch:')) continue;
+      const epoch = localStorage.getItem(key);
+      if (!liveMarkers.has(`${key}::${epoch}`)) stale.push(key);
+    }
+    stale.forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
 }
 
 // Keep retrying a failing chunk for this long before giving up. The per-track
@@ -71,7 +257,7 @@ const CHUNK_RETRY_BUDGET_MS = 10 * 60 * 1000;
 // trouble without us ever abandoning a chunk mid-flight.
 const uploadStruggling = new Set();
 
-async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}) {
+async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName) {
   recLog('uploadChunk: %s #%d size=%d', trackType, index, blob.size);
   const key = `${trackType}#${index}`;
   const deadline = Date.now() + CHUNK_RETRY_BUDGET_MS;
@@ -80,9 +266,9 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
     attempt++;
     try {
       const form = new FormData();
-      form.append('session_id', SESSION_ID);
-      form.append('participant', displayName);
-      form.append('identity', identity);
+      form.append('session_id', sessionId);
+      form.append('participant', participant);
+      form.append('identity', uploadIdentity);
       form.append('track_type', trackType);
       form.append('chunk_index', index);
       form.append('ext', ext);
@@ -98,7 +284,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
         recLog('uploadChunk: %s #%d ok', trackType, index);
         uploadStruggling.delete(key);
         if (uploadStruggling.size === 0) uploadHasError = false;
-        return;
+        return true;
       }
       throw new Error(`HTTP ${r.status}`);
     } catch (err) {
@@ -111,7 +297,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       console.warn(`Chunk upload failing (${trackType} #${index}), attempt ${attempt}:`, err);
       if (Date.now() >= deadline) {
         console.error(`Chunk permanently lost after ${Math.round(CHUNK_RETRY_BUDGET_MS / 1000)}s of retries: ${trackType} #${index}`);
-        return; // let the queue drain so /finalize fires and the server-side gap check flags it
+        return false; // let the queue drain so /finalize fires and the server-side gap check flags it
       }
       await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
     }
@@ -179,7 +365,7 @@ async function waitForUploads() {
   window.addEventListener('beforeunload', _unloadGuard);
   try {
     await Promise.all(Object.values(uploadQueues));
-    sessionStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
+    localStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
 
     // If any chunk exhausted its retry budget, the recording is incomplete —
     // don't tell the user (host or guest) everything is fine.

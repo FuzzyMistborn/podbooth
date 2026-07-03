@@ -168,6 +168,13 @@ async function startLocalRecording() {
     // the server's orphan recovery (recover_orphaned_chunks) and assembled as
     // their own take, so nothing captured is lost.
     recordingEpoch = Date.now().toString(36);
+    // Marks this epoch as in-flight so a reload/crash before waitForUploads
+    // clears it (see upload.js) is detectable by checkInterruptedSession on
+    // the next prejoin visit, and so recoverOrphanedChunks has an IndexedDB
+    // write-through copy to resend. localStorage, not sessionStorage — the
+    // crash/close case this exists for is exactly the case where the tab's
+    // own session storage is gone, so the marker needs to outlive the tab.
+    try { localStorage.setItem(`podbooth:epoch:${SESSION_ID}:${identity}`, recordingEpoch); } catch (e) {}
     chunkIndex = { audio: 0, video: 0, screen: 0 };
     uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
     uploadStats = { queued: 0, completed: 0 };
