@@ -316,6 +316,7 @@ class S3Backend(CloudBackend):
                 region_name=self._region,
             )
             uploaded = 0
+            errors: list[str] = []
             for item in items:
                 if not item.local_path.is_file():
                     continue
@@ -327,7 +328,9 @@ class S3Backend(CloudBackend):
                     logger.info("%s upload ok: s3://%s/%s", self._name, self._bucket, key)
                 except (BotoCoreError, ClientError) as e:
                     logger.error("%s upload failed: %s: %s", self._name, key, e)
-                    return uploaded, f"{self._name}: upload failed for {item.local_path.name}: {e}"
+                    errors.append(f"{item.local_path.name}: {e}")
+            if errors:
+                return uploaded, f"{self._name}: upload failed for {len(errors)} file(s): {'; '.join(errors)}"
             return uploaded, ""
 
         loop = asyncio.get_event_loop()

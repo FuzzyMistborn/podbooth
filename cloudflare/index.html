@@ -504,12 +504,12 @@
         <span class="files-label">Files</span>
         <span class="files-count" id="files-count"></span>
       </div>
-      <a id="btn-zip-all" class="btn-download" style="display:none;" aria-label="Download all files as ZIP">
+      <button type="button" id="btn-zip-all" class="btn-download" style="display:none;" aria-label="Download all files">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <path d="M8 1v8.293l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7.5 9.293V1H8zM2 13h12v1H2v-1z"/>
         </svg>
-        Download ZIP
-      </a>
+        Download All
+      </button>
     </div>
 
     <div class="file-list" id="file-list" role="list"></div>
@@ -557,10 +557,40 @@
   var _sessionId = "";
   var _token     = "";
 
-  function zipUrl(source) {
-    var u = "/api/zip/" + encodeURIComponent(_sessionId) + "?token=" + encodeURIComponent(_token);
-    if (source) u += "&source=" + encodeURIComponent(source);
-    return u;
+  // ── Sequential native downloads (avoids proxying/zipping large files through
+  // the Worker, which has execution-time limits unsuited to multi-GB files) ──
+
+  function triggerDownload(url, filename) {
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "";
+    a.rel = "noopener noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function downloadAllSequentially(files, button) {
+    var queue = (files || []).filter(function (f) { return f.download_url; });
+    if (queue.length === 0) return;
+
+    var originalText = button ? button.innerHTML : "";
+    var i = 0;
+
+    function next() {
+      if (i >= queue.length) {
+        if (button) { button.innerHTML = originalText; button.removeAttribute("disabled"); }
+        return;
+      }
+      var f = queue[i];
+      triggerDownload(f.download_url, f.filename);
+      i++;
+      if (button) button.textContent = "Downloading " + i + "/" + queue.length + "…";
+      setTimeout(next, 400);
+    }
+
+    if (button) button.setAttribute("disabled", "disabled");
+    next();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -751,7 +781,7 @@
     return row;
   }
 
-  // source: R2 source label used to filter the ZIP endpoint (null = no button)
+  // source: R2 source label used only for the group's aria-label (no longer routes through the ZIP endpoint)
   function makeGroupHeader(label, files, source) {
     var h = document.createElement("div");
     h.className = "file-group-header";
@@ -762,16 +792,17 @@
 
     var downloadable = (files || []).filter(function (f) { return f.download_url; });
     if (source && downloadable.length > 1) {
-      var link = document.createElement("a");
-      link.className = "btn-download-all";
-      link.href = zipUrl(source);
-      link.setAttribute("aria-label", "Download all " + label + " files as ZIP");
-      link.innerHTML =
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-download-all";
+      btn.setAttribute("aria-label", "Download all " + label + " files");
+      btn.innerHTML =
         '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
           '<path d="M8 1v8.293l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7.5 9.293V1H8zM2 13h12v1H2v-1z"/>' +
         '</svg>' +
-        'Download ZIP';
-      h.appendChild(link);
+        'Download All';
+      btn.addEventListener("click", function () { downloadAllSequentially(downloadable, btn); });
+      h.appendChild(btn);
     }
 
     return h;
@@ -863,10 +894,11 @@
     // Footer session ID
     document.getElementById("footer-session-id").textContent = "Session " + manifest.session_id;
 
-    // Global ZIP button (all files, no source filter)
+    // Global "Download All" button (every file with a download_url)
     var zipAll = document.getElementById("btn-zip-all");
     if (zipAll) {
-      zipAll.href = zipUrl(null);
+      var allDownloadable = (Array.isArray(manifest.files) ? manifest.files : []).filter(function (f) { return f.download_url; });
+      zipAll.addEventListener("click", function () { downloadAllSequentially(allDownloadable, zipAll); });
       zipAll.style.display = "";
     }
 

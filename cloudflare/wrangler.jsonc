@@ -2,5 +2,6 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "editor-portal",
   "compatibility_date": "2026-06-23",
-  "pages_build_output_dir": "."
+  "pages_build_output_dir": ".",
+  "limits": { "cpu_ms": 30000 }
 }

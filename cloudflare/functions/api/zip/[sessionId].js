@@ -172,64 +172,63 @@ export async function onRequestGet({ request, env, params }) {
   const zipName = safeFilename(manifest.title) + '.zip';
   const enc     = new TextEncoder();
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const central = [];
-      let offset    = 0;
+  async function* generateZip() {
+    const central = [];
+    let offset    = 0;
 
-      for (const file of files) {
-        const obj = await env.R2_BUCKET.get(file.key);
-        if (!obj) continue;
+    for (const file of files) {
+      const obj = await env.R2_BUCKET.get(file.key);
+      if (!obj) continue;
 
-        const name         = archivePath(file.key, sessionId, file.filename);
-        const nameBytes    = enc.encode(name);
-        const headerOffset = offset;
+      const name         = archivePath(file.key, sessionId, file.filename);
+      const nameBytes    = enc.encode(name);
+      const headerOffset = offset;
 
-        const hdr = localHeader(nameBytes);
-        controller.enqueue(hdr);
-        offset += hdr.length;
+      const hdr = localHeader(nameBytes);
+      yield hdr;
+      offset += hdr.length;
 
-        let crcState = crcInit();
-        let size     = 0;
+      let crcState = crcInit();
+      let size     = 0;
 
-        const reader = obj.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          crcState = crcUpdate(crcState, value);
-          size    += value.length;
-          controller.enqueue(value);
-          offset  += value.length;
-        }
-
-        const crc  = crcFinal(crcState);
-        const desc = dataDescriptor(crc, size);
-        controller.enqueue(desc);
-        offset += desc.length;
-
-        central.push({ nameBytes, crc, size, headerOffset });
+      const reader = obj.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        crcState = crcUpdate(crcState, value);
+        size    += value.length;
+        yield value;
+        offset  += value.length;
       }
 
-      const cdStart = offset;
-      for (const entry of central) {
-        const cde = centralDirEntry(entry);
-        controller.enqueue(cde);
-        offset += cde.length;
-      }
-      const cdSize = offset - cdStart;
+      const crc  = crcFinal(crcState);
+      const desc = dataDescriptor(crc, size);
+      yield desc;
+      offset += desc.length;
 
-      const z64Rec = zip64EocdRecord(central.length, cdSize, cdStart);
-      const z64RecOffset = offset;
-      controller.enqueue(z64Rec);
-      offset += z64Rec.length;
+      central.push({ nameBytes, crc, size, headerOffset });
+    }
 
-      controller.enqueue(zip64EocdLocator(z64RecOffset));
-      offset += 20;
+    const cdStart = offset;
+    for (const entry of central) {
+      const cde = centralDirEntry(entry);
+      yield cde;
+      offset += cde.length;
+    }
+    const cdSize = offset - cdStart;
 
-      controller.enqueue(endOfCentralDir());
-      controller.close();
-    },
-  });
+    const z64Rec = zip64EocdRecord(central.length, cdSize, cdStart);
+    const z64RecOffset = offset;
+    yield z64Rec;
+    offset += z64Rec.length;
+
+    yield zip64EocdLocator(z64RecOffset);
+    offset += 20;
+
+    yield endOfCentralDir();
+  }
+
+  const stream = ReadableStream.from(generateZip());
 
   return new Response(stream, {
     headers: {
