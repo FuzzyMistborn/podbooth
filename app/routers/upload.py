@@ -83,6 +83,22 @@ def _validate_epoch(epoch) -> str:
     return epoch
 
 
+_CHUNK_INDEX_RE = re.compile(r'_chunk_(\d+)\.')
+
+
+def _find_missing_chunk_indices(chunks: list[Path]) -> list[int]:
+    """Given chunk files sorted by name, return any gaps in the 0..N index sequence."""
+    indices = []
+    for c in chunks:
+        m = _CHUNK_INDEX_RE.search(c.name)
+        if m:
+            indices.append(int(m.group(1)))
+    if not indices:
+        return []
+    indices.sort()
+    return [i for i in range(indices[0], indices[-1] + 1) if i not in indices]
+
+
 def _oname(base: str, epoch: str, ext: str, mid: str = "") -> str:
     """Build output filename with optional epoch tag and middle suffix.
     e.g. _oname("audio","abc","wav") → "audio_abc.wav"
@@ -357,9 +373,20 @@ async def assemble_track(
                 track_type, directory.name, epoch, len(chunks), total_bytes,
                 [c.name for c in chunks])
 
+    epoch_tag = f"_{epoch}" if epoch else ""
+
+    missing = _find_missing_chunk_indices(chunks)
+    if missing:
+        logger.error(
+            "assemble: %s/%s epoch=%r is missing chunk index(es) %s — "
+            "source will be corrupt/discontinuous",
+            track_type, directory.name, epoch, missing,
+        )
+        marker = directory / f"{track_type}{epoch_tag}_MISSING_CHUNKS.txt"
+        marker.write_text(f"missing chunk indices: {missing}\n")
+
     # Byte-concatenate chunks in index order into one source file.
     source_ext = chunks[0].suffix  # .raw / .webm / .mp4
-    epoch_tag = f"_{epoch}" if epoch else ""
     source = directory / f"{track_type}{epoch_tag}_source{source_ext}"
     async with aiofiles.open(source, "wb") as out:
         for chunk in chunks:

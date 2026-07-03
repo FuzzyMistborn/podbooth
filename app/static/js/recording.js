@@ -158,51 +158,23 @@ async function startLocalRecording() {
     // Recording may have been stopped while we were waiting for tracks.
     if (!isRecording) { recLog('startLocalRecording: aborted — recording stopped while waiting for tracks'); return; }
 
-    // ── Resume interrupted upload ──────────────────────────────────────────
-    const epochKey = `podbooth:epoch:${SESSION_ID}:${identity}`;
-    const savedEpoch = sessionStorage.getItem(epochKey);
-    let resumedEpoch = false;
-    if (savedEpoch) {
-      // Check if any chunks exist for this epoch
-      const trackTypes = ['audio', 'video', 'screen'];
-      const nextChunks = {};
-      let anyChunks = false;
-      for (const tt of trackTypes) {
-        try {
-          const r = await fetch(
-            `/api/upload/chunks?session_id=${encodeURIComponent(SESSION_ID)}&identity=${encodeURIComponent(identity)}&participant=${encodeURIComponent(displayName)}&track_type=${tt}&epoch=${encodeURIComponent(savedEpoch)}`
-          );
-          if (r.ok) {
-            const { next_chunk } = await r.json();
-            nextChunks[tt] = next_chunk;
-            if (next_chunk > 0) anyChunks = true;
-          } else {
-            nextChunks[tt] = 0;
-          }
-        } catch (e) {
-          nextChunks[tt] = 0;
-        }
-      }
-      if (anyChunks) {
-        recordingEpoch = savedEpoch;
-        chunkIndex = { audio: nextChunks.audio || 0, video: nextChunks.video || 0, screen: nextChunks.screen || 0 };
-        uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
-        resumedEpoch = true;
-        showToast(`Resuming upload from chunk ${JSON.stringify(chunkIndex)}`);
-      }
-    }
+    // ── Always start a fresh recording epoch ───────────────────────────────
+    // A MediaRecorder emits a self-contained WebM stream (its own EBML header
+    // + init segment) every time it starts, so a container track can never be
+    // "resumed" by continuing chunk indices across a reload — byte-concatenating
+    // a second header into the middle of the source file corrupts the stream
+    // (EBML header parsing failure / discontinuity). If a previous session was
+    // interrupted, the chunks it already uploaded are salvaged independently by
+    // the server's orphan recovery (recover_orphaned_chunks) and assembled as
+    // their own take, so nothing captured is lost.
+    recordingEpoch = Date.now().toString(36);
+    chunkIndex = { audio: 0, video: 0, screen: 0 };
+    uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+    uploadStats = { queued: 0, completed: 0 };
+    uploadHasError = false;
+    uploadStruggling.clear();
 
-    if (!resumedEpoch) {
-      recordingEpoch = Date.now().toString(36);
-      chunkIndex = { audio: 0, video: 0, screen: 0 };
-      uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
-      uploadStats = { queued: 0, completed: 0 };
-    }
-
-    // Save epoch to sessionStorage so a page reload can resume
-    sessionStorage.setItem(`podbooth:epoch:${SESSION_ID}:${identity}`, recordingEpoch);
-
-    recLog('startLocalRecording: epoch=%s resumedEpoch=%s chunkIndex=%o', recordingEpoch, resumedEpoch, chunkIndex);
+    recLog('startLocalRecording: epoch=%s chunkIndex=%o', recordingEpoch, chunkIndex);
 
     // ── VIDEO first ── start it before audio so a slow/failed microphone
     // capture can never block video from recording.
@@ -372,7 +344,6 @@ function _onPcmMessage(e) {
   if (e.data?.type === 'drained') return; // handled by drain handshake
   if (!pcmCapturing) return;
   if (!channels || !channels.length) return;
-  if (audioStartTime === null) audioStartTime = performance.now();
   pcmChannels = 2; // always stereo; interleave duplicates mono source if needed
   // Found it: muting goes through room.localParticipant.setMicrophoneEnabled(),
   // which disables the underlying MediaStreamTrack. Chrome keeps delivering
@@ -456,7 +427,12 @@ async function startPcmCapture() {
     pcmBuffers = [];
     pcmFrames = 0;
     pcmFramesWritten = 0;
-    audioStartTime = null;
+    // Capture the start instant at the moment we begin keeping frames, the
+    // same reference point videoStartTime uses (its .start() call). Measuring
+    // audio from the first delivered frame instead would add encoder/worklet
+    // warmup jitter and bias the A/V merge offset. (restartPcmCapture restores
+    // the original value afterward so a mid-recording restart keeps its offset.)
+    audioStartTime = performance.now();
     pcmCapturing = true;
     recLog('PCM capture started (pre-built graph): sampleRate=%d', pcmCtx.sampleRate);
     return;
@@ -502,7 +478,7 @@ async function startPcmCapture() {
   pcmBuffers = [];
   pcmFrames = 0;
   pcmFramesWritten = 0;
-  audioStartTime = null;
+  audioStartTime = performance.now(); // see note in the pre-built branch above
   pcmCapturing = true;
 
   pcmNode.port.onmessage = _onPcmMessage;
@@ -686,6 +662,13 @@ async function restartPcmCapture() {
   pcmNode.port.onmessage = null;
   try { pcmSource.disconnect(); pcmNode.disconnect(); } catch (e) {}
   if (pcmFrames > 0) flushPcm(false); // upload buffered audio without finalizing
+  // This is a mid-recording restart, not a fresh recording. startPcmCapture()
+  // resets the running timeline (pcmFramesWritten → 0, audioStartTime → now)
+  // as if starting over; preserve the real values so post-switch chunks keep
+  // landing at their true position in the audio timeline (not back at t=0) and
+  // the A/V offset stays anchored to the original capture start.
+  const savedFramesWritten = pcmFramesWritten;
+  const savedAudioStart = audioStartTime;
   pcmCtx?.close();
   pcmCloneTrack?.stop();
   pcmCtx = pcmNode = pcmSource = pcmStream = pcmCloneTrack = null;
@@ -699,6 +682,8 @@ async function restartPcmCapture() {
   const gapStart = performance.now();
   try {
     await startPcmCapture();
+    pcmFramesWritten = savedFramesWritten;
+    audioStartTime = savedAudioStart;
     const gapMs = performance.now() - gapStart;
     const channels = pcmChannels || 2;
     const silenceFrames = Math.round((gapMs / 1000) * pcmCtx.sampleRate);

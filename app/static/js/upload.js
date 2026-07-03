@@ -11,9 +11,26 @@ function enqueueChunk(blob, trackType, ext, meta = {}) {
   return uploadQueues[trackType];
 }
 
-async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, attempts = 3) {
+// Keep retrying a failing chunk for this long before giving up. The per-track
+// upload queue is serial, so as long as a chunk is retrying, later chunks wait
+// behind it — retrying until success therefore guarantees strictly in-order,
+// gap-free delivery, and a transient network blip can no longer drop a chunk
+// and corrupt the assembled recording (missing WebM header / discontinuity).
+// The budget bounds the worst case (server genuinely gone) so stopRecording
+// can't wedge forever.
+const CHUNK_RETRY_BUDGET_MS = 10 * 60 * 1000;
+
+// Chunks currently failing to upload, so the recording status can surface
+// trouble without us ever abandoning a chunk mid-flight.
+const uploadStruggling = new Set();
+
+async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}) {
   recLog('uploadChunk: %s #%d size=%d', trackType, index, blob.size);
-  for (let i = 0; i < attempts; i++) {
+  const key = `${trackType}#${index}`;
+  const deadline = Date.now() + CHUNK_RETRY_BUDGET_MS;
+  let attempt = 0;
+  while (true) {
+    attempt++;
     try {
       const form = new FormData();
       form.append('session_id', SESSION_ID);
@@ -29,15 +46,28 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       form.append('file', blob, `chunk_${index}.${ext}`);
 
       const r = await fetch('/api/upload/chunk', { method: 'POST', body: form });
-      if (r.ok) { recLog('uploadChunk: %s #%d ok', trackType, index); return; }
+      if (r.ok) {
+        recLog('uploadChunk: %s #%d ok', trackType, index);
+        uploadStruggling.delete(key);
+        if (uploadStruggling.size === 0) uploadHasError = false;
+        return;
+      }
       throw new Error(`HTTP ${r.status}`);
     } catch (err) {
-      console.warn(`Chunk upload failed (${trackType} #${index}), attempt ${i + 1}:`, err);
-      if (i < attempts - 1) await new Promise(res => setTimeout(res, 1000 * (i + 1)));
+      // Surface the struggle after a few quick failures, but never stop trying
+      // (the bytes stay held in this closure) until the retry budget runs out.
+      if (attempt >= 3) {
+        uploadStruggling.add(key);
+        uploadHasError = true;
+      }
+      console.warn(`Chunk upload failing (${trackType} #${index}), attempt ${attempt}:`, err);
+      if (Date.now() >= deadline) {
+        console.error(`Chunk permanently lost after ${Math.round(CHUNK_RETRY_BUDGET_MS / 1000)}s of retries: ${trackType} #${index}`);
+        return; // let the queue drain so /finalize fires and the server-side gap check flags it
+      }
+      await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
     }
   }
-  uploadHasError = true;
-  console.error(`Chunk permanently lost: ${trackType} #${index}`);
 }
 
 function finalizeTrack(trackType, meta) {
@@ -75,6 +105,13 @@ async function waitForUploads() {
   try {
     await Promise.all(Object.values(uploadQueues));
     sessionStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
+
+    // If any chunk exhausted its retry budget, the recording is incomplete —
+    // don't tell the user (host or guest) everything is fine.
+    if (uploadHasError) {
+      showUploadBanner('error');
+      return;
+    }
 
     // Wait for server-side assembly to complete
     showUploadBanner('assembling');

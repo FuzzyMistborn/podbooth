@@ -689,6 +689,13 @@ async def verify_recordings(session_id: str, _: None = Depends(require_host)):
             if not fpath.is_file():
                 continue
             name = fpath.name
+            if name.endswith("_MISSING_CHUNKS.txt"):
+                issues.append({
+                    "participant": participant,
+                    "file": name,
+                    "issue": "upload dropped chunk(s) — " + fpath.read_text().strip(),
+                })
+                continue
             if "_chunk_" in name or "_noaudio" in name or "_source" in name:
                 continue
             if fpath.suffix not in (".wav", ".mp4", ".webm"):
