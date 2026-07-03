@@ -680,6 +680,21 @@ async def verify_recordings(session_id: str, _: None = Depends(require_host)):
     session_path = Path(settings.recordings_dir) / session.dir_name
     if not session_path.is_dir():
         return JSONResponse({"issues": []})
+
+    # Client-reported capture durations (see recording.js expected_duration_s),
+    # keyed by output filename, used below to catch a chunk that was truncated
+    # mid-stream but has no missing index — ffprobe alone can't distinguish
+    # that from a normal short recording.
+    expected_durations: dict[str, float] = {}
+    metadata_path = session_path / "recording_metadata.json"
+    if metadata_path.exists():
+        try:
+            meta = json.loads(metadata_path.read_text())
+            for run in meta.get("runs", []):
+                expected_durations.update(run.get("durations", {}))
+        except Exception:
+            pass
+
     issues = []
     for pdir in sorted(session_path.iterdir()):
         if not pdir.is_dir():
@@ -716,8 +731,22 @@ async def verify_recordings(session_id: str, _: None = Depends(require_host)):
                 dur = 0.0
             if dur == 0.0:
                 issues.append({"participant": participant, "file": name, "issue": "empty or unreadable"})
+                continue
             elif dur < 3.0:
                 issues.append({"participant": participant, "file": name, "issue": f"very short ({dur:.1f}s) — may be incomplete"})
+                continue
+
+            expected = expected_durations.get(name)
+            if expected is not None and expected > 3.0:
+                # Tolerance covers container overhead/rounding — a real truncated
+                # chunk is typically off by seconds, not fractions of a second.
+                shortfall = expected - dur
+                if shortfall > max(5.0, expected * 0.05):
+                    issues.append({
+                        "participant": participant,
+                        "file": name,
+                        "issue": f"shorter than recorded ({dur:.1f}s vs expected {expected:.1f}s) — a chunk may have been truncated",
+                    })
     return JSONResponse({"issues": issues})
 
 

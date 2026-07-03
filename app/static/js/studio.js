@@ -124,6 +124,7 @@ function _resumeAudioContextsOnGesture() {
 
 let videoStartTime = null;
 let audioStartTime = null;
+let screenStartTime = null;
 
 let chunkIndex = { audio: 0, video: 0, screen: 0 };
 let uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };

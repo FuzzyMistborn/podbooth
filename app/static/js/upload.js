@@ -1,13 +1,60 @@
 // ── Upload pipeline ──────────────────────────────────────────────────────────
 
+// Backpressure: if the upload queue can't keep up with capture (slow uplink,
+// 4K video, long recordings), unflushed blobs pile up in memory as closures
+// held by the promise chain. Cap how many bytes can be buffered per track —
+// once over the high watermark, pause the corresponding MediaRecorder until
+// the queue drains back below the low watermark, rather than let RAM grow
+// unbounded. PCM audio isn't paused (its worklet can't be paused mid-stream
+// and its chunks are small relative to video/screen), only MediaRecorder-based
+// tracks (video, screen, opus-fallback audio).
+const UPLOAD_QUEUE_HIGH_WATERMARK_BYTES = 200 * 1024 * 1024;
+const UPLOAD_QUEUE_LOW_WATERMARK_BYTES = 50 * 1024 * 1024;
+const uploadQueuedBytes = { audio: 0, video: 0, screen: 0 };
+const uploadPausedByBackpressure = { audio: false, video: false, screen: false };
+
+function _recorderFor(trackType) {
+  if (trackType === 'video') return typeof videoRecorder !== 'undefined' ? videoRecorder : null;
+  if (trackType === 'screen') return typeof screenRecorder !== 'undefined' ? screenRecorder : null;
+  if (trackType === 'audio') return typeof audioRecorder !== 'undefined' ? audioRecorder : null;
+  return null;
+}
+
+function _applyBackpressure(trackType) {
+  if (trackType === 'audio') return; // PCM path can't be paused; opus fallback chunks are small
+  const rec = _recorderFor(trackType);
+  if (!rec) return;
+  if (uploadQueuedBytes[trackType] >= UPLOAD_QUEUE_HIGH_WATERMARK_BYTES && rec.state === 'recording') {
+    recLog('backpressure: pausing %s recorder (queued=%d bytes)', trackType, uploadQueuedBytes[trackType]);
+    uploadPausedByBackpressure[trackType] = true;
+    rec.pause();
+  } else if (uploadPausedByBackpressure[trackType] && uploadQueuedBytes[trackType] <= UPLOAD_QUEUE_LOW_WATERMARK_BYTES && rec.state === 'paused') {
+    recLog('backpressure: resuming %s recorder (queued=%d bytes)', trackType, uploadQueuedBytes[trackType]);
+    uploadPausedByBackpressure[trackType] = false;
+    rec.resume();
+  }
+}
+
 function enqueueChunk(blob, trackType, ext, meta = {}) {
   const index = chunkIndex[trackType]++;
   const epoch = recordingEpoch;
   uploadStats.queued++;
+  uploadQueuedBytes[trackType] += blob.size;
+  _applyBackpressure(trackType);
   refreshUploadBanner();
+  // Phase 1 IndexedDB write-through (see idb-store.js): persist durably
+  // alongside the in-memory queue below. Fire-and-forget — never block
+  // capture on a disk write, and never let it affect upload behavior.
+  idbPutChunk({ sessionId: SESSION_ID, identity, epoch, trackType, chunkIndex: index, ext, meta, blob });
   uploadQueues[trackType] = uploadQueues[trackType]
     .then(() => uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta))
-    .then(() => { uploadStats.completed++; refreshUploadBanner(); });
+    .then(() => {
+      uploadStats.completed++;
+      uploadQueuedBytes[trackType] -= blob.size;
+      _applyBackpressure(trackType);
+      refreshUploadBanner();
+      idbDeleteChunk(SESSION_ID, identity, epoch, trackType, index);
+    });
   return uploadQueues[trackType];
 }
 
@@ -40,6 +87,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       form.append('chunk_index', index);
       form.append('ext', ext);
       form.append('epoch', epoch || '');
+      form.append('expected_size', blob.size);
       if (Object.keys(meta).length > 0) {
         form.append('chunk_meta', JSON.stringify(meta));
       }
@@ -70,6 +118,42 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
   }
 }
 
+// Same retry budget/backoff shape as chunk uploads: a lost/failed finalize
+// call means the server never starts assembly even though every chunk landed,
+// so it must be retried like any other upload rather than fire-and-forget.
+const FINALIZE_RETRY_BUDGET_MS = 10 * 60 * 1000;
+
+async function _sendFinalizeWithRetry(trackType, body) {
+  const deadline = Date.now() + FINALIZE_RETRY_BUDGET_MS;
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      // keepalive lets this tiny JSON POST survive a tab close that would
+      // otherwise abort an in-flight fetch (the queue only reaches finalize
+      // after every chunk has uploaded, so there's nothing left to lose but
+      // this call itself).
+      const r = await fetch('/api/upload/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        keepalive: true,
+      });
+      recLog('finalizeTrack: /finalize %s responded %d', trackType, r.status);
+      if (r.ok) return;
+      throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      console.warn(`Finalize failing for ${trackType}, attempt ${attempt}:`, e);
+      if (Date.now() >= deadline) {
+        console.error(`Finalize permanently failed after ${Math.round(FINALIZE_RETRY_BUDGET_MS / 1000)}s of retries: ${trackType}`);
+        uploadHasError = true;
+        return;
+      }
+      await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+    }
+  }
+}
+
 function finalizeTrack(trackType, meta) {
   const epoch = recordingEpoch;
   recLog('finalizeTrack: %s epoch=%s meta=%o', trackType, epoch, meta);
@@ -77,23 +161,14 @@ function finalizeTrack(trackType, meta) {
   // chunk for this track has been flushed to the server.
   uploadQueues[trackType] = uploadQueues[trackType].then(async () => {
     recLog('finalizeTrack: sending /finalize for %s', trackType);
-    try {
-      const r = await fetch('/api/upload/finalize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: SESSION_ID,
-          participant: displayName,
-          identity: identity,
-          track_type: trackType,
-          epoch: epoch || '',
-          ...meta,
-        }),
-      });
-      recLog('finalizeTrack: /finalize %s responded %d', trackType, r.status);
-    } catch (e) {
-      console.error(`Finalize failed for ${trackType}:`, e);
-    }
+    await _sendFinalizeWithRetry(trackType, {
+      session_id: SESSION_ID,
+      participant: displayName,
+      identity: identity,
+      track_type: trackType,
+      epoch: epoch || '',
+      ...meta,
+    });
   });
   return uploadQueues[trackType];
 }
@@ -112,6 +187,11 @@ async function waitForUploads() {
       showUploadBanner('error');
       return;
     }
+
+    // Every chunk uploaded cleanly, so its IndexedDB copy should already be
+    // gone (deleted in enqueueChunk's completion handler) — this is just a
+    // backstop sweep in case any individual delete failed along the way.
+    idbDeleteEpoch(SESSION_ID, identity, recordingEpoch);
 
     // Wait for server-side assembly to complete
     showUploadBanner('assembling');

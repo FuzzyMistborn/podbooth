@@ -171,6 +171,7 @@ async def _save_run_metadata(
     nametake: tuple[str, int],
     track_type: str,
     filename: str,
+    expected_duration_s: float | None = None,
 ):
     """Append/update recording start-time metadata in the session directory."""
     session_dir = part_dir.parent
@@ -194,6 +195,11 @@ async def _save_run_metadata(
             runs.append(run)
 
         run["tracks"][track_type] = filename
+        # Client-reported capture duration, used by verify-recordings to catch
+        # truncated output (e.g. one dropped/short chunk with no missing index)
+        # that ffprobe's absolute empty/very-short heuristic alone can't see.
+        if expected_duration_s is not None:
+            run.setdefault("durations", {})[filename] = expected_duration_s
         metadata_path.write_text(json.dumps(data, indent=2))
 
 
@@ -261,6 +267,7 @@ async def upload_chunk(
     ext: str = Form(...),              # "raw" (pcm), "webm", or "mp4"
     epoch: str = Form(default=""),     # recording-run identifier to avoid chunk collisions
     chunk_meta: str = Form(default=""),  # optional JSON metadata (e.g. chunk_offset_s)
+    expected_size: int = Form(default=-1),  # client-reported blob.size; -1 means unknown/old client
     file: UploadFile = File(...),
 ):
     session = get_session(session_id)
@@ -280,6 +287,17 @@ async def upload_chunk(
         return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
     if len(content) > _MAX_CHUNK_BYTES:
         raise HTTPException(status_code=413, detail="Chunk exceeds size limit")
+    if expected_size >= 0 and len(content) != expected_size:
+        # Bytes arrived but don't match what the browser actually sent — a
+        # truncating proxy or a flaky connection can still return 200/close
+        # cleanly despite dropping part of the body. Reject so the client's
+        # existing retry loop resends the chunk instead of writing a corrupt
+        # (short) chunk file that assembly would silently include.
+        logger.error(
+            "chunk size mismatch: %s/%s #%d expected=%d got=%d",
+            track_type, participant, chunk_index, expected_size, len(content),
+        )
+        raise HTTPException(status_code=400, detail="Chunk size mismatch")
 
     directory = participant_dir(session, participant, identity)
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
@@ -316,6 +334,11 @@ async def finalize_track(request: Request):
         raise HTTPException(status_code=400, detail="sample_rate out of range (1–384000)")
     if not (1 <= channels <= 8):
         raise HTTPException(status_code=400, detail="channels out of range (1–8)")
+    try:
+        expected_duration_s = data.get("expected_duration_s")
+        expected_duration_s = float(expected_duration_s) if expected_duration_s is not None else None
+    except (TypeError, ValueError):
+        expected_duration_s = None
 
     session = get_session(session_id)
     if not session:
@@ -341,7 +364,8 @@ async def finalize_track(request: Request):
     if in_progress_key not in _assembly_in_progress:
         _assembly_in_progress.add(in_progress_key)
         task = asyncio.create_task(
-            assemble_track(directory, track_type, fmt, sample_rate, channels, epoch, session_id, participant)
+            assemble_track(directory, track_type, fmt, sample_rate, channels, epoch, session_id, participant,
+                           expected_duration_s)
         )
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)
@@ -359,6 +383,7 @@ async def assemble_track(
     epoch: str = "",
     session_id: str = "",
     participant: str = "",
+    expected_duration_s: float | None = None,
 ):
     nametake = await _assign_take(directory, epoch, participant)
 
@@ -428,7 +453,7 @@ async def assemble_track(
             if epoch and nametake:
                 epoch_ms = _decode_epoch_ms(epoch)
                 if epoch_ms is not None:
-                    await _save_run_metadata(directory, epoch_ms, nametake, "audio", output.name)
+                    await _save_run_metadata(directory, epoch_ms, nametake, "audio", output.name, expected_duration_s)
         else:
             logger.error("assemble: audio ffmpeg failed for %s/%s", directory.name, epoch)
             source.rename(source.with_suffix(source.suffix + ".failed"))
@@ -475,7 +500,7 @@ async def assemble_track(
                 epoch_ms = _decode_epoch_ms(epoch)
                 if epoch_ms is not None:
                     final_video = _final_name("video", nametake[0], nametake[1], "mp4") if nametake else _oname("video", epoch, "mp4")
-                    await _save_run_metadata(directory, epoch_ms, nametake, "video", final_video)
+                    await _save_run_metadata(directory, epoch_ms, nametake, "video", final_video, expected_duration_s)
         else:
             logger.error("assemble: video ffmpeg failed for %s/%s", directory.name, epoch)
             source.rename(source.with_suffix(source.suffix + ".failed"))
@@ -518,7 +543,7 @@ async def assemble_track(
             if epoch and nametake:
                 epoch_ms = _decode_epoch_ms(epoch)
                 if epoch_ms is not None:
-                    await _save_run_metadata(directory, epoch_ms, nametake, "screen", output.name)
+                    await _save_run_metadata(directory, epoch_ms, nametake, "screen", output.name, expected_duration_s)
         else:
             logger.error("assemble: screen ffmpeg failed for %s/%s", directory.name, epoch)
             source.rename(source.with_suffix(source.suffix + ".failed"))

@@ -173,6 +173,18 @@ async function startLocalRecording() {
     uploadStats = { queued: 0, completed: 0 };
     uploadHasError = false;
     uploadStruggling.clear();
+    uploadQueuedBytes.audio = uploadQueuedBytes.video = uploadQueuedBytes.screen = 0;
+    uploadPausedByBackpressure.audio = uploadPausedByBackpressure.video = uploadPausedByBackpressure.screen = false;
+
+    if (typeof idbCheckQuota === 'function') {
+      idbCheckQuota().then(low => {
+        if (low) {
+          const pct = Math.round((low.usage / low.quota) * 100);
+          recLog('startLocalRecording: storage quota critically low (%d%% used)', pct);
+          console.warn(`Storage quota critically low (${pct}% used) — recording durability may be affected`);
+        }
+      });
+    }
 
     recLog('startLocalRecording: epoch=%s chunkIndex=%o', recordingEpoch, chunkIndex);
 
@@ -253,6 +265,7 @@ function startVideoRecording() {
       format: 'container',
       start_time_ms: videoStartTime,
       has_audio_sync: hasAudioSync,
+      expected_duration_s: (performance.now() - videoStartTime) / 1000,
     });
   };
   recLog('video recorder started: mime=%s', mime);
@@ -278,7 +291,10 @@ function cleanupLocalScreen() {
     } else {
       // Recorder was already stopped (browser ended the track before we got here);
       // onstop will never fire, so finalize manually to avoid losing the chunks.
-      finalizeTrack('screen', { format: 'container' });
+      finalizeTrack('screen', {
+        format: 'container',
+        expected_duration_s: screenStartTime != null ? (performance.now() - screenStartTime) / 1000 : undefined,
+      });
     }
   }
   screenRecorder = null;
@@ -316,8 +332,12 @@ function startScreenRecording() {
     }
   };
   screenRecorder.onstop = () => {
-    finalizeTrack('screen', { format: 'container' });
+    finalizeTrack('screen', {
+      format: 'container',
+      expected_duration_s: (performance.now() - screenStartTime) / 1000,
+    });
   };
+  screenStartTime = performance.now();
   screenRecorder.start(5000);
 }
 
@@ -527,6 +547,7 @@ function flushPcm(isLast) {
       sample_rate: pcmCtx ? pcmCtx.sampleRate : 48000,
       channels: pcmChannels,
       start_time_ms: audioStartTime,
+      expected_duration_s: totalS,
     });
   }
 }
@@ -562,7 +583,11 @@ function startOpusFallback() {
     }
   };
   audioRecorder.onstop = () => {
-    finalizeTrack('audio', { format: 'container', start_time_ms: audioStartTime });
+    finalizeTrack('audio', {
+      format: 'container',
+      start_time_ms: audioStartTime,
+      expected_duration_s: (performance.now() - audioStartTime) / 1000,
+    });
   };
   // Same reasoning as videoStartTime: capture at .start() time, not the
   // delayed first ondataavailable, so the server-side offset vs. video is accurate.
