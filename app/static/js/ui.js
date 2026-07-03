@@ -612,16 +612,32 @@ async function openDeviceDropdown(kind) {
       btn.addEventListener('click', async e => {
         e.stopPropagation();
         closeAllDeviceDropdowns();
-        if (kind === 'audioinput') {
-          activeMicDeviceId = d.deviceId;
-          try { localStorage.setItem(DEVICE_KEY_MIC, d.deviceId); } catch (_e) {}
-          try { await room.switchActiveDevice('audioinput', d.deviceId); } catch (err) {}
-          await applyMonoDownmix();
-          if (isRecording && pcmNode) await restartPcmCapture();
-        } else {
-          activeCamDeviceId = d.deviceId;
-          try { localStorage.setItem(DEVICE_KEY_CAM, d.deviceId); } catch (_e) {}
-          try { await room.switchActiveDevice('videoinput', d.deviceId); } catch (err) {}
+        if (isSwitchingDevice) return;
+        isSwitchingDevice = true;
+        try {
+          if (kind === 'audioinput') {
+            try {
+              await room.switchActiveDevice('audioinput', d.deviceId);
+            } catch (err) {
+              showToast('Could not switch microphone');
+              return;
+            }
+            activeMicDeviceId = d.deviceId;
+            try { localStorage.setItem(DEVICE_KEY_MIC, d.deviceId); } catch (_e) {}
+            await applyMonoDownmix();
+            if (isRecording && pcmNode) await restartPcmCapture();
+          } else {
+            try {
+              await room.switchActiveDevice('videoinput', d.deviceId);
+            } catch (err) {
+              showToast('Could not switch camera');
+              return;
+            }
+            activeCamDeviceId = d.deviceId;
+            try { localStorage.setItem(DEVICE_KEY_CAM, d.deviceId); } catch (_e) {}
+          }
+        } finally {
+          isSwitchingDevice = false;
         }
       });
       dropdown.appendChild(btn);

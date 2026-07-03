@@ -140,6 +140,7 @@ const DEVICE_KEY_SPK = 'podbooth:spk-device';
 let activeSpkDeviceId = '';
 let activeMicDeviceId = '';
 let activeCamDeviceId = '';
+let isSwitchingDevice = false;
 
 const TIMER_SHOW_KEY  = 'podbooth:timer-show-time';
 const TIMER_QUEUE_KEY = 'podbooth:timer-queue';

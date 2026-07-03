@@ -54,7 +54,13 @@ async function populateDevices() {
   try {
     const tmp = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
     tmp.getTracks().forEach(t => t.stop());
-  } catch (e) {}
+  } catch (e) {
+    console.error('Initial getUserMedia failed — device labels will be generic:', e);
+    overlay.classList.remove('hidden');
+    overlay.querySelector('span').textContent = e.name === 'NotAllowedError'
+      ? 'Camera/mic permission denied — check browser and site permissions'
+      : 'Camera/mic not available';
+  }
 
   const devices = await navigator.mediaDevices.enumerateDevices();
   micSelect.innerHTML = '';
