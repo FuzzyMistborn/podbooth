@@ -184,6 +184,7 @@ function renderLocalParticipant() {
       attachVideoToTile(tile, pub.track);
     }
   });
+  updateCameraCover(tile, lp);
 
   stage.appendChild(tile);
   layoutTiles();
@@ -208,6 +209,8 @@ function renderRemoteParticipant(participant) {
       if (sid) remoteAudioTrackSids.set(participant.identity, sid);
     }
   });
+
+  updateCameraCover(tile, participant);
 
   stage.appendChild(tile);
   layoutTiles();
@@ -471,6 +474,13 @@ function updateMuteIndicator(tile, participant) {
     modMuteBtn.classList.toggle('active', muted);
     modMuteBtn.title = muted ? 'Unmute mic' : 'Mute mic';
   }
+}
+
+function updateCameraCover(tile, participant) {
+  const camPubs = [...participant.videoTrackPublications.values()]
+    .filter(pub => pub.source === Track.Source.Camera);
+  const cameraOff = camPubs.length === 0 || camPubs.every(pub => pub.isMuted);
+  tile.classList.toggle('camera-off', cameraOff);
 }
 
 function updateQualityIndicator(tile, quality) {
@@ -855,6 +865,8 @@ function setupControls() {
     await room.localParticipant.setCameraEnabled(!enabled);
     btnCam.classList.toggle('muted', enabled);
     btnCam.closest('.device-btn-group')?.classList.toggle('muted', enabled);
+    const tile = document.getElementById(`tile-${room.localParticipant.identity}`);
+    if (tile) updateCameraCover(tile, room.localParticipant);
   });
 
   btnScreen?.addEventListener('click', async () => {

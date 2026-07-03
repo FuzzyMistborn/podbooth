@@ -558,6 +558,36 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 }
 .participant-tile.local video { transform: scaleX(-1); }
 
+.tile-video-cover {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--bg-2);
+  z-index: 5;
+}
+.participant-tile.camera-off .tile-video-cover { display: flex; }
+.tile-cover-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--border);
+  color: #fff;
+  font-size: 24px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+}
+.tile-cover-name {
+  color: #aaa;
+  font-size: 13px;
+}
+
 .tile-label {
   position: absolute;
   top: 10px;

@@ -214,6 +214,33 @@ async function startLocalRecording() {
   }
 }
 
+// Recording the raw camera MediaStreamTrack directly is fragile across a
+// camera off/on cycle: setCameraEnabled(false) stops the underlying
+// MediaStreamTrack in place (same LocalVideoTrack publication, new track
+// object on re-enable), and once a track a MediaRecorder is consuming ends,
+// Chrome/Firefox don't reliably resume producing frames for that recorder
+// even if a fresh live track is spliced into the same MediaStream — the
+// recorded output freezes on the last real frame forever. Recording a
+// <canvas> we redraw ourselves every animation frame sidesteps this
+// entirely: the canvas has no dependency on any particular
+// MediaStreamTrack's lifecycle, so captureStream() keeps producing frames
+// no matter how many times the camera is toggled mid-recording.
+function _videoDrawLoop() {
+  if (!videoRecorder) { videoDrawRAF = null; return; }
+  const tile = document.getElementById(`tile-${identity}`);
+  const videoEl = tile ? tile.querySelector('video') : null;
+  if (videoEl && videoEl.readyState >= 2 && !(tile.classList.contains('camera-off'))) {
+    videoCanvasCtx.drawImage(videoEl, 0, 0, videoCanvas.width, videoCanvas.height);
+  } else {
+    // Camera off (or not yet ready) — paint a blank frame instead of
+    // leaving whatever pixels were drawn last, so recording matches what
+    // the live preview shows (avatar cover) rather than freezing.
+    videoCanvasCtx.fillStyle = '#000';
+    videoCanvasCtx.fillRect(0, 0, videoCanvas.width, videoCanvas.height);
+  }
+  videoDrawRAF = requestAnimationFrame(_videoDrawLoop);
+}
+
 function startVideoRecording() {
   const camTrack = getLocalTrack('video');
   if (!camTrack) return;
@@ -236,12 +263,20 @@ function startVideoRecording() {
   const [mime, ext] = found;
   videoExt = ext;
 
+  const settings = camTrack.mediaStreamTrack.getSettings?.() || {};
+  videoCanvas = document.createElement('canvas');
+  videoCanvas.width = settings.width || 1280;
+  videoCanvas.height = settings.height || 720;
+  videoCanvasCtx = videoCanvas.getContext('2d', { alpha: false });
+  videoDrawRAF = requestAnimationFrame(_videoDrawLoop);
+  videoCanvasTrack = videoCanvas.captureStream(30).getVideoTracks()[0];
+
   // Include the live mic track so the browser muxes A/V with shared hardware
   // timestamps — this eliminates clock-rate drift between audio and video.
   // We still record raw PCM separately for full-quality audio; the embedded
   // audio track here is only a sync reference and can be discarded in post.
   const micTrack = getLocalTrack('audio');
-  const streamTracks = [camTrack.mediaStreamTrack];
+  const streamTracks = [videoCanvasTrack];
   if (micTrack) streamTracks.push(micTrack.mediaStreamTrack);
   const hasAudioSync = streamTracks.length > 1;
 
@@ -261,6 +296,11 @@ function startVideoRecording() {
   };
   videoRecorder.onstop = () => {
     recLog('video onstop: finalizing, startTime=%s hasAudioSync=%s', videoStartTime, hasAudioSync);
+    if (videoDrawRAF) { cancelAnimationFrame(videoDrawRAF); videoDrawRAF = null; }
+    videoCanvasTrack?.stop();
+    videoCanvasTrack = null;
+    videoCanvas = null;
+    videoCanvasCtx = null;
     finalizeTrack('video', {
       format: 'container',
       start_time_ms: videoStartTime,

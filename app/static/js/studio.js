@@ -29,6 +29,10 @@ let recTimerInterval = null;
 
 let videoRecorder = null;
 let videoExt = 'webm';
+let videoCanvas = null;
+let videoCanvasCtx = null;
+let videoCanvasTrack = null;
+let videoDrawRAF = null;
 
 let screenRecorder = null;
 let screenExt = 'webm';
@@ -446,6 +450,7 @@ function attachRoomEvents() {
       }
     }
     updateMuteIndicator(tile, participant);
+    updateCameraCover(tile, participant);
   });
 
   room.on(RoomEvent.TrackUnsubscribed, (track, pub, participant) => {
@@ -454,7 +459,10 @@ function attachRoomEvents() {
     // it here would wrongly drop a live share. Removal is driven by
     // TrackUnpublished / ParticipantDisconnected.
     const tile = document.getElementById(`tile-${participant.identity}`);
-    if (tile) updateMuteIndicator(tile, participant);
+    if (tile) {
+      updateMuteIndicator(tile, participant);
+      updateCameraCover(tile, participant);
+    }
   });
 
   room.on(RoomEvent.TrackUnpublished, (pub, participant) => {
@@ -471,7 +479,10 @@ function attachRoomEvents() {
 
   room.on(RoomEvent.TrackMuted, (pub, participant) => {
     const tile = document.getElementById(`tile-${participant.identity}`);
-    if (tile) updateMuteIndicator(tile, participant);
+    if (tile) {
+      updateMuteIndicator(tile, participant);
+      updateCameraCover(tile, participant);
+    }
     if (participant === room.localParticipant && pub.source === Track.Source.Microphone) {
       micMuted = true;
       btnMic?.classList.add('muted');
@@ -481,7 +492,10 @@ function attachRoomEvents() {
 
   room.on(RoomEvent.TrackUnmuted, (pub, participant) => {
     const tile = document.getElementById(`tile-${participant.identity}`);
-    if (tile) updateMuteIndicator(tile, participant);
+    if (tile) {
+      updateMuteIndicator(tile, participant);
+      updateCameraCover(tile, participant);
+    }
     if (participant === room.localParticipant && pub.source === Track.Source.Microphone) {
       micMuted = false;
       btnMic?.classList.remove('muted');
