@@ -140,6 +140,14 @@ let pendingFinalizeMeta = {};
 // fsaOpenPromises lazily opens one real file per track on its first chunk.
 let fsaDirHandle = null;
 let fsaOpenPromises = {};
+// Holds a track's FSA file once a mid-recording write failure forces fallback
+// to IndexedDB for the rest of that track — the bytes already committed to
+// disk are still real data and must still be uploaded (as chunk 0) alongside
+// whatever lands in IndexedDB afterward. See _persistChunk in upload.js.
+let fsaFailedTracks = {};
+// Serializes persistence per track so writes never overlap with fsa-store.js's
+// periodic close()+reopen() flush cycle on the same track. See enqueueChunk.
+let _persistQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
 let uploadPending = false;
 let recordingEpoch = '';
 let recordingStarting = false;
@@ -547,10 +555,7 @@ function attachRoomEvents() {
     }
 
     if (msg.type === 'recording_stopped' && !IS_HOST) {
-      await stopLocalRecording();
-      setRecordingUI(false);
-      showLocalUploadButton();
-      await waitForUploads();
+      await stopLocalRecordingAndUpload();
     }
     if (msg.type === 'session_ended' && !IS_HOST) {
       handleSessionEnded();

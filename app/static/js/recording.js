@@ -43,6 +43,19 @@ async function startRecording() {
 }
 
 
+// Stops this tab's own capture and uploads whatever it has — no server call,
+// no broadcast. This is what a guest does on receiving 'recording_stopped'
+// (the host already told the server and everyone else), and it's also the
+// right thing for a guest whose own storage just failed: that failure is
+// local to this tab and must not be reported to the server or broadcast to
+// other participants as if this tab were the host stopping the session.
+async function stopLocalRecordingAndUpload() {
+  await stopLocalRecording();
+  setRecordingUI(false);
+  showLocalUploadButton();
+  await waitForUploads();
+}
+
 // Called from enqueueChunk (upload.js) when a chunk couldn't be persisted
 // anywhere — neither FSA nor IndexedDB. At that point the recording is
 // already missing data, so there's nothing to protect by continuing to
@@ -56,7 +69,15 @@ async function handleFatalRecordingError(trackType, error) {
   _fatalRecordingErrorHandled = true;
   console.error(`handleFatalRecordingError: ${trackType} chunk lost, stopping recording:`, error);
   showToast?.(`Recording storage failed (${trackType}) — recording stopped to avoid losing more data`);
-  if (isRecording) await stopRecording();
+  if (!isRecording) return;
+  // Only the host's stopRecording() is allowed to tell the server and
+  // broadcast 'recording_stopped' to everyone else — a guest's local storage
+  // failure only affects this tab's own capture.
+  if (IS_HOST) {
+    await stopRecording();
+  } else {
+    await stopLocalRecordingAndUpload();
+  }
 }
 
 // The pre-flight quota check (idbCheckQuota above) is only a snapshot — a

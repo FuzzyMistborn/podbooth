@@ -98,6 +98,12 @@ async function fsaGetDirectory() {
 // once per track and writing each captured chunk to it as it arrives is
 // exactly equivalent to what the old per-chunk IndexedDB writes did — just
 // landing in one continuous file instead of many keyed records.
+// Purely cosmetic: names the local file sitting in the user's own folder.
+// It happens to look like the server's own _display_slug()
+// (app/routers/upload.py), but the two aren't required to match — the server
+// never reads this filename back, it derives the final assembled output name
+// from its own participant string at assembly time. Don't chase parity if one
+// side's rules change.
 function fsaSlug(name) {
   return (name || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'participant';
 }

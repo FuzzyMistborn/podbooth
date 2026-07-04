@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 
 import aiofiles
@@ -58,10 +59,12 @@ _assembly_in_progress: set[tuple[str, str, str]] = set()
 
 # How long a (track_type, epoch) group's chunk files must sit untouched before
 # recover_orphaned_chunks will treat it as abandoned rather than mid-upload.
-# Chunk retries back off up to 15s between attempts (see CHUNK_RETRY_BUDGET_MS
-# in upload.js), so this needs enough margin to not mistake a slow-but-live
-# retry for a crash.
-ORPHAN_IDLE_THRESHOLD_S = 60
+# A single hung attempt can legitimately leave the file untouched for close to
+# CHUNK_UPLOAD_TIMEOUT_MS (60s in upload.js) plus up to 15s of backoff before
+# the next attempt starts writing again — call it ~75s worst case for one
+# retry cycle. This threshold needs comfortable margin above that so a
+# still-retrying (not crashed) client isn't mistaken for abandoned mid-upload.
+ORPHAN_IDLE_THRESHOLD_S = 180
 
 # Take-number assignment: maps (dir, epoch) → (slug, take) so all tracks for
 # the same recording run share a consistent take number.
@@ -306,8 +309,14 @@ async def upload_chunk(
     # Leading dot keeps this out of the chunk_* glob patterns assemble_track
     # and recover_orphaned_chunks use — a large (FSA whole-file) upload can
     # take a while to stream in, and either of those matching a still-being-
-    # written file would be the same premature-assembly race fixed above.
-    tmp_path = chunk_path.with_name(f".{chunk_path.name}.part")
+    # written file would be the same premature-assembly race fixed above. A
+    # random suffix per request (rather than a name derived only from
+    # track/epoch/chunk_index) keeps a client retry that fires while the
+    # original, still-in-flight request is mid-write from truncating/racing
+    # on the same file — each attempt gets its own temp file, and only the
+    # attempt that actually finishes and passes validation gets renamed into
+    # the real chunk_path.
+    tmp_path = chunk_path.with_name(f".{chunk_path.name}.{uuid.uuid4().hex}.part")
     try:
         async with aiofiles.open(tmp_path, "wb") as f:
             while True:
