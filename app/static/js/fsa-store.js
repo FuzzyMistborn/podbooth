@@ -102,19 +102,52 @@ function fsaSlug(name) {
   return (name || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'participant';
 }
 
+// A FileSystemWritableFileStream buffers everything written to it in a swap
+// file and only persists to the real on-disk file when close() is called —
+// per spec, a crash or killed tab before that close() discards the buffer
+// entirely, which would make "local recording" lose the whole take on the
+// exact failure mode it exists to survive. To bound that loss, the track is
+// flushed periodically: close the current writable (which commits the swap
+// file to disk), then immediately reopen with keepExistingData so the next
+// write continues right where the last one left off. Worst case data loss
+// after a crash is capped at one flush interval's worth of chunks instead of
+// the entire recording.
+const FSA_FLUSH_THRESHOLD_BYTES = 8 * 1024 * 1024;
+
 async function fsaOpenTrackFile(dirHandle, trackType, epoch, ext, participant) {
   const name = `${fsaSlug(participant)}_${trackType}_${epoch}.${ext}`;
   const fileHandle = await dirHandle.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
-  return { fileHandle, writable, bytesWritten: 0 };
+  return { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, closed: false };
 }
 
 async function fsaWriteChunk(track, blob) {
   await track.writable.write(blob);
   track.bytesWritten += blob.size;
+  if (track.bytesWritten - track.flushedBytes >= FSA_FLUSH_THRESHOLD_BYTES) {
+    await fsaFlushTrackFile(track);
+  }
+}
+
+// Commits everything written so far to the real on-disk file without ending
+// the track — the writable is closed (which is what actually persists the
+// swap file) and immediately replaced with a fresh one continuing from the
+// same offset, so callers can keep writing as if nothing happened.
+async function fsaFlushTrackFile(track) {
+  await track.writable.close();
+  track.writable = await track.fileHandle.createWritable({ keepExistingData: true });
+  await track.writable.seek(track.bytesWritten);
+  track.flushedBytes = track.bytesWritten;
 }
 
 async function fsaCloseTrackFile(track) {
-  await track.writable.close();
+  // Guards against a second close() on the same track (e.g. a redundant
+  // post-stop upload pass) — closing an already-closed writable throws and
+  // would otherwise abort the whole upload batch for no reason, since the
+  // file itself is already finished and safe to re-read.
+  if (!track.closed) {
+    await track.writable.close();
+    track.closed = true;
+  }
   return track.fileHandle.getFile();
 }

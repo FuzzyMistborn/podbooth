@@ -11,10 +11,13 @@
 // upload pass completed — and resends them, making recordings resumable
 // across a browser crash or full page reload.
 //
-// Every function here is best-effort and swallows its own errors — a failure
-// to persist a chunk to IndexedDB must never crash recording itself, though
-// with recording now local-only, a lost chunk here is a lost chunk (there's
-// no in-memory fallback copy once the write-through call has been made).
+// Every function here except idbPutChunk is best-effort and swallows its own
+// errors, since a failed delete/read of already-durable data isn't fatal.
+// idbPutChunk is the exception: with recording now local-only, its write IS
+// the recording — there's no in-memory fallback copy once it's been called —
+// so a failed write must propagate to the caller (see enqueueChunk in
+// upload.js) rather than be silently swallowed, letting the recording
+// continue while quietly missing data.
 
 const IDB_DB_NAME = 'podbooth-recordings';
 const IDB_DB_VERSION = 1;
@@ -63,24 +66,23 @@ function _chunkKey(sessionId, identity, epoch, trackType, chunkIndex) {
   return `${sessionId}::${identity}::${epoch}::${trackType}::${chunkIndex}`;
 }
 
+// Throws on any failure (DB unavailable, quota exceeded, transaction abort)
+// rather than swallowing it — this write is the only copy of the chunk that
+// will ever exist, so the caller needs to know it didn't happen.
 async function idbPutChunk({ sessionId, identity, participant, epoch, trackType, chunkIndex, ext, meta, blob }) {
-  try {
-    const db = await _openIdb();
-    if (!db) return;
-    const key = _chunkKey(sessionId, identity, epoch, trackType, chunkIndex);
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put({
-        sessionId, identity, participant, epoch, trackType, chunkIndex, ext, meta, blob,
-        size: blob.size, createdAt: Date.now(),
-      }, key);
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-  } catch (e) {
-    console.warn(`idbPutChunk failed for ${trackType}#${chunkIndex} (chunk stays upload-queue-only):`, e);
-  }
+  const db = await _openIdb();
+  if (!db) throw new Error('IndexedDB unavailable');
+  const key = _chunkKey(sessionId, identity, epoch, trackType, chunkIndex);
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put({
+      sessionId, identity, participant, epoch, trackType, chunkIndex, ext, meta, blob,
+      size: blob.size, createdAt: Date.now(),
+    }, key);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
 }
 
 async function idbDeleteChunk(sessionId, identity, epoch, trackType, chunkIndex) {

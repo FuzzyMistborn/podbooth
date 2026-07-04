@@ -43,6 +43,53 @@ async function startRecording() {
 }
 
 
+// Called from enqueueChunk (upload.js) when a chunk couldn't be persisted
+// anywhere — neither FSA nor IndexedDB. At that point the recording is
+// already missing data, so there's nothing to protect by continuing to
+// capture; stop immediately and tell the user rather than let them discover
+// a corrupt take at playback. Idempotent — a burst of chunks can all fail
+// for the same underlying reason (e.g. disk full) before the first stop
+// finishes.
+let _fatalRecordingErrorHandled = false;
+async function handleFatalRecordingError(trackType, error) {
+  if (_fatalRecordingErrorHandled) return;
+  _fatalRecordingErrorHandled = true;
+  console.error(`handleFatalRecordingError: ${trackType} chunk lost, stopping recording:`, error);
+  showToast?.(`Recording storage failed (${trackType}) — recording stopped to avoid losing more data`);
+  if (isRecording) await stopRecording();
+}
+
+// The pre-flight quota check (idbCheckQuota above) is only a snapshot — a
+// long recording can run storage down over time (other tabs writing to the
+// same origin's quota, the OS evicting space, another app filling the
+// disk), and the user should hear about that well before it turns into a
+// silent chunk-write failure. Poll periodically for the rest of the
+// recording rather than only checking once at the start.
+const QUOTA_MONITOR_INTERVAL_MS = 30 * 1000;
+let _quotaMonitorTimer = null;
+let _quotaWarned = false;
+
+function _startQuotaMonitor() {
+  _quotaWarned = false;
+  _stopQuotaMonitor();
+  if (typeof idbCheckQuota !== 'function') return;
+  _quotaMonitorTimer = setInterval(async () => {
+    const low = await idbCheckQuota();
+    if (low && !_quotaWarned) {
+      _quotaWarned = true;
+      const pct = Math.round((low.usage / low.quota) * 100);
+      console.warn(`Storage quota critically low (${pct}% used) during recording`);
+      showToast?.(`Storage almost full (${pct}% used) — free up space or stop soon to avoid losing data`);
+    } else if (!low) {
+      _quotaWarned = false; // re-arm in case it dips low again later
+    }
+  }, QUOTA_MONITOR_INTERVAL_MS);
+}
+
+function _stopQuotaMonitor() {
+  if (_quotaMonitorTimer) { clearInterval(_quotaMonitorTimer); _quotaMonitorTimer = null; }
+}
+
 async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = true;
   await _postRecordingAction('stop');
@@ -181,6 +228,8 @@ async function startLocalRecording() {
     uploadHasError = false;
     uploadStruggling.clear();
     fsaOpenPromises = {};
+    _uploadPass = { epoch: null, promise: null };
+    _fatalRecordingErrorHandled = false;
     fsaDirHandle = typeof fsaGetDirectory === 'function' ? await fsaGetDirectory() : null;
     if (fsaDirHandle) recLog('startLocalRecording: File System Access folder available — recording locally to disk');
 
@@ -201,6 +250,7 @@ async function startLocalRecording() {
         }
       });
     }
+    _startQuotaMonitor();
 
     recLog('startLocalRecording: epoch=%s chunkIndex=%o', recordingEpoch, chunkIndex);
 
@@ -655,6 +705,7 @@ function startOpusFallback() {
 async function stopLocalRecording() {
   micMuted = false;
   recLog('stopLocalRecording: begin');
+  _stopQuotaMonitor();
 
   // For each MediaRecorder, wrap its onstop so we get an explicit signal that
   // the final ondataavailable (and thus the finalize enqueue) has completed.

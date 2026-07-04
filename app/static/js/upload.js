@@ -32,19 +32,45 @@ function _fsaTrackFor(trackType, ext) {
   return fsaOpenPromises[trackType];
 }
 
+// A chunk's write-through is the only copy of that chunk that will ever
+// exist — recording is local-only until stop. If it can't be persisted
+// anywhere (FSA write fails mid-track, or IndexedDB rejects it — quota
+// exceeded, DB blocked, etc.), continuing to record while silently missing
+// data produces a corrupt take the user won't discover until playback. Fail
+// loud instead: stop recording immediately and tell the user, same as any
+// other unrecoverable capture error.
+async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uploadIdentity, participant, meta) {
+  const track = await _fsaTrackFor(trackType, ext);
+  if (track) {
+    try {
+      await fsaWriteChunk(track, blob);
+      return;
+    } catch (e) {
+      // Don't retry FSA for the rest of this track — a mid-recording failure
+      // (permission revoked, disk full, drive unplugged) is likely to recur,
+      // and mixing backends within one track complicates recovery. Fall back
+      // to IndexedDB for every remaining chunk of this track instead.
+      console.warn(`_persistChunk: FSA write failed for ${trackType}#${index}, falling back to IndexedDB for rest of track:`, e);
+      fsaOpenPromises[trackType] = Promise.resolve(null);
+    }
+  }
+  await idbPutChunk({ sessionId, identity: uploadIdentity, participant, epoch, trackType, chunkIndex: index, ext, meta, blob });
+}
+
 function enqueueChunk(blob, trackType, ext, meta = {}) {
   const index = chunkIndex[trackType]++;
   const epoch = recordingEpoch;
   const sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName;
   uploadStats.queued++;
   refreshUploadBanner();
-  _fsaTrackFor(trackType, ext)
-    .then(track => track
-      ? fsaWriteChunk(track, blob)
-      : idbPutChunk({ sessionId, identity: uploadIdentity, participant, epoch, trackType, chunkIndex: index, ext, meta, blob }))
+  _persistChunk(blob, trackType, ext, index, epoch, sessionId, uploadIdentity, participant, meta)
     .then(() => {
       uploadStats.completed++;
       refreshUploadBanner();
+    })
+    .catch(e => {
+      console.error(`enqueueChunk: ${trackType}#${index} could not be persisted anywhere — recording is corrupt from here on:`, e);
+      if (typeof handleFatalRecordingError === 'function') handleFatalRecordingError(trackType, e);
     });
 }
 
@@ -328,13 +354,30 @@ function finalizeTrack(trackType, meta) {
   pendingFinalizeMeta[trackType] = meta;
 }
 
+// Multiple call sites can each decide the recording needs to be flushed to
+// the server for the same epoch — stopRecording's waitForUploads, and then
+// (independently) leaveSession/endSession/handleSessionEnded right after.
+// Without caching the in-flight/completed run, the second call would redo
+// the whole pass: harmless for IndexedDB tracks (their chunks are already
+// deleted, so it's just a no-op sweep), but for an FSA track it would try to
+// close an already-closed file a second time. Cache by epoch so every caller
+// for the same run shares one outcome instead of re-triggering it.
+let _uploadPass = { epoch: null, promise: null };
+
+function _uploadAllRecordedChunks() {
+  if (_uploadPass.epoch === recordingEpoch && _uploadPass.promise) return _uploadPass.promise;
+  const promise = _doUploadAllRecordedChunks();
+  _uploadPass = { epoch: recordingEpoch, promise };
+  return promise;
+}
+
 // Upload every chunk this tab captured for the current recording
 // (sessionId/identity/epoch), track by track, then finalize each track once
 // its chunks are up. This is what turns a stopped local-only recording into
 // an actual upload — nothing was sent to the server while capture was live.
 // A track that used File System Access (see _fsaTrackFor) uploads as one
 // whole-file "chunk 0" instead of many small IndexedDB-backed chunks.
-async function _uploadAllRecordedChunks() {
+async function _doUploadAllRecordedChunks() {
   const all = await idbGetAllChunks();
   const mine = all.filter(c => c.sessionId === SESSION_ID && c.identity === identity && c.epoch === recordingEpoch);
 
