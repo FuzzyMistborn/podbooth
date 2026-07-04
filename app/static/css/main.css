@@ -2510,6 +2510,19 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .cap-warn   { background: rgba(234,179,8,0.08);  border-color: rgba(234,179,8,0.25);  color: #fde047; }
 .cap-info   { background: rgba(148,163,184,0.08); border-color: rgba(148,163,184,0.2); color: var(--text-2); }
 
+/* ── Prejoin File System Access opt-in ────────────────────────── */
+.fsa-optin {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.fsa-status {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
 /* ── Prejoin recovery banner ────────────────────────────────── */
 .recovery-banner {
   display: flex;

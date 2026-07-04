@@ -47,6 +47,28 @@ async function init() {
   setTimeout(updateJoinButton, 100);
   checkBrowserCapabilities();
   checkInterruptedSession();
+  initFsaOptIn();
+}
+
+// File System Access opt-in (see fsa-store.js): must happen from a real
+// click, since studio's recording start can't (guests get it via a
+// broadcast, not their own gesture) — this is the only place that gesture
+// is available before recording begins. Chromium-only; hidden entirely on
+// browsers without the API (Firefox/Safari) rather than shown then failing.
+function initFsaOptIn() {
+  if (typeof fsaSupported !== 'function' || !fsaSupported()) return;
+  const wrap = document.getElementById('fsa-optin');
+  const btn = document.getElementById('fsa-choose-btn');
+  const status = document.getElementById('fsa-status');
+  if (!wrap || !btn) return;
+  wrap.style.display = 'flex';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const ok = await fsaChooseDirectory();
+    status.textContent = ok ? '✓ Folder selected' : 'Not enabled — recording will use browser storage instead';
+    btn.disabled = false;
+    btn.style.display = ok ? 'none' : '';
+  });
 }
 
 async function populateDevices() {

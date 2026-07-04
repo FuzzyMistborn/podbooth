@@ -1,19 +1,20 @@
 // ── IndexedDB chunk persistence ──────────────────────────────────────────────
 //
-// Every captured chunk is written here the moment it's produced, in addition
-// to (not instead of) the existing in-memory upload queue in upload.js. Once
-// the queue confirms the server has a chunk, its IndexedDB copy is deleted.
+// Recording is local-only: every captured chunk is written here the moment
+// it's produced, and nothing is sent to the server until the recording
+// stops (see _uploadAllRecordedChunks in upload.js), which then reads every
+// chunk back out and deletes it once the server ACKs the upload.
 //
-// Phase 1 (write-through) never reads this data back — its only job was to
-// validate storage/quota/schema in production. Phase 2 (recoverOrphanedChunks
-// in upload.js) reads it: on every join, it sweeps whatever's left here —
-// chunks whose upload never completed because a crash/reload abandoned the
-// in-memory queue that held them — and resends them, making recordings
-// resumable across a browser crash or full page reload.
+// recoverOrphanedChunks (upload.js) also reads this store on every join: it
+// sweeps whatever's still left here — chunks from a run that never finished
+// uploading because a crash/reload/closed tab happened before the post-stop
+// upload pass completed — and resends them, making recordings resumable
+// across a browser crash or full page reload.
 //
 // Every function here is best-effort and swallows its own errors — a failure
-// to persist a chunk to IndexedDB must never affect recording or upload,
-// since the in-memory queue remains the source of truth for a live run.
+// to persist a chunk to IndexedDB must never crash recording itself, though
+// with recording now local-only, a lost chunk here is a lost chunk (there's
+// no in-memory fallback copy once the write-through call has been made).
 
 const IDB_DB_NAME = 'podbooth-recordings';
 const IDB_DB_VERSION = 1;
@@ -99,10 +100,10 @@ async function idbDeleteChunk(sessionId, identity, epoch, trackType, chunkIndex)
   }
 }
 
-// Read one chunk record back out, blob included — used by the upload pump
-// (see uploadIdbChunkWithRetry in upload.js) to fetch a chunk immediately
-// before sending it, rather than holding every queued blob in memory as a
-// promise-chain closure.
+// Read one chunk record back out, blob included — used by the post-stop
+// upload pass (see _uploadAllRecordedChunks in upload.js) to fetch a chunk
+// immediately before sending it, rather than holding every recorded blob in
+// memory at once.
 async function idbGetChunk(sessionId, identity, epoch, trackType, chunkIndex) {
   try {
     const db = await _openIdb();

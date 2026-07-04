@@ -131,7 +131,15 @@ let audioStartTime = null;
 let screenStartTime = null;
 
 let chunkIndex = { audio: 0, video: 0, screen: 0 };
-let uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+// Finalize payload for each track, stashed by finalizeTrack() and consumed by
+// _uploadAllRecordedChunks() once recording stops — upload is deferred until
+// then, so there's no live queue to chain onto anymore.
+let pendingFinalizeMeta = {};
+// File System Access (see fsa-store.js): non-null only if this participant
+// opted in on prejoin and the browser honored the re-grant on this page load.
+// fsaOpenPromises lazily opens one real file per track on its first chunk.
+let fsaDirHandle = null;
+let fsaOpenPromises = {};
 let uploadPending = false;
 let recordingEpoch = '';
 let recordingStarting = false;
@@ -631,9 +639,16 @@ function labelFor(p) {
 // ── Status polling (reconciliation safety net) ───────────────────────────────
 
 function pollSessionStatus() {
-  setInterval(async () => {
+  const intervalId = setInterval(async () => {
     try {
       const r = await fetch(`/api/session/${SESSION_ID}/status`);
+      if (r.status === 404) {
+        // Session is gone for good — nothing left to reconcile against, and
+        // retrying forever just floods the server with 404s from a stale tab.
+        clearInterval(intervalId);
+        if (!IS_HOST) handleSessionEnded();
+        return;
+      }
       if (!r.ok) return;
       const data = await r.json();
 

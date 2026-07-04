@@ -176,12 +176,21 @@ async function startLocalRecording() {
     // own session storage is gone, so the marker needs to outlive the tab.
     try { localStorage.setItem(`podbooth:epoch:${SESSION_ID}:${identity}`, recordingEpoch); } catch (e) {}
     chunkIndex = { audio: 0, video: 0, screen: 0 };
-    uploadQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
+    pendingFinalizeMeta = {};
     uploadStats = { queued: 0, completed: 0 };
     uploadHasError = false;
     uploadStruggling.clear();
-    uploadQueuedBytes.audio = uploadQueuedBytes.video = uploadQueuedBytes.screen = 0;
-    uploadPausedByBackpressure.audio = uploadPausedByBackpressure.video = uploadPausedByBackpressure.screen = false;
+    fsaOpenPromises = {};
+    fsaDirHandle = typeof fsaGetDirectory === 'function' ? await fsaGetDirectory() : null;
+    if (fsaDirHandle) recLog('startLocalRecording: File System Access folder available — recording locally to disk');
+
+    if (typeof indexedDB === 'undefined') {
+      // Recording is write-through-only now — no in-memory fallback copy of
+      // a chunk exists once it's handed to idbPutChunk, so without IndexedDB
+      // there's nowhere for captured chunks to go at all.
+      console.error('startLocalRecording: IndexedDB unavailable — captured chunks cannot be persisted');
+      showToast?.('Recording storage unavailable in this browser — recording may not be saved');
+    }
 
     if (typeof idbCheckQuota === 'function') {
       idbCheckQuota().then(low => {
