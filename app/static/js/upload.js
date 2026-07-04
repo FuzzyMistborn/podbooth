@@ -1,100 +1,89 @@
 // ── Upload pipeline ──────────────────────────────────────────────────────────
+//
+// Recording is local-only while capture is in progress: every chunk is
+// written through the instant it's produced, and nothing is sent to the
+// server until the recording stops. Upload of the whole take then happens
+// in one pass (see _uploadAllRecordedChunks below). Because nothing is held
+// in memory across the whole recording, there's no backpressure concept to
+// apply here — MediaRecorder is never paused for upload reasons.
+//
+// Where a chunk is written through to is bifurcated per track: if this
+// participant opted into File System Access on prejoin (fsaDirHandle set —
+// see fsa-store.js) and the browser still honors that grant on this page
+// load, every chunk for a track is appended to one real local file instead
+// of a separate IndexedDB record. Otherwise it falls back to IndexedDB
+// exactly as before. A track's choice is made once, on its first chunk, and
+// held for the rest of that recording.
 
-// Backpressure: if the upload queue can't keep up with capture (slow uplink,
-// 4K video, long recordings), unflushed blobs pile up in memory as closures
-// held by the promise chain. Cap how many bytes can be buffered per track —
-// once over the high watermark, pause the corresponding MediaRecorder until
-// the queue drains back below the low watermark, rather than let RAM grow
-// unbounded. PCM audio isn't paused (its worklet can't be paused mid-stream
-// and its chunks are small relative to video/screen), only MediaRecorder-based
-// tracks (video, screen, opus-fallback audio).
-const UPLOAD_QUEUE_HIGH_WATERMARK_BYTES = 200 * 1024 * 1024;
-const UPLOAD_QUEUE_LOW_WATERMARK_BYTES = 50 * 1024 * 1024;
-const uploadQueuedBytes = { audio: 0, video: 0, screen: 0 };
-const uploadPausedByBackpressure = { audio: false, video: false, screen: false };
-
-function _recorderFor(trackType) {
-  if (trackType === 'video') return typeof videoRecorder !== 'undefined' ? videoRecorder : null;
-  if (trackType === 'screen') return typeof screenRecorder !== 'undefined' ? screenRecorder : null;
-  if (trackType === 'audio') return typeof audioRecorder !== 'undefined' ? audioRecorder : null;
-  return null;
+// Lazily opens (and caches) the local file for a track the first time one of
+// its chunks arrives. Returns null if FSA isn't in play for this recording,
+// or if opening the file failed for some reason — either way the caller
+// falls back to IndexedDB for that chunk.
+function _fsaTrackFor(trackType, ext) {
+  if (!fsaDirHandle) return Promise.resolve(null);
+  if (!fsaOpenPromises[trackType]) {
+    fsaOpenPromises[trackType] = fsaOpenTrackFile(fsaDirHandle, trackType, recordingEpoch, ext, displayName)
+      .then(track => { track.ext = ext; return track; })
+      .catch(e => {
+        console.warn(`_fsaTrackFor: open failed for ${trackType}, falling back to IndexedDB:`, e);
+        return null;
+      });
+  }
+  return fsaOpenPromises[trackType];
 }
 
-function _applyBackpressure(trackType) {
-  if (trackType === 'audio') return; // PCM path can't be paused; opus fallback chunks are small
-  const rec = _recorderFor(trackType);
-  if (!rec) return;
-  if (uploadQueuedBytes[trackType] >= UPLOAD_QUEUE_HIGH_WATERMARK_BYTES && rec.state === 'recording') {
-    recLog('backpressure: pausing %s recorder (queued=%d bytes)', trackType, uploadQueuedBytes[trackType]);
-    uploadPausedByBackpressure[trackType] = true;
-    rec.pause();
-  } else if (uploadPausedByBackpressure[trackType] && uploadQueuedBytes[trackType] <= UPLOAD_QUEUE_LOW_WATERMARK_BYTES && rec.state === 'paused') {
-    recLog('backpressure: resuming %s recorder (queued=%d bytes)', trackType, uploadQueuedBytes[trackType]);
-    uploadPausedByBackpressure[trackType] = false;
-    rec.resume();
+// A chunk's write-through is the only copy of that chunk that will ever
+// exist — recording is local-only until stop. If it can't be persisted
+// anywhere (FSA write fails mid-track, or IndexedDB rejects it — quota
+// exceeded, DB blocked, etc.), continuing to record while silently missing
+// data produces a corrupt take the user won't discover until playback. Fail
+// loud instead: stop recording immediately and tell the user, same as any
+// other unrecoverable capture error.
+async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uploadIdentity, participant, meta) {
+  const track = await _fsaTrackFor(trackType, ext);
+  if (track) {
+    try {
+      await fsaWriteChunk(track, blob);
+      return;
+    } catch (e) {
+      // Don't retry FSA for the rest of this track — a mid-recording failure
+      // (permission revoked, disk full, drive unplugged) is likely to recur,
+      // and mixing backends within one track complicates recovery. Fall back
+      // to IndexedDB for every remaining chunk of this track instead.
+      console.warn(`_persistChunk: FSA write failed for ${trackType}#${index}, falling back to IndexedDB for rest of track:`, e);
+      fsaOpenPromises[trackType] = Promise.resolve(null);
+    }
   }
-}
-
-// Fetch a chunk's blob back out of IndexedDB and upload it — the pump reads
-// one blob at a time this way instead of the promise chain closing over
-// every queued blob directly, so a large backpressure backlog costs disk,
-// not RAM. `fallbackBlob` is only non-null when IndexedDB wasn't available
-// to write through to in the first place (see enqueueChunk below), in which
-// case there's nothing durable to read back and the direct reference is the
-// only copy that exists.
-async function uploadIdbChunkWithRetry(sessionId, uploadIdentity, epoch, trackType, index, ext, meta, fallbackBlob, participant) {
-  let blob = fallbackBlob;
-  if (!blob) {
-    const rec = await idbGetChunk(sessionId, uploadIdentity, epoch, trackType, index);
-    blob = rec ? rec.blob : null;
-  }
-  if (!blob) {
-    console.error(`uploadIdbChunkWithRetry: ${trackType}#${index} missing from IndexedDB — chunk lost`);
-    uploadHasError = true;
-    return;
-  }
-  await uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta, sessionId, uploadIdentity, participant);
-  idbDeleteChunk(sessionId, uploadIdentity, epoch, trackType, index);
+  await idbPutChunk({ sessionId, identity: uploadIdentity, participant, epoch, trackType, chunkIndex: index, ext, meta, blob });
 }
 
 function enqueueChunk(blob, trackType, ext, meta = {}) {
   const index = chunkIndex[trackType]++;
   const epoch = recordingEpoch;
-  const size = blob.size;
   const sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName;
   uploadStats.queued++;
-  uploadQueuedBytes[trackType] += size;
-  _applyBackpressure(trackType);
   refreshUploadBanner();
-  // Write-through to IndexedDB first — the pump below reads the blob back
-  // from there rather than closing over it, so the in-memory queue only
-  // needs to retain small scalars, not the backlog's actual bytes. The pump
-  // is chained onto this same write promise (not fired independently) so it
-  // can never race ahead of the write and find nothing there yet.
-  const putPromise = idbPutChunk({ sessionId, identity: uploadIdentity, participant, epoch, trackType, chunkIndex: index, ext, meta, blob });
-  const fallbackBlob = _idbAvailable() ? null : blob;
-  uploadQueues[trackType] = uploadQueues[trackType]
-    .then(() => putPromise)
-    .then(() => uploadIdbChunkWithRetry(sessionId, uploadIdentity, epoch, trackType, index, ext, meta, fallbackBlob, participant))
+  _persistChunk(blob, trackType, ext, index, epoch, sessionId, uploadIdentity, participant, meta)
     .then(() => {
       uploadStats.completed++;
-      uploadQueuedBytes[trackType] -= size;
-      _applyBackpressure(trackType);
       refreshUploadBanner();
+    })
+    .catch(e => {
+      console.error(`enqueueChunk: ${trackType}#${index} could not be persisted anywhere — recording is corrupt from here on:`, e);
+      if (typeof handleFatalRecordingError === 'function') handleFatalRecordingError(trackType, e);
     });
-  return uploadQueues[trackType];
 }
 
 // ── Crash recovery (resume on reload) ───────────────────────────────────────
-// A tab crash, browser close, or hard reload during recording abandons
-// whatever's still sitting in the in-memory upload queue — but the
-// write-through above (idbPutChunk in enqueueChunk) means an on-disk copy
-// survives in IndexedDB. On every join, sweep the whole store and resend
-// anything still there: it belongs to a run that never finished uploading,
-// since a successful run always cleans up after itself (idbDeleteChunk /
-// idbDeleteEpoch). The chunks' own stored session/identity/epoch are used
-// rather than the current join's — orphaned capture is very likely from a
-// previous browser session with a different randomized identity.
+// A tab crash, browser close, or hard reload — whether mid-recording or
+// mid-upload during the post-stop pass — leaves chunks sitting in
+// IndexedDB with nothing left to drive them to the server. On every join,
+// sweep the whole store and resend anything still there: it belongs to a
+// run that never finished uploading, since a successful run always cleans
+// up after itself (idbDeleteChunk / idbDeleteEpoch). The chunks' own stored
+// session/identity/epoch are used rather than the current join's — orphaned
+// capture is very likely from a previous browser session with a different
+// randomized identity.
 
 // Recover one (sessionId, identity, epoch, trackType) group: ask the server
 // how far it already got (item 3 — /api/upload/chunks), resend only the
@@ -257,6 +246,14 @@ const CHUNK_RETRY_BUDGET_MS = 10 * 60 * 1000;
 // trouble without us ever abandoning a chunk mid-flight.
 const uploadStruggling = new Set();
 
+// A hung TCP connection (common on a flaky VPN/tunnel link) leaves fetch()
+// neither resolving nor rejecting — without an explicit timeout, a single
+// wedged attempt blocks every retry behind it for good, since the retry loop
+// never even gets to see it fail. Abort and retry instead of waiting forever;
+// backoff between attempts still applies on the resulting AbortError same as
+// any other failure.
+const CHUNK_UPLOAD_TIMEOUT_MS = 60 * 1000;
+
 async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName) {
   recLog('uploadChunk: %s #%d size=%d', trackType, index, blob.size);
   const key = `${trackType}#${index}`;
@@ -264,6 +261,8 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
   let attempt = 0;
   while (true) {
     attempt++;
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), CHUNK_UPLOAD_TIMEOUT_MS);
     try {
       const form = new FormData();
       form.append('session_id', sessionId);
@@ -279,7 +278,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       }
       form.append('file', blob, `chunk_${index}.${ext}`);
 
-      const r = await fetch('/api/upload/chunk', { method: 'POST', body: form });
+      const r = await fetch('/api/upload/chunk', { method: 'POST', body: form, signal: abort.signal });
       if (r.ok) {
         recLog('uploadChunk: %s #%d ok', trackType, index);
         uploadStruggling.delete(key);
@@ -300,6 +299,8 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
         return false; // let the queue drain so /finalize fires and the server-side gap check flags it
       }
       await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }
@@ -314,6 +315,8 @@ async function _sendFinalizeWithRetry(trackType, body) {
   let attempt = 0;
   while (true) {
     attempt++;
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), CHUNK_UPLOAD_TIMEOUT_MS);
     try {
       // keepalive lets this tiny JSON POST survive a tab close that would
       // otherwise abort an in-flight fetch (the queue only reaches finalize
@@ -324,6 +327,7 @@ async function _sendFinalizeWithRetry(trackType, body) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         keepalive: true,
+        signal: abort.signal,
       });
       recLog('finalizeTrack: /finalize %s responded %d', trackType, r.status);
       if (r.ok) return;
@@ -336,27 +340,99 @@ async function _sendFinalizeWithRetry(trackType, body) {
         return;
       }
       await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }
 
 function finalizeTrack(trackType, meta) {
-  const epoch = recordingEpoch;
-  recLog('finalizeTrack: %s epoch=%s meta=%o', trackType, epoch, meta);
-  // Chain finalize onto the upload queue so it only fires after every
-  // chunk for this track has been flushed to the server.
-  uploadQueues[trackType] = uploadQueues[trackType].then(async () => {
+  recLog('finalizeTrack: %s epoch=%s meta=%o (deferred until stop)', trackType, recordingEpoch, meta);
+  // Recording is local-only until the stop — just remember this track's
+  // finalize payload. _uploadAllRecordedChunks sends it once every chunk for
+  // this track has been uploaded.
+  pendingFinalizeMeta[trackType] = meta;
+}
+
+// Multiple call sites can each decide the recording needs to be flushed to
+// the server for the same epoch — stopRecording's waitForUploads, and then
+// (independently) leaveSession/endSession/handleSessionEnded right after.
+// Without caching the in-flight/completed run, the second call would redo
+// the whole pass: harmless for IndexedDB tracks (their chunks are already
+// deleted, so it's just a no-op sweep), but for an FSA track it would try to
+// close an already-closed file a second time. Cache by epoch so every caller
+// for the same run shares one outcome instead of re-triggering it.
+let _uploadPass = { epoch: null, promise: null };
+
+function _uploadAllRecordedChunks() {
+  if (_uploadPass.epoch === recordingEpoch && _uploadPass.promise) return _uploadPass.promise;
+  const promise = _doUploadAllRecordedChunks();
+  _uploadPass = { epoch: recordingEpoch, promise };
+  return promise;
+}
+
+// Upload every chunk this tab captured for the current recording
+// (sessionId/identity/epoch), track by track, then finalize each track once
+// its chunks are up. This is what turns a stopped local-only recording into
+// an actual upload — nothing was sent to the server while capture was live.
+// A track that used File System Access (see _fsaTrackFor) uploads as one
+// whole-file "chunk 0" instead of many small IndexedDB-backed chunks.
+async function _doUploadAllRecordedChunks() {
+  const all = await idbGetAllChunks();
+  const mine = all.filter(c => c.sessionId === SESSION_ID && c.identity === identity && c.epoch === recordingEpoch);
+
+  const chunksByTrack = { audio: [], video: [], screen: [] };
+  for (const rec of mine) chunksByTrack[rec.trackType]?.push(rec);
+
+  uploadStats.queued = mine.length;
+  uploadStats.completed = 0;
+  refreshUploadBanner();
+
+  // Union of tracks that have a finalize payload, an open FSA file, or leftover
+  // IndexedDB chunks — a track can have chunks/an open file without finalize
+  // ever having been called for it (e.g. its recorder never fired onstop), and
+  // those chunks still need to go up even though there's no meta to finalize.
+  const tracks = new Set([
+    ...Object.keys(pendingFinalizeMeta),
+    ...Object.keys(fsaOpenPromises),
+    ...Object.keys(chunksByTrack).filter(t => chunksByTrack[t].length > 0),
+  ]);
+  await Promise.all([...tracks].map(async (trackType) => {
+    const fsaTrack = fsaOpenPromises[trackType] ? await fsaOpenPromises[trackType] : null;
+    if (fsaTrack) {
+      uploadStats.queued++;
+      refreshUploadBanner();
+      recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, fsaTrack.bytesWritten);
+      const file = await fsaCloseTrackFile(fsaTrack);
+      const ok = await uploadChunkWithRetry(file, trackType, 0, fsaTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName);
+      uploadStats.completed++;
+      refreshUploadBanner();
+      if (!ok) return; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
+    } else {
+      const chunks = chunksByTrack[trackType].sort((a, b) => a.chunkIndex - b.chunkIndex);
+      for (const c of chunks) {
+        const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+        if (!rec) { uploadStats.completed++; continue; } // already gone — nothing to send
+        const ok = await uploadChunkWithRetry(rec.blob, trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, SESSION_ID, identity, displayName);
+        if (!ok) return; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
+        idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+        uploadStats.completed++;
+        refreshUploadBanner();
+      }
+    }
+    if (!(trackType in pendingFinalizeMeta)) return; // chunks uploaded, but no finalize payload was ever recorded
+    const meta = pendingFinalizeMeta[trackType];
+    delete pendingFinalizeMeta[trackType];
     recLog('finalizeTrack: sending /finalize for %s', trackType);
     await _sendFinalizeWithRetry(trackType, {
       session_id: SESSION_ID,
       participant: displayName,
       identity: identity,
       track_type: trackType,
-      epoch: epoch || '',
+      epoch: recordingEpoch || '',
       ...meta,
     });
-  });
-  return uploadQueues[trackType];
+  }));
 }
 
 async function waitForUploads() {
@@ -364,7 +440,7 @@ async function waitForUploads() {
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
   try {
-    await Promise.all(Object.values(uploadQueues));
+    await _uploadAllRecordedChunks();
     localStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
 
     // If any chunk exhausted its retry budget, the recording is incomplete —
@@ -375,7 +451,7 @@ async function waitForUploads() {
     }
 
     // Every chunk uploaded cleanly, so its IndexedDB copy should already be
-    // gone (deleted in enqueueChunk's completion handler) — this is just a
+    // gone (deleted in _uploadAllRecordedChunks's loop) — this is just a
     // backstop sweep in case any individual delete failed along the way.
     idbDeleteEpoch(SESSION_ID, identity, recordingEpoch);
 

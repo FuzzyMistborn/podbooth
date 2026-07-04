@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 import aiofiles
@@ -55,6 +56,13 @@ def is_merging(directory: Path) -> bool:
 # Prevents recover_orphaned_chunks from queuing duplicate tasks while ffmpeg runs.
 _assembly_in_progress: set[tuple[str, str, str]] = set()
 
+# How long a (track_type, epoch) group's chunk files must sit untouched before
+# recover_orphaned_chunks will treat it as abandoned rather than mid-upload.
+# Chunk retries back off up to 15s between attempts (see CHUNK_RETRY_BUDGET_MS
+# in upload.js), so this needs enough margin to not mistake a slow-but-live
+# retry for a crash.
+ORPHAN_IDLE_THRESHOLD_S = 60
+
 # Take-number assignment: maps (dir, epoch) → (slug, take) so all tracks for
 # the same recording run share a consistent take number.
 _epoch_take_map: dict[tuple[str, str], tuple[str, int]] = {}
@@ -66,7 +74,10 @@ _metadata_lock = asyncio.Lock()
 # must never contain path separators or glob metacharacters.
 _EPOCH_RE = re.compile(r"^[A-Za-z0-9]{0,64}$")
 
-_MAX_CHUNK_BYTES = 500 * 1024 * 1024  # 500 MB per chunk
+# Doubles as the cap for a File System Access whole-recording upload (see
+# fsa-store.js), which arrives as a single "chunk 0" rather than many small
+# MediaRecorder-timeslice pieces — a long take can be several GB.
+_MAX_CHUNK_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB
 
 # Matches chunk files in both epoch and no-epoch forms:
 #   audio_abc123_chunk_000000.raw   →  track=audio  epoch=abc123  ext=raw
@@ -283,32 +294,53 @@ async def upload_chunk(
         raise HTTPException(status_code=400, detail="Invalid chunk_index")
     _validate_epoch(epoch)
 
-    content = await file.read()
-    if len(content) == 0:
+    directory = participant_dir(session, participant, identity)
+    prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
+    chunk_path = directory / f"{prefix}chunk_{chunk_index:06d}.{ext}"
+
+    # Stream to disk rather than `await file.read()` — a normal MediaRecorder
+    # chunk is a few MB, but a File System Access whole-recording upload (see
+    # fsa-store.js) can be many GB, and buffering that entirely in memory
+    # before writing a single byte would be a self-inflicted OOM.
+    size = 0
+    # Leading dot keeps this out of the chunk_* glob patterns assemble_track
+    # and recover_orphaned_chunks use — a large (FSA whole-file) upload can
+    # take a while to stream in, and either of those matching a still-being-
+    # written file would be the same premature-assembly race fixed above.
+    tmp_path = chunk_path.with_name(f".{chunk_path.name}.part")
+    try:
+        async with aiofiles.open(tmp_path, "wb") as f:
+            while True:
+                piece = await file.read(8 * 1024 * 1024)
+                if not piece:
+                    break
+                size += len(piece)
+                if size > _MAX_CHUNK_BYTES:
+                    raise HTTPException(status_code=413, detail="Chunk exceeds size limit")
+                await f.write(piece)
+    except HTTPException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    if size == 0:
+        tmp_path.unlink(missing_ok=True)
         logger.info("chunk skip empty: %s/%s #%d", track_type, participant, chunk_index)
         return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
-    if len(content) > _MAX_CHUNK_BYTES:
-        raise HTTPException(status_code=413, detail="Chunk exceeds size limit")
-    if expected_size >= 0 and len(content) != expected_size:
+    if expected_size >= 0 and size != expected_size:
         # Bytes arrived but don't match what the browser actually sent — a
         # truncating proxy or a flaky connection can still return 200/close
         # cleanly despite dropping part of the body. Reject so the client's
         # existing retry loop resends the chunk instead of writing a corrupt
         # (short) chunk file that assembly would silently include.
+        tmp_path.unlink(missing_ok=True)
         logger.error(
             "chunk size mismatch: %s/%s #%d expected=%d got=%d",
-            track_type, participant, chunk_index, expected_size, len(content),
+            track_type, participant, chunk_index, expected_size, size,
         )
         raise HTTPException(status_code=400, detail="Chunk size mismatch")
 
-    directory = participant_dir(session, participant, identity)
-    prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
-    chunk_path = directory / f"{prefix}chunk_{chunk_index:06d}.{ext}"
-
-    async with aiofiles.open(chunk_path, "wb") as f:
-        await f.write(content)
-
-    logger.info("chunk saved: %s/%s #%d size=%d epoch=%r", track_type, participant, chunk_index, len(content), epoch)
+    tmp_path.rename(chunk_path)
+    logger.info("chunk saved: %s/%s #%d size=%d epoch=%r", track_type, participant, chunk_index, size, epoch)
     return JSONResponse({"ok": True, "chunk": chunk_index})
 
 
@@ -648,17 +680,40 @@ async def recover_orphaned_chunks(session) -> int:
     assembly for each orphaned (track_type, epoch) group found. The filesystem
     scan is fast; actual assembly runs in background tasks tracked by _tasks.
     Returns the number of tracks queued.
+
+    Skipped entirely while the session is actively recording: recording is
+    local-only until stop (see upload.js/_uploadAllRecordedChunks), so every
+    chunk on disk for the live epoch is legitimately unfinalized for the
+    whole recording, not abandoned. Without this guard, anything that hits
+    /api/session/{id}/recordings mid-recording (e.g. opening the Files
+    panel) would "recover" an in-progress take early, consuming its chunks
+    (including the container track's header, chunk 0) and leaving every
+    chunk captured afterward assembled without one — corrupting the file.
+    session.recording flips False as soon as stop is requested — but the
+    client's own post-stop upload pass (_uploadAllRecordedChunks in
+    upload.js) then sends that track's chunks to the server one at a time,
+    so there's still a window, after stop, where chunks for a live epoch
+    keep landing on disk well before /finalize arrives. Guarding on
+    session.recording alone doesn't cover that window, so a group is also
+    only treated as orphaned once none of its chunk files have been
+    touched recently — actively-uploading chunks keep pushing that
+    timestamp forward, so recovery only fires once the client has genuinely
+    gone quiet (crashed, closed tab) rather than just being mid-upload.
     """
+    if session.recording:
+        return 0
+
     recordings_dir = Path(settings.recordings_dir) / session.dir_name
     if not recordings_dir.is_dir():
         return 0
 
     queued = 0
+    now = time.time()
     for pdir in recordings_dir.iterdir():
         if not pdir.is_dir():
             continue
 
-        pending: dict[tuple[str, str], str] = {}  # (track_type, epoch) → ext
+        pending: dict[tuple[str, str], tuple[str, float]] = {}  # (track_type, epoch) → (ext, latest_mtime)
         for f in pdir.iterdir():
             if not f.is_file():
                 continue
@@ -668,9 +723,14 @@ async def recover_orphaned_chunks(session) -> int:
             track_type = m.group(1)
             epoch = m.group(2) or ""
             ext = m.group(3)
-            pending.setdefault((track_type, epoch), ext)
+            mtime = f.stat().st_mtime
+            key = (track_type, epoch)
+            prev = pending.get(key)
+            pending[key] = (ext, max(mtime, prev[1]) if prev else mtime)
 
-        for (track_type, epoch), ext in pending.items():
+        for (track_type, epoch), (ext, latest_mtime) in pending.items():
+            if now - latest_mtime < ORPHAN_IDLE_THRESHOLD_S:
+                continue
             in_progress_key = (str(pdir), track_type, epoch)
             if in_progress_key in _assembly_in_progress:
                 continue

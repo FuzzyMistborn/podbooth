@@ -1078,7 +1078,7 @@ async function leaveSession() {
   }
 
   showUploadBanner('uploading');
-  await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+  await _uploadAllRecordedChunks().catch(() => {});
   // Clear flag so onBeforeUnload doesn't fire a second confirmation on navigation
   uploadPending = false;
 
@@ -1109,7 +1109,7 @@ async function endSession() {
   } catch (e) { console.warn('End session API failed:', e); }
 
   showUploadBanner('uploading');
-  await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+  await _uploadAllRecordedChunks().catch(() => {});
   // Clear flag so onBeforeUnload doesn't fire a second confirmation on navigation
   uploadPending = false;
 
@@ -1126,7 +1126,7 @@ async function handleSessionEnded() {
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
   await new Promise(r => setTimeout(r, 100));
-  await Promise.allSettled([uploadQueues.audio, uploadQueues.video, uploadQueues.screen]);
+  await _uploadAllRecordedChunks().catch(() => {});
   window.removeEventListener('beforeunload', _unloadGuard);
 
   // If cloud upload is configured, send guests to the local upload page so they

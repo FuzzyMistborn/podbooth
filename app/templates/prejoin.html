@@ -36,6 +36,11 @@
 
     <div id="capability-warnings" class="capability-warnings" style="display:none"></div>
 
+    <div id="fsa-optin" class="fsa-optin" style="display:none">
+      <button class="btn-secondary" id="fsa-choose-btn" type="button">Enable local recording folder (recommended)</button>
+      <span id="fsa-status" class="fsa-status"></span>
+    </div>
+
     <div id="recovery-banner" class="recovery-banner" style="display:none">
       <span>⚡ Interrupted recording detected — your upload will resume automatically when you rejoin.</span>
     </div>
@@ -53,5 +58,6 @@
   const HOST_TOKEN = "{{ host_token }}";
 </script>
 
+<script src="/static/js/fsa-store.js?v={{ asset_v }}"></script>
 <script src="/static/js/prejoin.js?v={{ asset_v }}"></script>
 {% endblock %}
