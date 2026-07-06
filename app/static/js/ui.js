@@ -1754,7 +1754,10 @@ function renderTimerQueue() {
     rmBtn.textContent = '×';
     rmBtn.title = 'Remove';
     rmBtn.addEventListener('click', () => {
-      if (isActive && !confirm(`"${topic.name}" is currently running. Remove it anyway?`)) return;
+      const msg = isActive
+        ? `"${topic.name}" is ${timerState.paused ? 'paused' : 'currently running'}. Remove it anyway?`
+        : `Remove "${topic.name}" from the queue?`;
+      if (!confirm(msg)) return;
       if (timerEditIndex === i) cancelEditTopic();
       timerQueue.splice(i, 1);
       saveTimerQueue();
