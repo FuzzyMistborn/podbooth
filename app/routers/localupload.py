@@ -4,7 +4,7 @@ Participant local-recording upload page.
 Security model
 ──────────────
 • The page and upload API are gated by a per-session upload_token
-  (secrets.token_urlsafe(32), stored on the Session, valid for 48 h from
+  (secrets.token_urlsafe(32), stored on the Session, valid for 14 days from
   session creation).  The token is embedded in the studio for guests only;
   they pass it as ?token= on the page GET and X-Upload-Token on every POST.
 • Filenames are validated against a strict allowlist (no path separators,
@@ -56,7 +56,7 @@ templates.env.globals["app_version"] = APP_VERSION
 # ── Security constants ─────────────────────────────────────────────────────────
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
-UPLOAD_TOKEN_TTL = timedelta(days=30)
+UPLOAD_TOKEN_TTL = timedelta(days=14)
 
 # Accepted extensions — the extension check is the primary file-type gate.
 _ALLOWED: frozenset[str] = frozenset({

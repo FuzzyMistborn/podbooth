@@ -100,17 +100,26 @@ def _validate_epoch(epoch) -> str:
 _CHUNK_INDEX_RE = re.compile(r'_chunk_(\d+)\.')
 
 
-def _find_missing_chunk_indices(chunks: list[Path]) -> list[int]:
-    """Given chunk files sorted by name, return any gaps in the 0..N index sequence."""
-    indices = []
+def _find_missing_chunk_indices(chunks: list[Path], subsumes: int = 0) -> list[int]:
+    """Given chunk files sorted by name, return any gaps in the 0..N index sequence.
+
+    `subsumes` handles an FSA→IndexedDB failover: when a track's local file is
+    uploaded as chunk 0 but actually contains the first `subsumes` chunks
+    (original indices 0..subsumes-1), those folded indices aren't on disk as
+    separate files. Treat them as present so the real, contiguous bytestream
+    isn't misreported as missing chunks 1..subsumes-1.
+    """
+    present = set()
     for c in chunks:
         m = _CHUNK_INDEX_RE.search(c.name)
         if m:
-            indices.append(int(m.group(1)))
-    if not indices:
+            present.add(int(m.group(1)))
+    if not present:
         return []
-    indices.sort()
-    return [i for i in range(indices[0], indices[-1] + 1) if i not in indices]
+    if subsumes > 1 and 0 in present:
+        present.update(range(0, subsumes))
+    lo, hi = min(present), max(present)
+    return [i for i in range(lo, hi + 1) if i not in present]
 
 
 def _oname(base: str, epoch: str, ext: str, mid: str = "") -> str:
@@ -332,9 +341,18 @@ async def upload_chunk(
         raise
 
     if size == 0:
-        tmp_path.unlink(missing_ok=True)
-        logger.info("chunk skip empty: %s/%s #%d", track_type, participant, chunk_index)
-        return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
+        # A genuinely empty chunk is only legitimate when the client didn't
+        # tell us how big it should be (old client, expected_size < 0). If the
+        # client sent expected_size > 0 and we received nothing, the body was
+        # dropped in transit (a proxy/connection that truncated the whole
+        # payload but still closed cleanly) — fall through to the size-mismatch
+        # rejection below so the client's retry loop resends it, rather than
+        # ACKing it as "skipped empty" and letting the client delete its only
+        # copy of a real, non-empty chunk.
+        if expected_size <= 0:
+            tmp_path.unlink(missing_ok=True)
+            logger.info("chunk skip empty: %s/%s #%d", track_type, participant, chunk_index)
+            return JSONResponse({"ok": True, "chunk": chunk_index, "skipped": "empty"})
     if expected_size >= 0 and size != expected_size:
         # Bytes arrived but don't match what the browser actually sent — a
         # truncating proxy or a flaky connection can still return 200/close
@@ -350,6 +368,25 @@ async def upload_chunk(
 
     tmp_path.rename(chunk_path)
     logger.info("chunk saved: %s/%s #%d size=%d epoch=%r", track_type, participant, chunk_index, size, epoch)
+
+    # An FSA→IndexedDB failover uploads its salvaged local file as chunk 0 and
+    # reports how many original chunks that one file folds in. Persist it so
+    # assemble_track's gap check (and the recovery path, which re-reads from
+    # disk) knows chunk 0 covers indices 0..subsumes-1 rather than just 0.
+    if chunk_index == 0 and chunk_meta:
+        try:
+            subsumes = int(json.loads(chunk_meta).get("subsumes_chunks", 0))
+        except (ValueError, TypeError):
+            subsumes = 0
+        if subsumes > 1:
+            epoch_tag = f"_{epoch}" if epoch else ""
+            try:
+                (directory / f"{track_type}{epoch_tag}_subsumes.json").write_text(
+                    json.dumps({"subsumes_chunks": subsumes})
+                )
+            except OSError as e:
+                logger.warning("could not write subsumes sidecar for %s/%s: %s", track_type, participant, e)
+
     return JSONResponse({"ok": True, "chunk": chunk_index})
 
 
@@ -443,7 +480,18 @@ async def assemble_track(
 
     epoch_tag = f"_{epoch}" if epoch else ""
 
-    missing = _find_missing_chunk_indices(chunks)
+    # A failed-over FSA track's chunk 0 folds in the first `subsumes` chunks
+    # (see upload_chunk); account for those so the gap check doesn't flag the
+    # coalesced indices as missing.
+    subsumes = 0
+    subsumes_path = directory / f"{track_type}{epoch_tag}_subsumes.json"
+    if subsumes_path.exists():
+        try:
+            subsumes = int(json.loads(subsumes_path.read_text()).get("subsumes_chunks", 0))
+        except (ValueError, TypeError, OSError):
+            subsumes = 0
+
+    missing = _find_missing_chunk_indices(chunks, subsumes)
     if missing:
         logger.error(
             "assemble: %s/%s epoch=%r is missing chunk index(es) %s — "
@@ -452,6 +500,12 @@ async def assemble_track(
         )
         marker = directory / f"{track_type}{epoch_tag}_MISSING_CHUNKS.txt"
         marker.write_text(f"missing chunk indices: {missing}\n")
+
+    # The subsumes sidecar has served its only purpose (the gap check above).
+    # A failed ffmpeg run below leaves a .failed source that blocks any
+    # automatic re-assembly of this group, so there's no later read to preserve
+    # it for — drop it now so it doesn't linger in the participant dir.
+    subsumes_path.unlink(missing_ok=True)
 
     # Byte-concatenate chunks in index order into one source file.
     source_ext = chunks[0].suffix  # .raw / .webm / .mp4

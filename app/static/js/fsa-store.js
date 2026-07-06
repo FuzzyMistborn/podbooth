@@ -124,12 +124,18 @@ async function fsaOpenTrackFile(dirHandle, trackType, epoch, ext, participant) {
   const name = `${fsaSlug(participant)}_${trackType}_${epoch}.${ext}`;
   const fileHandle = await dirHandle.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
-  return { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, closed: false };
+  return { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, chunksWritten: 0, closed: false };
 }
 
 async function fsaWriteChunk(track, blob) {
   await track.writable.write(blob);
   track.bytesWritten += blob.size;
+  // Count only chunks that actually landed in the file (incremented after the
+  // write resolves). If a later write fails and the track fails over to
+  // IndexedDB, this is exactly how many original chunk indices the salvaged
+  // file already holds — the upload path passes it to the server as
+  // subsumes_chunks so the gap check doesn't flag the folded indices missing.
+  track.chunksWritten += 1;
   if (track.bytesWritten - track.flushedBytes >= FSA_FLUSH_THRESHOLD_BYTES) {
     await fsaFlushTrackFile(track);
   }

@@ -443,7 +443,18 @@ async function _doUploadAllRecordedChunks() {
       refreshUploadBanner();
       recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
       const file = await fsaCloseTrackFile(localTrack);
-      const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName);
+      // If this track failed over from FSA to IndexedDB mid-recording, the
+      // whole-file we're uploading as chunk 0 already contains the first
+      // `chunksWritten` chunks (original indices 0..chunksWritten-1); the rest
+      // went to IndexedDB and upload below at their original (non-zero)
+      // indices. Tell the server how many indices chunk 0 folds in so its gap
+      // check doesn't flag 1..chunksWritten-1 as missing — the bytes are all
+      // there, just coalesced into one file. (A clean FSA track has no
+      // trailing IndexedDB chunks, so there's no gap to explain — send nothing.)
+      const wholeMeta = (failedTrack && failedTrack.chunksWritten > 1)
+        ? { subsumes_chunks: failedTrack.chunksWritten }
+        : {};
+      const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName);
       uploadStats.completed++;
       refreshUploadBanner();
       delete fsaFailedTracks[trackType];

@@ -27,6 +27,32 @@ templates.env.globals["asset_v"] = ASSET_VERSION
 templates.env.globals["app_version"] = APP_VERSION
 
 
+# Background orphan-recovery scans kicked off from /recordings polls. The
+# event loop keeps only a weak reference to a bare task, so we hold a strong
+# one here until it finishes (otherwise it can be garbage-collected mid-run).
+# _recovery_in_flight coalesces the every-3s poll into at most one scan per
+# session at a time — without it a slow scan would stack up dozens of
+# concurrent filesystem sweeps.
+_recovery_tasks: set[asyncio.Task] = set()
+_recovery_in_flight: set[str] = set()
+
+
+def _kick_recovery(session) -> None:
+    if session.id in _recovery_in_flight:
+        return
+    _recovery_in_flight.add(session.id)
+
+    async def _run():
+        try:
+            await recover_orphaned_chunks(session)
+        finally:
+            _recovery_in_flight.discard(session.id)
+
+    task = asyncio.ensure_future(_run())
+    _recovery_tasks.add(task)
+    task.add_done_callback(_recovery_tasks.discard)
+
+
 def _is_host(host_token, session) -> bool:
     if not isinstance(host_token, str):
         return False
@@ -354,14 +380,14 @@ def _parse_take(stem: str, ftype: str) -> int | None:
 
 
 @router.get("/api/session/{session_id}/recordings")
-async def get_recordings(session_id: str):
+async def get_recordings(session_id: str, _: None = Depends(require_host)):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     # Trigger orphan recovery so a client crash doesn't require a server
     # restart before the host can see assembled files. Fast scan; assembly
     # runs in background tasks and won't block this response.
-    asyncio.ensure_future(recover_orphaned_chunks(session))
+    _kick_recovery(session)
     recordings_path = Path(settings.recordings_dir)
     session_path = recordings_path / session.dir_name
     files = []
@@ -656,9 +682,10 @@ async def create_marker(session_id: str, request: Request):
     time_str = ""
     if recording_time_s is not None:
         try:
-            t = int(recording_time_s)
-            m, s = divmod(t, 60)
-            time_str = f"[{m}:{s:02d}] "
+            t = max(0, int(recording_time_s))
+            h, rem = divmod(t, 3600)
+            m, s = divmod(rem, 60)
+            time_str = f"[{h}:{m:02d}:{s:02d}] " if h else f"[{m}:{s:02d}] "
         except (TypeError, ValueError):
             pass
 
