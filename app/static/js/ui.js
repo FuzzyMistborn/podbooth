@@ -1020,6 +1020,21 @@ function setupKeyboardShortcuts() {
       case 'T':
         if (IS_HOST) { e.preventDefault(); document.getElementById('btn-timer')?.click(); }
         break;
+      case 'p':
+      case 'P':
+        if (IS_HOST) { e.preventDefault(); btnTimerSS?.click(); }
+        break;
+      case 'n':
+      case 'N':
+        if (IS_HOST) { e.preventDefault(); btnTimerSkip?.click(); }
+        break;
+      case '=':
+      case '+':
+        if (IS_HOST) { e.preventDefault(); btnTimerP30?.click(); }
+        break;
+      case '0':
+        if (IS_HOST) { e.preventDefault(); btnTimerStop?.click(); }
+        break;
     }
   });
 }
@@ -1543,6 +1558,13 @@ function setupTimerControls() {
     }
   });
 
+  btnTimerSettings?.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = timerThresholdsEl?.style.display !== 'none';
+    if (timerThresholdsEl) timerThresholdsEl.style.display = open ? 'none' : 'flex';
+    btnTimerSettings.classList.toggle('active', !open);
+  });
+
   timerYellowIn?.addEventListener('change', () => {
     timerThresholds.yellow = Math.max(1, parseInt(timerYellowIn.value) || 120);
     timerYellowIn.value = timerThresholds.yellow;
@@ -1554,6 +1576,7 @@ function setupTimerControls() {
     updateTimerBar();
   });
 
+  btnTimerAddTrigger?.addEventListener('click', () => openAddForm());
   btnTimerAdd?.addEventListener('click', addQueueTopic);
   btnTimerCancel?.addEventListener('click', cancelEditTopic);
   timerAddName?.addEventListener('keydown', e => { if (e.key === 'Enter') addQueueTopic(); });
@@ -1562,6 +1585,20 @@ function setupTimerControls() {
   btnTimerP30?.addEventListener('click', timerPlus30);
   btnTimerSkip?.addEventListener('click', timerSkip);
   btnTimerStop?.addEventListener('click', timerStopAll);
+
+  syncTimerButtons();
+}
+
+function openAddForm() {
+  if (timerAddFormEl) timerAddFormEl.style.display = 'flex';
+  if (btnTimerAddTrigger) btnTimerAddTrigger.style.display = 'none';
+  timerAddName?.focus();
+  timerAddFormEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeAddForm() {
+  if (timerAddFormEl) timerAddFormEl.style.display = 'none';
+  if (btnTimerAddTrigger) btnTimerAddTrigger.style.display = '';
 }
 
 function addQueueTopic() {
@@ -1577,6 +1614,7 @@ function addQueueTopic() {
     if (timerAddName)  timerAddName.value  = '';
     if (timerAddDur)   timerAddDur.value   = '';
     if (timerAddNotes) timerAddNotes.value = '';
+    closeAddForm();
   }
   saveTimerQueue();
   renderTimerQueue();
@@ -1590,8 +1628,7 @@ function startEditTopic(i) {
   if (timerAddNotes) timerAddNotes.value = topic.notes;
   if (btnTimerAdd)   btnTimerAdd.textContent = 'Save Changes';
   if (btnTimerCancel) btnTimerCancel.style.display = '';
-  timerAddName?.focus();
-  timerAddName?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  openAddForm();
 }
 
 function cancelEditTopic() {
@@ -1599,8 +1636,9 @@ function cancelEditTopic() {
   if (timerAddName)   timerAddName.value   = '';
   if (timerAddDur)    timerAddDur.value    = '';
   if (timerAddNotes)  timerAddNotes.value  = '';
-  if (btnTimerAdd)    btnTimerAdd.textContent = '+ Add Topic';
+  if (btnTimerAdd)    btnTimerAdd.textContent = 'Add Topic';
   if (btnTimerCancel) btnTimerCancel.style.display = 'none';
+  closeAddForm();
 }
 
 function jumpToTopic(i) {
@@ -1716,6 +1754,7 @@ function renderTimerQueue() {
     rmBtn.textContent = '×';
     rmBtn.title = 'Remove';
     rmBtn.addEventListener('click', () => {
+      if (isActive && !confirm(`"${topic.name}" is currently running. Remove it anyway?`)) return;
       if (timerEditIndex === i) cancelEditTopic();
       timerQueue.splice(i, 1);
       saveTimerQueue();
@@ -1984,22 +2023,30 @@ function setTimerNotes(notes) {
   timerNotesEl.style.display = (hasNotes && timerNotesOpen) ? '' : 'none';
 }
 
+const TIMER_ICON_PLAY  = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
+const TIMER_ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="4" width="5" height="16"/><rect x="14" y="4" width="5" height="16"/></svg>';
+const TIMER_ICON_RESTART = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+
 function syncTimerButtons() {
   if (!btnTimerSS) return;
   if (!timerState.active) {
-    btnTimerSS.textContent = 'Start';
+    btnTimerSS.innerHTML = TIMER_ICON_PLAY;
+    btnTimerSS.title = 'Start [P]';
     btnTimerSS.classList.remove('active');
     btnTimerSkip?.classList.remove('active');
   } else if (timerState.expired) {
-    btnTimerSS.textContent = 'Restart';
+    btnTimerSS.innerHTML = TIMER_ICON_RESTART;
+    btnTimerSS.title = 'Restart topic [P]';
     btnTimerSS.classList.remove('active');
     btnTimerSkip?.classList.add('active'); // prompt host to advance
   } else if (timerState.paused) {
-    btnTimerSS.textContent = 'Resume';
+    btnTimerSS.innerHTML = TIMER_ICON_PLAY;
+    btnTimerSS.title = 'Resume [P]';
     btnTimerSS.classList.add('active');
     btnTimerSkip?.classList.remove('active');
   } else {
-    btnTimerSS.textContent = 'Pause';
+    btnTimerSS.innerHTML = TIMER_ICON_PAUSE;
+    btnTimerSS.title = 'Pause [P]';
     btnTimerSS.classList.add('active');
     btnTimerSkip?.classList.remove('active');
   }

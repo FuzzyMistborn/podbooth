@@ -1721,15 +1721,33 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   gap: 0;
 }
 .timer-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 10px 14px 8px;
   border-bottom: 1px solid var(--border);
 }
+.timer-settings-toggle {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 2px;
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.timer-settings-toggle svg { width: 14px; height: 14px; }
+.timer-settings-toggle:hover { color: var(--text-2); }
+.timer-settings-toggle.active { color: var(--accent); }
 .timer-thresholds {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
 }
 .timer-threshold-row {
   display: flex;
@@ -1849,9 +1867,19 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .timer-queue-edit svg { width: 12px; height: 12px; }
 .timer-queue-remove { font-size: 16px; line-height: 1; }
 .timer-queue-remove:hover { color: var(--red); }
+.timer-add-trigger {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: left;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.timer-add-trigger:hover { color: var(--accent); }
 .timer-add-form {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  padding: 6px 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1886,6 +1914,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .btn-timer-cancel-btn:hover { border-color: var(--text-3); color: var(--text-2); }
 .timer-controls-row {
   padding: 10px 14px;
+  border-top: 1px solid var(--border);
   display: flex;
   gap: 5px;
   flex-wrap: wrap;
@@ -1902,6 +1931,13 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   transition: background 0.15s, color 0.15s, border-color 0.15s;
   white-space: nowrap;
 }
+.timer-ctrl-btn.timer-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+}
+.timer-ctrl-btn.timer-icon-btn svg { width: 14px; height: 14px; }
 .timer-ctrl-btn:hover:not(:disabled) { border-color: var(--text-2); color: var(--text); }
 .timer-ctrl-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .timer-ctrl-btn:disabled { opacity: 0.35; cursor: default; }

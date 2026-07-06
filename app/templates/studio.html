@@ -273,9 +273,17 @@
           </svg>
         </button>
         <div class="timer-panel" id="timer-panel" style="display:none">
-          <div class="timer-panel-header">Timer Queue</div>
+          <div class="timer-panel-header">
+            <span>Timer Queue</span>
+            <button class="timer-settings-toggle" id="btn-timer-settings" title="Threshold settings">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+          </div>
 
-          <div class="timer-thresholds">
+          <div class="timer-thresholds" id="timer-thresholds" style="display:none">
             <div class="timer-threshold-row">
               <span class="timer-threshold-swatch swatch-yellow"></span>
               <span class="timer-threshold-label">Yellow at</span>
@@ -294,21 +302,27 @@
             <div class="timer-queue-empty">No topics yet</div>
           </div>
 
-          <div class="timer-add-form">
+          <button class="timer-add-trigger" id="btn-timer-add-trigger">+ Add Topic</button>
+
+          <div class="timer-add-form" id="timer-add-form" style="display:none">
             <input type="text" id="timer-add-name" placeholder="Topic name" maxlength="60">
             <input type="number" id="timer-add-dur" placeholder="Duration (min)" min="0.5" step="0.5">
             <textarea id="timer-add-notes" placeholder="Show notes (optional)" rows="2" maxlength="500"></textarea>
             <div class="timer-add-actions">
               <button class="btn-timer-cancel-btn" id="btn-timer-cancel" style="display:none">Cancel</button>
-              <button class="btn-timer-add-btn" id="btn-timer-add">+ Add Topic</button>
+              <button class="btn-timer-add-btn" id="btn-timer-add">Add Topic</button>
             </div>
           </div>
 
           <div class="timer-controls-row">
-            <button class="timer-ctrl-btn" id="btn-timer-startstop">Start</button>
-            <button class="timer-ctrl-btn timer-plus30" id="btn-timer-plus30">+30s</button>
-            <button class="timer-ctrl-btn" id="btn-timer-skip" disabled>Skip</button>
-            <button class="timer-ctrl-btn timer-stop-btn" id="btn-timer-stop" disabled>Stop</button>
+            <button class="timer-ctrl-btn timer-icon-btn" id="btn-timer-startstop" title="Start [P]"></button>
+            <button class="timer-ctrl-btn timer-plus30" id="btn-timer-plus30" title="Add 30 seconds [+]">+30s</button>
+            <button class="timer-ctrl-btn timer-icon-btn" id="btn-timer-skip" title="Skip to next topic [N]" disabled>
+              <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><rect x="17" y="4" width="2" height="16"/></svg>
+            </button>
+            <button class="timer-ctrl-btn timer-icon-btn timer-stop-btn" id="btn-timer-stop" title="Stop timer [0]" disabled>
+              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
+            </button>
           </div>
         </div>
       </div>
