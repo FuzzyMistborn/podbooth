@@ -247,6 +247,7 @@ async function startLocalRecording() {
     pendingFinalizeMeta = {};
     uploadStats = { queued: 0, completed: 0 };
     uploadHasError = false;
+    uploadCancelled = false;
     uploadStruggling.clear();
     fsaOpenPromises = {};
     _uploadPass = { epoch: null, promise: null };

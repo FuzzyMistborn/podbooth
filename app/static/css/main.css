@@ -2459,6 +2459,25 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   border: 1px solid var(--yellow);
   color: var(--yellow);
 }
+.upload-banner.cancelled {
+  background: var(--bg-2);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+}
+.upload-cancel-btn {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0.85;
+}
+.upload-cancel-btn:hover { opacity: 1; }
 .upload-banner-main {
   display: flex;
   flex-direction: column;
