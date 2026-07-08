@@ -323,6 +323,59 @@ function _uploadTimeoutForSize(bytes) {
   return CHUNK_UPLOAD_TIMEOUT_MS + Math.ceil(bytes / floor) * 1000;
 }
 
+// A degraded-but-working connection can still be sending bytes well under
+// MIN_UPLOAD_BYTES_PER_SEC — a flat size-scaled timeout can't tell that
+// apart from a fully wedged connection, and kills (and restarts from byte 0)
+// a transfer that would have finished if just left alone. Track actual
+// upload progress instead: only abort when NO bytes have moved for this
+// long, not because the transfer as a whole is "slow".
+const UPLOAD_STALL_TIMEOUT_MS = 20 * 1000;
+// Backstop even for a connection that dribbles just enough progress to keep
+// resetting the stall timer forever — without this, a sub-1-byte/sec trickle
+// could hold one attempt open indefinitely.
+const UPLOAD_STALL_HARD_CAP_MS = 30 * 60 * 1000;
+
+// XHR (not fetch) because only XHR exposes upload progress events — fetch's
+// request streaming has no equivalent, so there's no way to distinguish
+// "still sending, just slow" from "completely stalled" with fetch alone.
+function _xhrUploadChunk(form, cancelSignal) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let stallTimer = null;
+    let hardCapTimer = null;
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(stallTimer);
+      clearTimeout(hardCapTimer);
+      if (cancelSignal) cancelSignal.removeEventListener('abort', onCancel);
+    };
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(arg);
+    };
+    const resetStallTimer = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => xhr.abort(), UPLOAD_STALL_TIMEOUT_MS);
+    };
+    const onCancel = () => xhr.abort();
+    if (cancelSignal) cancelSignal.addEventListener('abort', onCancel);
+
+    xhr.upload.addEventListener('progress', resetStallTimer);
+    xhr.addEventListener('loadstart', resetStallTimer);
+    xhr.addEventListener('load', () => finish(resolve, { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status }));
+    xhr.addEventListener('error', () => finish(reject, new Error('network error')));
+    xhr.addEventListener('abort', () => finish(reject, new DOMException('aborted', 'AbortError')));
+
+    hardCapTimer = setTimeout(() => xhr.abort(), UPLOAD_STALL_HARD_CAP_MS);
+
+    xhr.open('POST', '/api/upload/chunk');
+    xhr.send(form);
+  });
+}
+
 // Simple token-bucket: before sending `bytes`, wait however long is needed to
 // keep the average rate at or under the configured cap. Throttling happens
 // between chunks (the natural granularity here — see upload.js header comment)
@@ -373,10 +426,6 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       return false;
     }
     attempt++;
-    const abort = new AbortController();
-    const onCancel = () => abort.abort();
-    if (cancelSignal) cancelSignal.addEventListener('abort', onCancel);
-    const timeout = setTimeout(() => abort.abort(), _uploadTimeoutForSize(blob.size));
     try {
       const form = new FormData();
       form.append('session_id', sessionId);
@@ -392,14 +441,14 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       }
       form.append('file', blob, `chunk_${index}.${ext}`);
 
-      const r = await fetch('/api/upload/chunk', { method: 'POST', body: form, signal: abort.signal });
-      if (r.ok) {
+      const { ok: httpOk, status } = await _xhrUploadChunk(form, cancelSignal);
+      if (httpOk) {
         recLog('uploadChunk: %s #%d ok', trackType, index);
         uploadStruggling.delete(key);
         if (uploadStruggling.size === 0) uploadHasError = false;
         return true;
       }
-      throw new Error(`HTTP ${r.status}`);
+      throw new Error(`HTTP ${status}`);
     } catch (err) {
       if (cancelSignal?.aborted) {
         recLog('uploadChunk: %s #%d cancelled by user mid-attempt', trackType, index);
@@ -417,9 +466,6 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
         return false; // let the queue drain so /finalize fires and the server-side gap check flags it
       }
       await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
-    } finally {
-      clearTimeout(timeout);
-      if (cancelSignal) cancelSignal.removeEventListener('abort', onCancel);
     }
   }
 }
@@ -534,6 +580,14 @@ async function _doUploadAllRecordedChunks() {
   }));
 }
 
+// A stalled connection now only costs one slice's worth of restart (see
+// UPLOAD_STALL_TIMEOUT_MS in uploadChunkWithRetry) instead of the whole
+// recording, but that only helps if the file is actually cut into pieces —
+// a multi-GB take sent as a single "chunk" still restarts from byte 0 on
+// every retry. 5MB matches the rough granularity the non-FSA IndexedDB path
+// already uploads at.
+const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
+
 async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack) {
   const fsaTrack = fsaOpenPromises[trackType] ? await fsaOpenPromises[trackType] : null;
   const failedTrack = fsaFailedTracks[trackType];
@@ -545,8 +599,6 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
   // the same track.
   const localTrack = fsaTrack || failedTrack;
   if (localTrack) {
-    uploadStats.queued++;
-    refreshUploadBanner();
     recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
     let file = await fsaCloseTrackFile(localTrack);
     // The on-disk copy of a raw-PCM audio track is wrapped in a real WAV
@@ -555,25 +607,41 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
     // samples for its own `pcm` ffmpeg conversion (see below) — strip the
     // 44-byte header back off just for the copy we upload.
     if (localTrack.isRawAudio) file = file.slice(44);
-    // If this track failed over from FSA to IndexedDB mid-recording, the
-    // whole-file we're uploading as chunk 0 already contains the first
-    // `chunksWritten` chunks (original indices 0..chunksWritten-1); the rest
-    // went to IndexedDB and upload below at their original (non-zero)
-    // indices. Tell the server how many indices chunk 0 folds in so its gap
-    // check doesn't flag 1..chunksWritten-1 as missing — the bytes are all
-    // there, just coalesced into one file. (A clean FSA track has no
-    // trailing IndexedDB chunks, so there's no gap to explain — send nothing.)
-    const wholeMeta = (failedTrack && failedTrack.chunksWritten > 1)
-      ? { subsumes_chunks: failedTrack.chunksWritten }
-      : {};
+
     const trackController = new AbortController();
     fsaUploadControllers.add(trackController);
-    refreshUploadBanner();
-    const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, trackController.signal);
+    let ok;
+    if (failedTrack && failedTrack.chunksWritten > 1) {
+      // This track failed over from FSA to IndexedDB mid-recording, so the
+      // salvaged bytes still have to go up as one whole chunk 0 rather than
+      // sliced: the trailing IndexedDB chunks uploaded below reuse their
+      // original (non-zero) indices, and `subsumes_chunks` tells the
+      // server's gap check that chunk 0 already covers original indices
+      // 0..chunksWritten-1 — introducing our own slice numbering here would
+      // collide with those real indices. (A clean FSA track — the common
+      // case — has no trailing IndexedDB chunks, so it takes the slicing
+      // path below instead.)
+      uploadStats.queued++;
+      refreshUploadBanner();
+      const wholeMeta = { subsumes_chunks: failedTrack.chunksWritten };
+      ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, trackController.signal);
+      uploadStats.completed++;
+      refreshUploadBanner();
+    } else {
+      const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
+      uploadStats.queued += totalSlices;
+      refreshUploadBanner();
+      ok = true;
+      for (let i = 0; i < totalSlices && ok; i++) {
+        const start = i * FSA_UPLOAD_SLICE_BYTES;
+        const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
+        ok = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName, trackController.signal);
+        uploadStats.completed++;
+        refreshUploadBanner();
+      }
+    }
     const wasCancelled = trackController.signal.aborted;
     fsaUploadControllers.delete(trackController);
-    uploadStats.completed++;
-    refreshUploadBanner();
     delete fsaFailedTracks[trackType];
     if (!ok) {
       if (wasCancelled) uploadCancelled = true;
