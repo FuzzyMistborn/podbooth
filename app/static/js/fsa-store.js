@@ -104,8 +104,41 @@ async function fsaGetDirectory() {
 // never reads this filename back, it derives the final assembled output name
 // from its own participant string at assembly time. Don't chase parity if one
 // side's rules change.
-function fsaSlug(name) {
-  return (name || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'participant';
+
+// Local files keep spaces (unlike fsaSlug's underscored form) since they
+// never leave the user's disk — only characters that are actually illegal
+// in a filename get stripped.
+function _fsaDisplayName(name) {
+  return (name || '').replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+}
+
+function _fsaEscapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// `${session title} - ${participant} - T${take}` — shared by every track of
+// one recording run so audio/video/screen files for the same take agree.
+function _fsaTakeBaseName(sessionTitle, participant, take) {
+  return `${_fsaDisplayName(sessionTitle)} - ${_fsaDisplayName(participant)} - T${take}`;
+}
+
+// Scans the chosen folder for the highest existing take number for this
+// session+participant and returns the next one. Best-effort: if the
+// directory can't be enumerated (older browser, revoked permission mid-scan,
+// etc.) this just starts over at take 1 rather than failing the recording.
+async function fsaNextTakeNumber(dirHandle, sessionTitle, participant) {
+  const base = `${_fsaDisplayName(sessionTitle)} - ${_fsaDisplayName(participant)}`;
+  const re = new RegExp(`^${_fsaEscapeRegExp(base)} - T(\\d+)(?:[. ]|$)`);
+  let maxTake = 0;
+  try {
+    for await (const name of dirHandle.keys()) {
+      const m = name.match(re);
+      if (m) maxTake = Math.max(maxTake, parseInt(m[1], 10));
+    }
+  } catch (e) {
+    console.warn('fsaNextTakeNumber: could not scan directory, defaulting to take 1', e);
+  }
+  return maxTake + 1;
 }
 
 // A FileSystemWritableFileStream buffers everything written to it in a swap
@@ -153,10 +186,14 @@ function _fsaWavHeader(dataBytes) {
   return buf;
 }
 
-async function fsaOpenTrackFile(dirHandle, trackType, epoch, ext, participant) {
+async function fsaOpenTrackFile(dirHandle, trackType, ext, sessionTitle, participant, take) {
   const isRawAudio = trackType === 'audio' && ext === 'raw';
   const fileExt = isRawAudio ? 'wav' : ext;
-  const name = `${fsaSlug(participant)}_${trackType}_${epoch}.${fileExt}`;
+  const base = _fsaTakeBaseName(sessionTitle, participant, take);
+  // Audio is the "primary" file for the take (matches the server's own
+  // _final_name convention — see app/routers/upload.py); video/screen get an
+  // explicit suffix since a take can have more than one non-audio track.
+  const name = trackType === 'audio' ? `${base}.${fileExt}` : `${base} - ${trackType}.${fileExt}`;
   const fileHandle = await dirHandle.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
   const track = { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, chunksWritten: 0, closed: false, isRawAudio, dataBytes: 0 };

@@ -19,10 +19,18 @@
 // its chunks arrives. Returns null if FSA isn't in play for this recording,
 // or if opening the file failed for some reason — either way the caller
 // falls back to IndexedDB for that chunk.
+function _fsaTakeNumber() {
+  if (!fsaTakeNumberPromise) {
+    fsaTakeNumberPromise = fsaNextTakeNumber(fsaDirHandle, SESSION_TITLE, displayName);
+  }
+  return fsaTakeNumberPromise;
+}
+
 function _fsaTrackFor(trackType, ext) {
   if (!fsaDirHandle) return Promise.resolve(null);
   if (!fsaOpenPromises[trackType]) {
-    fsaOpenPromises[trackType] = fsaOpenTrackFile(fsaDirHandle, trackType, recordingEpoch, ext, displayName)
+    fsaOpenPromises[trackType] = _fsaTakeNumber()
+      .then(take => fsaOpenTrackFile(fsaDirHandle, trackType, ext, SESSION_TITLE, displayName, take))
       .then(track => { track.ext = ext; return track; })
       .catch(e => {
         console.warn(`_fsaTrackFor: open failed for ${trackType}, falling back to IndexedDB:`, e);

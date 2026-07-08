@@ -140,6 +140,10 @@ let pendingFinalizeMeta = {};
 // fsaOpenPromises lazily opens one real file per track on its first chunk.
 let fsaDirHandle = null;
 let fsaOpenPromises = {};
+// Cached per-epoch: the take number local files for this recording run get
+// named with (session title + participant scanned against the folder on
+// disk once, then shared by every track so audio/video/screen all agree).
+let fsaTakeNumberPromise = null;
 // Holds a track's FSA file once a mid-recording write failure forces fallback
 // to IndexedDB for the rest of that track — the bytes already committed to
 // disk are still real data and must still be uploaded (as chunk 0) alongside

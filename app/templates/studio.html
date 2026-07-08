@@ -456,6 +456,7 @@
 
 <script>
   const SESSION_ID    = "{{ session.id }}";
+  const SESSION_TITLE = "{{ session.title | e }}";
   const IS_HOST       = {{ "true" if is_host else "false" }};
   const HOST_TOKEN    = "{{ host_token }}";
   const UPLOAD_TOKEN  = "{{ upload_token }}";

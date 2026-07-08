@@ -250,6 +250,7 @@ async function startLocalRecording() {
     uploadCancelled = false;
     uploadStruggling.clear();
     fsaOpenPromises = {};
+    fsaTakeNumberPromise = null;
     _uploadPass = { epoch: null, promise: null };
     _fatalRecordingErrorHandled = false;
     fsaDirHandle = typeof fsaGetDirectory === 'function' ? await fsaGetDirectory() : null;
