@@ -348,7 +348,14 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
   }
   recLog('uploadChunk: %s #%d size=%d', trackType, index, blob.size);
   const key = `${trackType}#${index}`;
-  const deadline = Date.now() + CHUNK_RETRY_BUDGET_MS;
+  // For a normal few-MB chunk this is just CHUNK_RETRY_BUDGET_MS. For a large
+  // File System Access whole-file upload (a multi-GB video sent as one
+  // "chunk"), a single attempt can legitimately take longer than that fixed
+  // budget — so scale the budget to guarantee at least a couple of full-length
+  // attempts, or a slow/interrupted transfer gets declared permanently lost
+  // after just one try with zero retries left.
+  const budget = Math.max(CHUNK_RETRY_BUDGET_MS, _uploadTimeoutForSize(blob.size) * 2);
+  const deadline = Date.now() + budget;
   let attempt = 0;
   while (true) {
     if (cancelSignal?.aborted) {
@@ -396,7 +403,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       }
       console.warn(`Chunk upload failing (${trackType} #${index}), attempt ${attempt}:`, err);
       if (Date.now() >= deadline) {
-        console.error(`Chunk permanently lost after ${Math.round(CHUNK_RETRY_BUDGET_MS / 1000)}s of retries: ${trackType} #${index}`);
+        console.error(`Chunk permanently lost after ${Math.round(budget / 1000)}s of retries: ${trackType} #${index}`);
         return false; // let the queue drain so /finalize fires and the server-side gap check flags it
       }
       await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
@@ -502,85 +509,100 @@ async function _doUploadAllRecordedChunks() {
     ...Object.keys(chunksByTrack).filter(t => chunksByTrack[t].length > 0),
   ]);
   await Promise.all([...tracks].map(async (trackType) => {
-    const fsaTrack = fsaOpenPromises[trackType] ? await fsaOpenPromises[trackType] : null;
-    const failedTrack = fsaFailedTracks[trackType];
-    // fsaTrack and failedTrack are mutually exclusive (once a track fails
-    // over, its fsaOpenPromises entry is cleared for good — see
-    // _persistChunk), but a failed-over track can still have IndexedDB
-    // chunks recorded after the failure, so that path isn't an `else`: a
-    // local whole-file upload and IndexedDB chunk uploads can both apply to
-    // the same track.
-    const localTrack = fsaTrack || failedTrack;
-    if (localTrack) {
-      uploadStats.queued++;
-      refreshUploadBanner();
-      recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
-      let file = await fsaCloseTrackFile(localTrack);
-      // The on-disk copy of a raw-PCM audio track is wrapped in a real WAV
-      // header (see fsaOpenTrackFile/_fsaWavHeader in fsa-store.js) so it's
-      // playable locally, but the server still expects headerless f32le
-      // samples for its own `pcm` ffmpeg conversion (see below) — strip the
-      // 44-byte header back off just for the copy we upload.
-      if (localTrack.isRawAudio) file = file.slice(44);
-      // If this track failed over from FSA to IndexedDB mid-recording, the
-      // whole-file we're uploading as chunk 0 already contains the first
-      // `chunksWritten` chunks (original indices 0..chunksWritten-1); the rest
-      // went to IndexedDB and upload below at their original (non-zero)
-      // indices. Tell the server how many indices chunk 0 folds in so its gap
-      // check doesn't flag 1..chunksWritten-1 as missing — the bytes are all
-      // there, just coalesced into one file. (A clean FSA track has no
-      // trailing IndexedDB chunks, so there's no gap to explain — send nothing.)
-      const wholeMeta = (failedTrack && failedTrack.chunksWritten > 1)
-        ? { subsumes_chunks: failedTrack.chunksWritten }
-        : {};
-      fsaUploadController = new AbortController();
-      refreshUploadBanner();
-      const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, fsaUploadController.signal);
-      const wasCancelled = fsaUploadController.signal.aborted;
-      fsaUploadController = null;
-      uploadStats.completed++;
-      refreshUploadBanner();
-      delete fsaFailedTracks[trackType];
-      if (!ok) {
-        if (wasCancelled) uploadCancelled = true;
-        return; // uploadChunkWithRetry already set uploadHasError (unless cancelled); leave this track unfinalized
-      }
+    try {
+      await _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack);
+    } catch (e) {
+      // An uncaught throw here (e.g. from fsaCloseTrackFile on a huge file)
+      // used to propagate straight out of Promise.all and abort the whole
+      // batch silently — other tracks that had already finished stayed
+      // finished, but this one vanished with no console trace at all and
+      // the generic "may be incomplete" banner gave no hint why. Log it and
+      // flag it like any other upload failure instead.
+      console.error(`_doUploadAllRecordedChunks: ${trackType} failed:`, e);
+      uploadHasError = true;
     }
-    if (!fsaTrack) {
-      const chunks = chunksByTrack[trackType].sort((a, b) => a.chunkIndex - b.chunkIndex);
-      for (const c of chunks) {
-        const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
-        if (!rec) {
-          // The record we just enumerated is gone by the time we go to read
-          // it — that's a real chunk permanently missing from the upload,
-          // not a normal "nothing to send" case, so it must surface the same
-          // way a retry-exhausted chunk does rather than count as completed.
-          console.error(`_doUploadAllRecordedChunks: ${trackType}#${c.chunkIndex} vanished from IndexedDB before upload — recording will be missing this chunk`);
-          uploadHasError = true;
-          uploadStats.completed++;
-          refreshUploadBanner();
-          continue;
-        }
-        const ok = await uploadChunkWithRetry(rec.blob, trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, SESSION_ID, identity, displayName);
-        if (!ok) return; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
-        idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+  }));
+}
+
+async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack) {
+  const fsaTrack = fsaOpenPromises[trackType] ? await fsaOpenPromises[trackType] : null;
+  const failedTrack = fsaFailedTracks[trackType];
+  // fsaTrack and failedTrack are mutually exclusive (once a track fails
+  // over, its fsaOpenPromises entry is cleared for good — see
+  // _persistChunk), but a failed-over track can still have IndexedDB
+  // chunks recorded after the failure, so that path isn't an `else`: a
+  // local whole-file upload and IndexedDB chunk uploads can both apply to
+  // the same track.
+  const localTrack = fsaTrack || failedTrack;
+  if (localTrack) {
+    uploadStats.queued++;
+    refreshUploadBanner();
+    recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
+    let file = await fsaCloseTrackFile(localTrack);
+    // The on-disk copy of a raw-PCM audio track is wrapped in a real WAV
+    // header (see fsaOpenTrackFile/_fsaWavHeader in fsa-store.js) so it's
+    // playable locally, but the server still expects headerless f32le
+    // samples for its own `pcm` ffmpeg conversion (see below) — strip the
+    // 44-byte header back off just for the copy we upload.
+    if (localTrack.isRawAudio) file = file.slice(44);
+    // If this track failed over from FSA to IndexedDB mid-recording, the
+    // whole-file we're uploading as chunk 0 already contains the first
+    // `chunksWritten` chunks (original indices 0..chunksWritten-1); the rest
+    // went to IndexedDB and upload below at their original (non-zero)
+    // indices. Tell the server how many indices chunk 0 folds in so its gap
+    // check doesn't flag 1..chunksWritten-1 as missing — the bytes are all
+    // there, just coalesced into one file. (A clean FSA track has no
+    // trailing IndexedDB chunks, so there's no gap to explain — send nothing.)
+    const wholeMeta = (failedTrack && failedTrack.chunksWritten > 1)
+      ? { subsumes_chunks: failedTrack.chunksWritten }
+      : {};
+    fsaUploadController = new AbortController();
+    refreshUploadBanner();
+    const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, fsaUploadController.signal);
+    const wasCancelled = fsaUploadController.signal.aborted;
+    fsaUploadController = null;
+    uploadStats.completed++;
+    refreshUploadBanner();
+    delete fsaFailedTracks[trackType];
+    if (!ok) {
+      if (wasCancelled) uploadCancelled = true;
+      return; // uploadChunkWithRetry already set uploadHasError (unless cancelled); leave this track unfinalized
+    }
+  }
+  if (!fsaTrack) {
+    const chunks = chunksByTrack[trackType].sort((a, b) => a.chunkIndex - b.chunkIndex);
+    for (const c of chunks) {
+      const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+      if (!rec) {
+        // The record we just enumerated is gone by the time we go to read
+        // it — that's a real chunk permanently missing from the upload,
+        // not a normal "nothing to send" case, so it must surface the same
+        // way a retry-exhausted chunk does rather than count as completed.
+        console.error(`_doUploadAllRecordedChunks: ${trackType}#${c.chunkIndex} vanished from IndexedDB before upload — recording will be missing this chunk`);
+        uploadHasError = true;
         uploadStats.completed++;
         refreshUploadBanner();
+        continue;
       }
+      const ok = await uploadChunkWithRetry(rec.blob, trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, SESSION_ID, identity, displayName);
+      if (!ok) return; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
+      idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+      uploadStats.completed++;
+      refreshUploadBanner();
     }
-    if (!(trackType in pendingFinalizeMeta)) return; // chunks uploaded, but no finalize payload was ever recorded
-    const meta = pendingFinalizeMeta[trackType];
-    delete pendingFinalizeMeta[trackType];
-    recLog('finalizeTrack: sending /finalize for %s', trackType);
-    await _sendFinalizeWithRetry(trackType, {
-      session_id: SESSION_ID,
-      participant: displayName,
-      identity: identity,
-      track_type: trackType,
-      epoch: recordingEpoch || '',
-      ...meta,
-    });
-  }));
+  }
+  if (!(trackType in pendingFinalizeMeta)) return; // chunks uploaded, but no finalize payload was ever recorded
+  const meta = pendingFinalizeMeta[trackType];
+  delete pendingFinalizeMeta[trackType];
+  recLog('finalizeTrack: sending /finalize for %s', trackType);
+  await _sendFinalizeWithRetry(trackType, {
+    session_id: SESSION_ID,
+    participant: displayName,
+    identity: identity,
+    track_type: trackType,
+    epoch: recordingEpoch || '',
+    ...meta,
+  });
 }
 
 async function waitForUploads() {

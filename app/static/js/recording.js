@@ -527,44 +527,11 @@ function _connectPcmKeepAlive(node, ctx) {
 // startPcmCapture. Buffering is gated on pcmCapturing so the pre-built graph
 // can sit connected and "warming up" on Firefox without accumulating audio
 // before a recording has actually been requested.
-// Silent-audio detection: a dead/disconnected mic can leave the recorder
-// "running" and producing chunks that are just zeroed samples — nothing else
-// in the pipeline distinguishes that from a normal quiet moment. RMS near
-// zero for several seconds straight (while the user hasn't muted themselves)
-// is worth a warning, since 40 minutes of accidental silence is a much worse
-// outcome than a transient false positive.
-const AUDIO_SILENCE_WARN_MS = 5000;
-const AUDIO_SILENCE_RMS_THRESHOLD = 0.001;
-let _audioSilentSince = null;
-let _audioSilenceWarned = false;
-
-function _checkAudioSilence(channels) {
-  if (micMuted) { _audioSilentSince = null; _audioSilenceWarned = false; return; } // expected silence
-  let sumSq = 0, n = 0;
-  for (const ch of channels) {
-    for (let i = 0; i < ch.length; i++) { sumSq += ch[i] * ch[i]; n++; }
-  }
-  const rms = n > 0 ? Math.sqrt(sumSq / n) : 0;
-  const now = Date.now();
-  if (rms < AUDIO_SILENCE_RMS_THRESHOLD) {
-    if (_audioSilentSince === null) _audioSilentSince = now;
-    else if (!_audioSilenceWarned && now - _audioSilentSince > AUDIO_SILENCE_WARN_MS) {
-      _audioSilenceWarned = true;
-      recLog('_checkAudioSilence: no audio signal in %dms — mic may be dead', AUDIO_SILENCE_WARN_MS);
-      showToast?.('No audio detected from your microphone — check it\'s connected and unmuted');
-    }
-  } else {
-    _audioSilentSince = null;
-    _audioSilenceWarned = false;
-  }
-}
-
 function _onPcmMessage(e) {
   const channels = e.data;
   if (e.data?.type === 'drained') return; // handled by drain handshake
   if (!pcmCapturing) return;
   if (!channels || !channels.length) return;
-  _checkAudioSilence(channels);
   pcmChannels = 2; // always stereo; interleave duplicates mono source if needed
   // Found it: muting goes through room.localParticipant.setMicrophoneEnabled(),
   // which disables the underlying MediaStreamTrack. Chrome keeps delivering
@@ -993,7 +960,7 @@ function setRecStatus(key, state) {
 
 function updateRecStatus() {
   const audioRunning = audioRecorder?.state === 'recording' || pcmCapturing;
-  setRecStatus('audio', !audioRunning ? (isRecording ? 'error' : 'idle') : _audioSilenceWarned ? 'warn' : 'ok');
+  setRecStatus('audio', !audioRunning ? (isRecording ? 'error' : 'idle') : 'ok');
   setRecStatus('video', !videoRecorder ? 'idle' : videoRecorder.state !== 'recording' ? 'warn' : _videoFrozen ? 'warn' : 'ok');
   const uploadBacklog = uploadStats.queued - uploadStats.completed;
   setRecStatus('upload', uploadHasError ? 'error' : uploadBacklog > 10 ? 'warn' : 'ok');
