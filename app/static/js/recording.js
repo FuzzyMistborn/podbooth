@@ -738,8 +738,8 @@ function startOpusFallback() {
   // Upmix to stereo via Web Audio so mono devices still record as 2-channel
   opusCtx = new AudioContext({ sampleRate: 48000 });
   const monoStream = new MediaStream([micTrack.mediaStreamTrack]);
-  const opusSource = opusCtx.createMediaStreamSource(monoStream);
-  const opusDest = opusCtx.createMediaStreamDestination();
+  opusSource = opusCtx.createMediaStreamSource(monoStream);
+  opusDest = opusCtx.createMediaStreamDestination();
   opusDest.channelCount = 2;
   opusSource.connect(opusDest);
   audioRecorder = new MediaRecorder(opusDest.stream, {
@@ -768,6 +768,30 @@ function startOpusFallback() {
   audioRecorder.start(5000);
 }
 
+// Mirrors restartPcmCapture's job for the Opus/MediaRecorder fallback path
+// (browsers without AudioWorklet support, or wherever startPcmCapture()
+// failed at record-start). switchActiveDevice() stops the old
+// MediaStreamTrack and swaps in a new one, but startOpusFallback's audio
+// graph was built from a specific track reference captured at start —
+// without this, the graph keeps pointing at that now-stopped track and the
+// recording silently goes dead for the rest of the take. Unlike the PCM
+// path, there's no need to touch the MediaRecorder itself: it's consuming
+// opusDest's stable output stream, so only the upstream source needs to be
+// re-pointed at the new device.
+function restartOpusCapture() {
+  if (!audioRecorder || !opusCtx || !opusDest) return;
+  const micTrack = getLocalTrack('audio');
+  if (!micTrack) return;
+  try {
+    opusSource?.disconnect();
+    const monoStream = new MediaStream([micTrack.mediaStreamTrack]);
+    opusSource = opusCtx.createMediaStreamSource(monoStream);
+    opusSource.connect(opusDest);
+    recLog('restartOpusCapture: reconnected opus fallback audio graph to new device');
+  } catch (e) {
+    console.warn('Could not restart Opus fallback after mic switch:', e);
+  }
+}
 
 async function stopLocalRecording() {
   micMuted = false;

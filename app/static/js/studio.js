@@ -48,6 +48,8 @@ let pcmFramesWritten = 0;
 let pcmChannels = 2;
 let pcmCapturing = false;
 let opusCtx = null;
+let opusSource = null;
+let opusDest = null;
 let audioFormat = 'pcm';
 let audioRecorder = null;
 let micMuted = false;
@@ -70,6 +72,17 @@ async function applyMonoDownmix() {
     downmixCtx?.close();
     downmixAnalyser = null;
     downmixCtx = new AudioContext();
+    // A mic switch calls this several `await`s deep in a click handler
+    // (after `await room.switchActiveDevice(...)`), which can be far enough
+    // from the original gesture that the browser starts this context
+    // suspended — same reasoning as pcmCtx/opusCtx elsewhere in this file.
+    // Left unresumed, the downmix graph never produces audio: its dest
+    // track (what the PCM tap clones for local recording — see
+    // restartPcmCapture) delivers silence for the rest of the take even
+    // though everything downstream keeps running and looks healthy.
+    if (downmixCtx.state !== 'running') {
+      try { await downmixCtx.resume(); } catch (e) {}
+    }
     const source = downmixCtx.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
     const splitter = downmixCtx.createChannelSplitter(2);
     const dest = downmixCtx.createMediaStreamDestination();
@@ -118,7 +131,7 @@ let _warmModuleReady = null;
 // is the only thing Firefox honors, so listen for the first interaction
 // anywhere on the page and resume whichever audio contexts exist at that time.
 function _resumeAudioContextsOnGesture() {
-  for (const ctx of [_warmCtx, pcmCtx, opusCtx]) {
+  for (const ctx of [_warmCtx, pcmCtx, opusCtx, downmixCtx]) {
     if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
   }
 }
