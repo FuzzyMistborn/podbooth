@@ -9,6 +9,8 @@ const DEVICE_KEY_SPK  = 'podbooth:spk-device';
 const DEVICE_KEY_NAME = 'podbooth:participant-name';
 
 let stream = null;
+let hasBlockingIssues = false;
+let preflightOverridden = false;
 let audioContext = null;
 let analyser = null;
 let levelInterval = null;
@@ -22,9 +24,11 @@ const spkGroup    = document.getElementById('spk-select-group');
 const levelFill   = document.getElementById('level-fill');
 const nameInput   = document.getElementById('participant-name');
 const joinBtn     = document.getElementById('join-btn');
+const overrideWrap = document.getElementById('preflight-override');
+const overrideCheck = document.getElementById('preflight-override-check');
 
 function updateJoinButton() {
-  joinBtn.disabled = nameInput.value.trim().length === 0;
+  joinBtn.disabled = nameInput.value.trim().length === 0 || (hasBlockingIssues && !preflightOverridden);
 }
 
 async function init() {
@@ -42,10 +46,14 @@ async function init() {
     if (e.key === 'Enter' && !joinBtn.disabled) joinSession();
   });
   joinBtn.addEventListener('click', joinSession);
+  overrideCheck.addEventListener('change', () => {
+    preflightOverridden = overrideCheck.checked;
+    updateJoinButton();
+  });
   updateJoinButton();
   requestAnimationFrame(updateJoinButton);
   setTimeout(updateJoinButton, 100);
-  checkBrowserCapabilities();
+  runPreflightChecks();
   checkInterruptedSession();
   initFsaOptIn();
 }
@@ -209,15 +217,50 @@ async function checkBrowserCapabilities() {
     issues.push({ level: 'warn', text: 'Safari: video recording has known limitations. Chrome or Firefox is recommended.' });
   }
 
-  if (issues.length === 0) return;
+  return issues;
+}
+
+async function runPreflightChecks() {
+  const issues = await checkBrowserCapabilities();
+
+  if ([...micSelect.options].length === 0 && [...camSelect.options].length === 0) {
+    issues.push({ level: 'error', text: 'No camera or microphone detected — connect a device and reload.' });
+  }
+
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const { quota, usage } = await navigator.storage.estimate();
+      if (quota && usage !== undefined) {
+        const freeBytes = quota - usage;
+        if (freeBytes < 500 * 1024 * 1024) {
+          issues.push({ level: 'warn', text: 'Low browser storage available — a long recording may fail to save locally. Consider enabling a local recording folder below.' });
+        }
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), 4000);
+    const r = await fetch('/api/health', { signal: abort.signal }).finally(() => clearTimeout(timeout));
+    if (!r.ok) issues.push({ level: 'warn', text: 'Server reported a problem — recording may not upload correctly.' });
+  } catch (e) {
+    issues.push({ level: 'warn', text: 'Could not reach the server — check your connection before recording.' });
+  }
+
+  hasBlockingIssues = issues.some(i => i.level === 'error');
+  updateJoinButton();
+
   const wrap = document.getElementById('capability-warnings');
-  if (!wrap) return;
-  wrap.style.display = 'flex';
-  wrap.innerHTML = issues.map(i =>
-    `<div class="cap-item cap-${i.level}">` +
-    `<span class="cap-icon">${i.level === 'error' ? '✗' : i.level === 'warn' ? '⚠' : 'ℹ'}</span>` +
-    `<span>${i.text}</span></div>`
-  ).join('');
+  if (issues.length > 0 && wrap) {
+    wrap.style.display = 'flex';
+    wrap.innerHTML = issues.map(i =>
+      `<div class="cap-item cap-${i.level}">` +
+      `<span class="cap-icon">${i.level === 'error' ? '✗' : i.level === 'warn' ? '⚠' : 'ℹ'}</span>` +
+      `<span>${i.text}</span></div>`
+    ).join('');
+  }
+  if (hasBlockingIssues && overrideWrap) overrideWrap.style.display = 'flex';
 }
 
 function checkInterruptedSession() {

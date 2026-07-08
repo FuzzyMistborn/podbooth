@@ -75,6 +75,12 @@ def _set_csrf_cookie(response, token: str) -> None:
     )
 
 
+@router.get("/api/health")
+async def health():
+    """Cheap liveness check used by the prejoin preflight — no auth, no side effects."""
+    return JSONResponse({"ok": True})
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, _: None = Depends(require_host)):
     error = request.query_params.get("error")
@@ -736,6 +742,13 @@ async def verify_recordings(session_id: str, _: None = Depends(require_host)):
                     "participant": participant,
                     "file": name,
                     "issue": "upload dropped chunk(s) — " + fpath.read_text().strip(),
+                })
+                continue
+            if name.endswith(".failed"):
+                issues.append({
+                    "participant": participant,
+                    "file": name,
+                    "issue": "assembly (ffmpeg) failed for this track — raw chunks are preserved but no output was produced",
                 })
                 continue
             if "_chunk_" in name or "_noaudio" in name or "_source" in name:

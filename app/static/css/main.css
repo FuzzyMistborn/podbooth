@@ -1216,6 +1216,17 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .badge-recording  { background: rgba(232,93,0,0.15); color: var(--accent); }
 .badge-ended      { background: var(--bg-3); color: var(--text-3); }
 
+.proc-stage-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.proc-stage {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 3px;
+  background: rgba(232,93,0,0.12);
+  color: var(--accent);
+}
+
 .file-list { display: flex; flex-direction: column; gap: 8px; }
 .file-row {
   display: flex;
@@ -2502,6 +2513,21 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   border-radius: 2px;
   transition: width 0.3s ease;
 }
+.upload-speed-select {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+  cursor: pointer;
+  opacity: 0.85;
+}
+.upload-speed-select:hover { opacity: 1; }
+.upload-speed-select option { color: #000; }
 .upload-spinner {
   display: inline-block;
   width: 10px;
@@ -2565,17 +2591,65 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .cap-warn   { background: rgba(234,179,8,0.08);  border-color: rgba(234,179,8,0.25);  color: #fde047; }
 .cap-info   { background: rgba(148,163,184,0.08); border-color: rgba(148,163,184,0.2); color: var(--text-2); }
 
+.preflight-override {
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 2px 4px;
+}
+.preflight-override label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
 /* ── Prejoin File System Access opt-in ────────────────────────── */
 .fsa-optin {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   flex-wrap: wrap;
+  background: rgba(232,93,0,0.08);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius);
+  padding: 12px 14px;
 }
+
+.fsa-optin-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.fsa-optin-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.fsa-optin-sub {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.btn-fsa {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 9px 18px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, transform 0.1s;
+}
+.btn-fsa:hover { background: #ff6a0d; transform: translateY(-1px); }
+.btn-fsa:active { transform: none; }
 
 .fsa-status {
   font-size: 12px;
   color: var(--text-2);
+  width: 100%;
 }
 
 /* ── Prejoin recovery banner ────────────────────────────────── */

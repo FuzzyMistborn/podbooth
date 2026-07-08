@@ -35,9 +35,16 @@
     </div>
 
     <div id="capability-warnings" class="capability-warnings" style="display:none"></div>
+    <div id="preflight-override" class="preflight-override" style="display:none">
+      <label><input type="checkbox" id="preflight-override-check" /> Continue anyway</label>
+    </div>
 
     <div id="fsa-optin" class="fsa-optin" style="display:none">
-      <button class="btn-secondary" id="fsa-choose-btn" type="button">Enable local recording folder (recommended)</button>
+      <div class="fsa-optin-text">
+        <span class="fsa-optin-title">💾 Save a local backup while you record</span>
+        <span class="fsa-optin-sub">Recommended — protects your recording if the upload is interrupted</span>
+      </div>
+      <button class="btn-fsa" id="fsa-choose-btn" type="button">Choose folder</button>
       <span id="fsa-status" class="fsa-status"></span>
     </div>
 

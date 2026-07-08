@@ -6,6 +6,54 @@ const errorMsg = document.getElementById('error-msg');
 // identity → display name (set from metadata or participant name)
 const nameMap = new Map();
 
+// ── Audio mixing ──────────────────────────────────────────────────────────────
+// Each subscribed audio track is routed through its own GainNode into a shared
+// compressor/limiter before hitting the page's audio output. Without this, the
+// browser just sums every participant's raw track at full volume, which clips
+// hard as soon as more than one or two people are talking.
+
+let audioCtx = null;
+let compressor = null;
+let mixOutput = null; // hidden <audio> element playing the compressed mix
+const audioNodesByTrackId = new Map(); // track.sid → { source, gain }
+
+function ensureAudioGraph() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  compressor = audioCtx.createDynamicsCompressor();
+  compressor.threshold.value = -18;
+  compressor.knee.value = 24;
+  compressor.ratio.value = 8;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.25;
+
+  const dest = audioCtx.createMediaStreamDestination();
+  compressor.connect(dest);
+
+  mixOutput = document.createElement('audio');
+  mixOutput.autoplay = true;
+  mixOutput.srcObject = dest.stream;
+  document.body.appendChild(mixOutput);
+}
+
+function attachAudioTrack(track) {
+  ensureAudioGraph();
+  const stream = new MediaStream([track.mediaStreamTrack]);
+  const source = audioCtx.createMediaStreamSource(stream);
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0.7; // headroom per participant so the mix doesn't clip
+  source.connect(gain).connect(compressor);
+  audioNodesByTrackId.set(track.sid, { source, gain });
+}
+
+function detachAudioTrack(track) {
+  const nodes = audioNodesByTrackId.get(track.sid);
+  if (!nodes) return;
+  nodes.source.disconnect();
+  nodes.gain.disconnect();
+  audioNodesByTrackId.delete(track.sid);
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 function layoutGrid() {
@@ -154,7 +202,7 @@ async function init() {
       }
     }
     if (track.kind === Track.Kind.Audio) {
-      track.attach();
+      attachAudioTrack(track);
     }
   });
 
@@ -165,6 +213,9 @@ async function init() {
       } else if (pub.source === Track.Source.ScreenShare) {
         removeTile(`${participant.identity}-screen`);
       }
+    }
+    if (track.kind === Track.Kind.Audio) {
+      detachAudioTrack(track);
     }
   });
 
@@ -191,7 +242,7 @@ async function init() {
       }
     });
     p.audioTrackPublications.forEach(pub => {
-      if (pub.track && pub.isSubscribed) pub.track.attach();
+      if (pub.track && pub.isSubscribed) attachAudioTrack(pub.track);
     });
   }
 }

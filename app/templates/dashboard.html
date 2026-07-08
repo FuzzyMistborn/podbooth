@@ -187,6 +187,9 @@
         {% endif %}
       </div>
       {% endif %}
+      {% if session.ended %}
+      <div class="proc-stage-strip" id="proc-{{ session.id }}" style="display:none"></div>
+      {% endif %}
       {% if session.ended and whisperx_enabled %}
       {% set has_transcript = session_files[session.id] | selectattr('type', 'equalto', 'transcript') | list | length > 0 %}
       {% if not has_transcript %}
@@ -567,7 +570,6 @@ function _setExportState(sessionId, status, path, size_mb) {
     btn.disabled = true;
     if (caret) caret.style.display = 'none';
     if (dropdown) dropdown.style.display = 'none';
-    setTimeout(() => _pollExportProgress(sessionId), 2000);
   } else if (status === 'ready') {
     btn.textContent = `Grid (${size_mb} MB)`;
     btn.disabled = false;
@@ -605,9 +607,12 @@ function closeExportDropdown(sessionId) {
   if (dropdown) dropdown.style.display = 'none';
 }
 
-async function _pollExportProgress(sessionId) {
+// One-shot check (no self-scheduling — the shared pollSessionProcessing
+// loop below drives re-checks for every stage on one timer). Returns true if
+// an export is actively in progress.
+async function _checkExportProgress(sessionId) {
   const btn = _exportBtn(sessionId);
-  if (!btn) return;
+  if (!btn) return false;
 
   try {
     // Try to get detailed progress first
@@ -622,8 +627,7 @@ async function _pollExportProgress(sessionId) {
           if (prog.remaining_s != null) label += ` · ~${Math.round(prog.remaining_s)}s left`;
         }
         btn.textContent = label;
-        setTimeout(() => _pollExportProgress(sessionId), 2000);
-        return;
+        return true;
       }
     }
   } catch (e) {}
@@ -631,10 +635,11 @@ async function _pollExportProgress(sessionId) {
   // Fall back to plain status poll
   try {
     const r = await fetch(`/api/session/${sessionId}/export-status`);
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const { status, path, size_mb } = await r.json();
     _setExportState(sessionId, status, path, size_mb);
   } catch (e) {}
+  return false;
 }
 
 async function startExport(sessionId) {
@@ -652,14 +657,10 @@ async function startExport(sessionId) {
     _setExportState(sessionId, 'processing');
   } catch (e) {
     _setExportState(sessionId, 'idle');
+    return;
   }
+  pollSessionProcessing(sessionId);
 }
-
-// On load, sync export button state for any session that might already have an export
-document.querySelectorAll('.btn-export-grid').forEach(btn => {
-  // Use the progress endpoint first, fall back to status
-  _pollExportProgress(btn.dataset.sessionId);
-});
 
 let _pendingDelete = null;
 
@@ -711,27 +712,27 @@ document.getElementById('delete-modal-confirm').addEventListener('click', async 
 
 // ── Transcription status ─────────────────────────────────────────────────────
 
-async function _pollTxStatus(sessionId) {
+// One-shot check (see pollSessionProcessing) — returns true while transcription
+// is still in progress.
+async function _checkTxStatus(sessionId) {
   const statusEl = document.getElementById(`tx-${sessionId}`);
+  if (!statusEl) return false;
   try {
     const r = await fetch(`/api/session/${sessionId}/transcribe-status`);
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const { status } = await r.json();
     if (status === 'transcribing') {
-      if (statusEl) { statusEl.style.display = ''; statusEl.className = 'tx-status'; statusEl.textContent = 'Transcribing audio…'; }
-      setTimeout(() => _pollTxStatus(sessionId), 5000);
+      statusEl.style.display = ''; statusEl.className = 'tx-status'; statusEl.textContent = 'Transcribing audio…';
+      return true;
     } else if (status === 'done') {
       window.location.reload();
+      return true;
     } else if (status === 'failed') {
-      if (statusEl) { statusEl.style.display = ''; statusEl.className = 'tx-status tx-status--failed'; statusEl.textContent = 'Transcription failed'; }
+      statusEl.style.display = ''; statusEl.className = 'tx-status tx-status--failed'; statusEl.textContent = 'Transcription failed';
     }
   } catch (e) {}
+  return false;
 }
-
-document.querySelectorAll('.session-card.ended').forEach(card => {
-  const el = document.getElementById(`tx-${card.dataset.sessionId}`);
-  if (el) _pollTxStatus(card.dataset.sessionId);
-});
 
 async function retranscribe(sessionId, hostToken, btn) {
   btn.disabled = true;
@@ -744,14 +745,14 @@ async function retranscribe(sessionId, hostToken, btn) {
     });
     if (r.ok) {
       btn.textContent = 'Transcribing…';
-      // Ensure a status element exists so _pollTxStatus can show progress.
+      // Ensure a status element exists so _checkTxStatus can show progress.
       if (!document.getElementById(`tx-${sessionId}`)) {
         const p = document.createElement('p');
         p.className = 'assembly-status';
         p.id = `tx-${sessionId}`;
         btn.parentElement.before(p);
       }
-      _pollTxStatus(sessionId);
+      pollSessionProcessing(sessionId);
     } else {
       const d = await r.json().catch(() => ({}));
       btn.disabled = false;
@@ -804,19 +805,22 @@ async function startCloudUpload(sessionId, btn) {
     btn.textContent = 'Upload to Cloud';
     return;
   }
-  _pollCloudUpload(sessionId, btn);
+  pollSessionProcessing(sessionId);
 }
 
-async function _pollCloudUpload(sessionId, btn) {
-  if (!btn) btn = document.getElementById(`cloud-up-${sessionId}`);
-  if (!btn) return;
+// One-shot check (see pollSessionProcessing) — returns true while a cloud
+// upload is still in progress.
+async function _checkCloudUpload(sessionId) {
+  const btn = document.getElementById(`cloud-up-${sessionId}`);
+  if (!btn) return false;
   try {
     const r = await fetch(`/api/session/${sessionId}/upload-cloud-status`);
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const { status, message, uploaded, total } = await r.json();
     if (status === 'uploading') {
+      btn.disabled = true;
       btn.textContent = total ? `Uploading… ${uploaded}/${total}` : 'Uploading…';
-      setTimeout(() => _pollCloudUpload(sessionId, btn), 2000);
+      return true;
     } else if (status === 'done') {
       btn.disabled = false;
       btn.textContent = '✓ Uploaded';
@@ -826,24 +830,8 @@ async function _pollCloudUpload(sessionId, btn) {
       alert('Upload error: ' + (message || 'unknown error'));
     }
   } catch (e) {}
+  return false;
 }
-
-// Poll any sessions currently uploading (e.g. after a page reload)
-document.querySelectorAll('[id^="cloud-up-"]').forEach(btn => {
-  const sessionId = btn.id.replace('cloud-up-', '');
-  fetch(`/api/session/${sessionId}/upload-cloud-status`)
-    .then(r => r.json())
-    .then(({ status }) => {
-      if (status === 'uploading') {
-        btn.disabled = true;
-        btn.textContent = 'Uploading…';
-        _pollCloudUpload(sessionId, btn);
-      } else if (status === 'done') {
-        btn.textContent = '✓ Uploaded';
-      }
-    })
-    .catch(() => {});
-});
 
 // ── S3 File Delivery ─────────────────────────────────────────────────────────
 
@@ -981,32 +969,80 @@ async function deleteS3Files(sessionId, btn) {
   btn.disabled = false; btn.textContent = 'Delete all S3 files';
 }
 
-// Poll assembly status for ended sessions that have no files yet.
-// When assembly finishes, reload to show the assembled files.
-document.querySelectorAll('.session-card.ended[data-has-files="false"]').forEach(card => {
-  const sessionId = card.dataset.sessionId;
-  const statusEl = document.getElementById(`asm-${sessionId}`);
-  let wasAssembling = false;
-  let polls = 0;
+// ── Unified processing status ────────────────────────────────────────────────
+//
+// Assembly, transcription, export, and cloud upload used to each run their
+// own independent recursive setTimeout poll. They're merged here into one
+// timer per session card that checks whichever stages apply and renders a
+// single stage-tracker strip, so a card with several things happening at
+// once (e.g. assembling + a queued cloud upload) shows one coherent picture
+// instead of four separately-ticking widgets.
+const _procState = {}; // sessionId -> { asmPolls, wasAssembling }
 
-  async function check() {
-    if (polls++ > 60) return; // give up after ~3 minutes
+async function pollSessionProcessing(sessionId) {
+  const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
+  if (!card) return;
+  if (!_procState[sessionId]) _procState[sessionId] = { asmPolls: 0, wasAssembling: false };
+  const state = _procState[sessionId];
+
+  const asmEl = document.getElementById(`asm-${sessionId}`);
+  const wantAssembly = asmEl && card.dataset.hasFiles === 'false' && state.asmPolls <= 60;
+  const wantTx = !!document.getElementById(`tx-${sessionId}`);
+  const wantExport = !!_exportBtn(sessionId);
+  const wantCloud = !!document.getElementById(`cloud-up-${sessionId}`);
+
+  const stages = [];
+  let anyActive = false;
+
+  if (wantAssembly) {
+    state.asmPolls++;
     try {
       const r = await fetch(`/api/session/${sessionId}/assembly-status`);
-      if (!r.ok) return;
-      const { assembling } = await r.json();
-
+      const { assembling } = r.ok ? await r.json() : { assembling: false };
       if (assembling) {
-        wasAssembling = true;
-        if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Processing recordings…'; }
-        setTimeout(check, 3000);
-      } else if (wasAssembling) {
+        state.wasAssembling = true;
+        asmEl.style.display = ''; asmEl.textContent = 'Processing recordings…';
+        anyActive = true;
+        stages.push({ label: 'Assemble', state: 'active' });
+      } else if (state.wasAssembling) {
         window.location.reload();
+        return;
       }
     } catch (e) {}
   }
 
-  check();
+  if (wantTx) {
+    const active = await _checkTxStatus(sessionId);
+    if (active) { anyActive = true; stages.push({ label: 'Transcribe', state: 'active' }); }
+  }
+
+  if (wantExport) {
+    const active = await _checkExportProgress(sessionId);
+    if (active) { anyActive = true; stages.push({ label: 'Export', state: 'active' }); }
+  }
+
+  if (wantCloud) {
+    const active = await _checkCloudUpload(sessionId);
+    if (active) { anyActive = true; stages.push({ label: 'Cloud upload', state: 'active' }); }
+  }
+
+  const stripEl = document.getElementById(`proc-${sessionId}`);
+  if (stripEl) {
+    if (stages.length > 0) {
+      stripEl.style.display = 'flex';
+      stripEl.innerHTML = stages.map(s => `<span class="proc-stage proc-stage--${s.state}">⟳ ${s.label}</span>`).join('');
+    } else {
+      stripEl.style.display = 'none';
+    }
+  }
+
+  if (anyActive) setTimeout(() => pollSessionProcessing(sessionId), 2500);
+}
+
+// Kick off one shared poll per session card that might have something to
+// track — the function itself no-ops for stages that don't apply.
+document.querySelectorAll('.session-card').forEach(card => {
+  pollSessionProcessing(card.dataset.sessionId);
 });
 </script>
 {% endblock %}

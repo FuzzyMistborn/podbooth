@@ -313,18 +313,42 @@ async function startLocalRecording() {
 // entirely: the canvas has no dependency on any particular
 // MediaStreamTrack's lifecycle, so captureStream() keeps producing frames
 // no matter how many times the camera is toggled mid-recording.
+// Frozen-frame detection: a camera that silently stops delivering new frames
+// (driver hang, cable issue) still leaves the MediaRecorder "recording" and
+// enqueuing chunks — those chunks just all contain the same still image, so
+// nothing in the upload/assembly pipeline ever notices. Track the source
+// <video> element's currentTime advancing; if it stalls for several seconds
+// while the camera is supposed to be on, that's a real freeze, not a
+// deliberate camera-off.
+const VIDEO_FREEZE_WARN_MS = 5000;
+let _lastVideoTime = -1;
+let _lastVideoAdvanceAt = Date.now();
+let _videoFrozen = false;
+
 function _videoDrawLoop() {
   if (!videoRecorder) { videoDrawRAF = null; return; }
   const tile = document.getElementById(`tile-${identity}`);
   const videoEl = tile ? tile.querySelector('video') : null;
-  if (videoEl && videoEl.readyState >= 2 && !(tile.classList.contains('camera-off'))) {
+  const cameraOff = !tile || tile.classList.contains('camera-off');
+  if (videoEl && videoEl.readyState >= 2 && !cameraOff) {
     videoCanvasCtx.drawImage(videoEl, 0, 0, videoCanvas.width, videoCanvas.height);
+    if (videoEl.currentTime !== _lastVideoTime) {
+      _lastVideoTime = videoEl.currentTime;
+      _lastVideoAdvanceAt = Date.now();
+      if (_videoFrozen) { _videoFrozen = false; recLog('_videoDrawLoop: video frame flow resumed'); }
+    } else if (!_videoFrozen && Date.now() - _lastVideoAdvanceAt > VIDEO_FREEZE_WARN_MS) {
+      _videoFrozen = true;
+      recLog('_videoDrawLoop: no new video frame in %dms — camera may be frozen', VIDEO_FREEZE_WARN_MS);
+      showToast?.('Camera feed looks frozen — check the connection or try switching cameras');
+    }
   } else {
     // Camera off (or not yet ready) — paint a blank frame instead of
     // leaving whatever pixels were drawn last, so recording matches what
     // the live preview shows (avatar cover) rather than freezing.
     videoCanvasCtx.fillStyle = '#000';
     videoCanvasCtx.fillRect(0, 0, videoCanvas.width, videoCanvas.height);
+    _lastVideoAdvanceAt = Date.now(); // camera-off isn't a freeze — don't warn once it's back on
+    _videoFrozen = false;
   }
   videoDrawRAF = requestAnimationFrame(_videoDrawLoop);
 }
@@ -337,10 +361,18 @@ function startVideoRecording() {
   // (trex/track-id mismatches, missing moov) the way webm/matroska clusters
   // can — see the assembly design note at the top of upload.py. ffmpeg
   // transcodes webm to mp4 at assembly time anyway.
+  //
+  // h264 is deliberately NOT tried first: LiveKit is already running a
+  // hardware H.264 encode session on this same camera track to publish over
+  // WebRTC, and most GPUs only support one concurrent hardware H.264 encode
+  // session. Starting a second one via MediaRecorder gets silently evicted a
+  // few seconds in on affected hardware (recording stops after ~2s with no
+  // error surfaced, since MediaRecorder had no onerror handler — see below).
+  // vp9/vp8 are software-encoded and don't contend with LiveKit's encoder.
   const candidates = [
-    ['video/webm;codecs=h264,opus', 'webm'],
     ['video/webm;codecs=vp9,opus', 'webm'],
     ['video/webm;codecs=vp8,opus', 'webm'],
+    ['video/webm;codecs=h264,opus', 'webm'],
     ['video/webm', 'webm'],
   ];
   const found = candidates.find(([mime]) => MediaRecorder.isTypeSupported(mime));
@@ -381,6 +413,10 @@ function startVideoRecording() {
     } else {
       recLog('video ondataavailable: empty chunk (skipped)');
     }
+  };
+  videoRecorder.onerror = e => {
+    recLog('video recorder error: %s', e.error?.message || e.error || e);
+    console.error('Video MediaRecorder error:', e.error || e);
   };
   videoRecorder.onstop = () => {
     recLog('video onstop: finalizing, startTime=%s hasAudioSync=%s', videoStartTime, hasAudioSync);
@@ -459,6 +495,10 @@ function startScreenRecording() {
       recLog('screen ondataavailable: empty chunk (skipped)');
     }
   };
+  screenRecorder.onerror = e => {
+    recLog('screen recorder error: %s', e.error?.message || e.error || e);
+    console.error('Screen MediaRecorder error:', e.error || e);
+  };
   screenRecorder.onstop = () => {
     finalizeTrack('screen', {
       format: 'container',
@@ -487,11 +527,44 @@ function _connectPcmKeepAlive(node, ctx) {
 // startPcmCapture. Buffering is gated on pcmCapturing so the pre-built graph
 // can sit connected and "warming up" on Firefox without accumulating audio
 // before a recording has actually been requested.
+// Silent-audio detection: a dead/disconnected mic can leave the recorder
+// "running" and producing chunks that are just zeroed samples — nothing else
+// in the pipeline distinguishes that from a normal quiet moment. RMS near
+// zero for several seconds straight (while the user hasn't muted themselves)
+// is worth a warning, since 40 minutes of accidental silence is a much worse
+// outcome than a transient false positive.
+const AUDIO_SILENCE_WARN_MS = 5000;
+const AUDIO_SILENCE_RMS_THRESHOLD = 0.001;
+let _audioSilentSince = null;
+let _audioSilenceWarned = false;
+
+function _checkAudioSilence(channels) {
+  if (micMuted) { _audioSilentSince = null; _audioSilenceWarned = false; return; } // expected silence
+  let sumSq = 0, n = 0;
+  for (const ch of channels) {
+    for (let i = 0; i < ch.length; i++) { sumSq += ch[i] * ch[i]; n++; }
+  }
+  const rms = n > 0 ? Math.sqrt(sumSq / n) : 0;
+  const now = Date.now();
+  if (rms < AUDIO_SILENCE_RMS_THRESHOLD) {
+    if (_audioSilentSince === null) _audioSilentSince = now;
+    else if (!_audioSilenceWarned && now - _audioSilentSince > AUDIO_SILENCE_WARN_MS) {
+      _audioSilenceWarned = true;
+      recLog('_checkAudioSilence: no audio signal in %dms — mic may be dead', AUDIO_SILENCE_WARN_MS);
+      showToast?.('No audio detected from your microphone — check it\'s connected and unmuted');
+    }
+  } else {
+    _audioSilentSince = null;
+    _audioSilenceWarned = false;
+  }
+}
+
 function _onPcmMessage(e) {
   const channels = e.data;
   if (e.data?.type === 'drained') return; // handled by drain handshake
   if (!pcmCapturing) return;
   if (!channels || !channels.length) return;
+  _checkAudioSilence(channels);
   pcmChannels = 2; // always stereo; interleave duplicates mono source if needed
   // Found it: muting goes through room.localParticipant.setMicrophoneEnabled(),
   // which disables the underlying MediaStreamTrack. Chrome keeps delivering
@@ -710,6 +783,10 @@ function startOpusFallback() {
       enqueueChunk(e.data, 'audio', ext);
     }
   };
+  audioRecorder.onerror = e => {
+    recLog('audio recorder error: %s', e.error?.message || e.error || e);
+    console.error('Audio MediaRecorder error:', e.error || e);
+  };
   audioRecorder.onstop = () => {
     finalizeTrack('audio', {
       format: 'container',
@@ -733,10 +810,23 @@ async function stopLocalRecording() {
   // the final ondataavailable (and thus the finalize enqueue) has completed.
   // Without this we're racing against the 100ms delay in waitForUploads, which
   // is fragile when the browser is under load (e.g. two browsers on one machine).
+  //
+  // Safari has historically been inconsistent about whether the final
+  // ondataavailable fires strictly before onstop (the spec order every other
+  // browser follows) or can land just after it. If onstop resolves this
+  // promise and the caller immediately treats the track as flushed, a
+  // late-arriving final chunk on Safari would be enqueued after finalize
+  // already went out, silently truncating the recording. Give any in-flight
+  // final chunk a short grace window to land before resolving.
+  const STOP_GRACE_MS = 300;
   function stoppedPromise(rec, label) {
     return new Promise(resolve => {
       const prev = rec.onstop;
-      rec.onstop = e => { prev?.call(rec, e); recLog('stopLocalRecording: %s onstop resolved', label); resolve(); };
+      rec.onstop = e => {
+        prev?.call(rec, e);
+        recLog('stopLocalRecording: %s onstop fired, waiting %dms grace for a late final chunk', label, STOP_GRACE_MS);
+        setTimeout(() => { recLog('stopLocalRecording: %s onstop resolved', label); resolve(); }, STOP_GRACE_MS);
+      };
     });
   }
 
@@ -787,8 +877,11 @@ async function stopLocalRecording() {
       };
       pcmNode.port.postMessage({ type: 'drain' });
     });
-    const drained = await Promise.race([drainAck, new Promise(r => setTimeout(r, 500, 'timeout'))]);
-    if (drained === 'timeout') recLog('stopLocalRecording: PCM drain timed out — flushing what we have');
+    const drained = await Promise.race([drainAck, new Promise(r => setTimeout(r, 3000, 'timeout'))]);
+    if (drained === 'timeout') {
+      recLog('stopLocalRecording: PCM drain timed out — flushing what we have, some trailing audio may be lost');
+      console.warn('Recording stop: PCM drain timed out — the tail of the audio track may be truncated');
+    }
     flushPcm(true);
     pcmNode.port.onmessage = null;
     try { pcmNode.disconnect(); } catch (e) {}
@@ -805,10 +898,15 @@ async function stopLocalRecording() {
   // finalizeTrack has been called, so the queue is fully populated before
   // waitForUploads sees it.
   recLog('stopLocalRecording: waiting for %d recorder onstop(s)', stopPromises.length);
-  await Promise.race([
-    Promise.all(stopPromises),
-    new Promise(r => setTimeout(r, 5000)),
+  const result = await Promise.race([
+    Promise.all(stopPromises).then(() => 'ok'),
+    new Promise(r => setTimeout(r, 15000, 'timeout')),
   ]);
+  if (result === 'timeout') {
+    recLog('stopLocalRecording: timed out waiting for onstop — some final chunks may be missing from the upload');
+    console.error('Recording stop timed out — the last few seconds of this recording may not have been saved');
+    showToast?.('Recording may be missing its final seconds — check the upload before trusting the file');
+  }
   recLog('stopLocalRecording: done');
 }
 
@@ -894,8 +992,9 @@ function setRecStatus(key, state) {
 }
 
 function updateRecStatus() {
-  setRecStatus('audio', audioRecorder?.state === 'recording' || pcmCapturing ? 'ok' : isRecording ? 'error' : 'idle');
-  setRecStatus('video', videoRecorder ? (videoRecorder.state === 'recording' ? 'ok' : 'warn') : 'idle');
+  const audioRunning = audioRecorder?.state === 'recording' || pcmCapturing;
+  setRecStatus('audio', !audioRunning ? (isRecording ? 'error' : 'idle') : _audioSilenceWarned ? 'warn' : 'ok');
+  setRecStatus('video', !videoRecorder ? 'idle' : videoRecorder.state !== 'recording' ? 'warn' : _videoFrozen ? 'warn' : 'ok');
   const uploadBacklog = uploadStats.queued - uploadStats.completed;
   setRecStatus('upload', uploadHasError ? 'error' : uploadBacklog > 10 ? 'warn' : 'ok');
   setRecStatus('livekit', room?.state === 'connected' ? 'ok' : 'error');

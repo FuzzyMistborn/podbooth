@@ -120,16 +120,59 @@ function fsaSlug(name) {
 // the entire recording.
 const FSA_FLUSH_THRESHOLD_BYTES = 8 * 1024 * 1024;
 
+// The 'raw' audio track is headerless interleaved 32-bit-float PCM (see
+// flushPcm in recording.js — always 2ch/48kHz). That's fine for the server,
+// which wraps it in a real WAV at assembly time, but a local FSA file never
+// goes through that step, so without a header of its own it's an unplayable
+// blob of samples on the user's disk. Give it a real WAV container locally:
+// reserve a 44-byte placeholder header up front, then patch the size fields
+// in on close once the final byte count is known.
+const FSA_WAV_SAMPLE_RATE = 48000;
+const FSA_WAV_CHANNELS = 2;
+const FSA_WAV_BITS_PER_SAMPLE = 32; // IEEE float
+
+function _fsaWavHeader(dataBytes) {
+  const blockAlign = FSA_WAV_CHANNELS * (FSA_WAV_BITS_PER_SAMPLE / 8);
+  const byteRate = FSA_WAV_SAMPLE_RATE * blockAlign;
+  const buf = new ArrayBuffer(44);
+  const view = new DataView(buf);
+  const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataBytes, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 3, true); // 3 = IEEE float
+  view.setUint16(22, FSA_WAV_CHANNELS, true);
+  view.setUint32(24, FSA_WAV_SAMPLE_RATE, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, FSA_WAV_BITS_PER_SAMPLE, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataBytes, true);
+  return buf;
+}
+
 async function fsaOpenTrackFile(dirHandle, trackType, epoch, ext, participant) {
-  const name = `${fsaSlug(participant)}_${trackType}_${epoch}.${ext}`;
+  const isRawAudio = trackType === 'audio' && ext === 'raw';
+  const fileExt = isRawAudio ? 'wav' : ext;
+  const name = `${fsaSlug(participant)}_${trackType}_${epoch}.${fileExt}`;
   const fileHandle = await dirHandle.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
-  return { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, chunksWritten: 0, closed: false };
+  const track = { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, chunksWritten: 0, closed: false, isRawAudio, dataBytes: 0 };
+  if (isRawAudio) {
+    // Placeholder header — sizes get patched to their real values on close.
+    await writable.write(_fsaWavHeader(0));
+    track.bytesWritten = 44;
+    track.flushedBytes = 44;
+  }
+  return track;
 }
 
 async function fsaWriteChunk(track, blob) {
   await track.writable.write(blob);
   track.bytesWritten += blob.size;
+  if (track.isRawAudio) track.dataBytes += blob.size;
   // Count only chunks that actually landed in the file (incremented after the
   // write resolves). If a later write fails and the track fails over to
   // IndexedDB, this is exactly how many original chunk indices the salvaged
@@ -158,6 +201,15 @@ async function fsaCloseTrackFile(track) {
   // would otherwise abort the whole upload batch for no reason, since the
   // file itself is already finished and safe to re-read.
   if (!track.closed) {
+    if (track.isRawAudio) {
+      // Patch the placeholder header's size fields now that the final byte
+      // count is known, so the file left on disk is a self-contained,
+      // playable WAV rather than headerless raw samples.
+      await track.writable.close();
+      track.writable = await track.fileHandle.createWritable({ keepExistingData: true });
+      await track.writable.seek(0);
+      await track.writable.write(_fsaWavHeader(track.dataBytes));
+    }
     await track.writable.close();
     track.closed = true;
   }

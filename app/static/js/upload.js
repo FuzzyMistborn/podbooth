@@ -292,11 +292,60 @@ const CHUNK_UPLOAD_TIMEOUT_MS = 60 * 1000;
 // ever finish. Scale the timeout by size using a conservative minimum
 // throughput floor, on top of the flat per-request timeout for latency/setup.
 const MIN_UPLOAD_BYTES_PER_SEC = 512 * 1024; // 512 KB/s — a deliberately low floor
+
+// Upload speed preference, selectable from the upload banner while chunks are
+// in flight and read live here on every chunk — 'low' caps upload bandwidth
+// so recording doesn't saturate a home connection shared with a video call;
+// 'unlimited' (default) applies no cap.
+const UPLOAD_SPEED_KEY = 'podbooth:upload-speed';
+const UPLOAD_SPEED_CAPS_BYTES_PER_SEC = { low: 250 * 1024, normal: 1024 * 1024 };
+
+function _uploadSpeedCap() {
+  let pref = 'unlimited';
+  try { pref = localStorage.getItem(UPLOAD_SPEED_KEY) || 'unlimited'; } catch (e) {}
+  return UPLOAD_SPEED_CAPS_BYTES_PER_SEC[pref] || null; // null = unlimited
+}
+
 function _uploadTimeoutForSize(bytes) {
-  return CHUNK_UPLOAD_TIMEOUT_MS + Math.ceil(bytes / MIN_UPLOAD_BYTES_PER_SEC) * 1000;
+  // The floor for the timeout must never be faster than the user's own
+  // configured cap, or a deliberately-throttled transfer would abort itself.
+  const floor = Math.min(MIN_UPLOAD_BYTES_PER_SEC, _uploadSpeedCap() || Infinity);
+  return CHUNK_UPLOAD_TIMEOUT_MS + Math.ceil(bytes / floor) * 1000;
+}
+
+// Simple token-bucket: before sending `bytes`, wait however long is needed to
+// keep the average rate at or under the configured cap. Throttling happens
+// between chunks (the natural granularity here — see upload.js header comment)
+// rather than mid-transfer, so no change is needed to how a chunk is sent.
+let _uploadTokens = 0;
+let _uploadTokensAt = Date.now();
+
+async function _throttleForUpload(bytes, cancelSignal = null) {
+  const cap = _uploadSpeedCap();
+  if (!cap) return;
+  const now = Date.now();
+  _uploadTokens += ((now - _uploadTokensAt) / 1000) * cap;
+  _uploadTokensAt = now;
+  _uploadTokens = Math.min(_uploadTokens, cap); // don't let idle time bank unbounded burst
+  if (_uploadTokens < bytes) {
+    const waitMs = ((bytes - _uploadTokens) / cap) * 1000;
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, waitMs);
+      if (cancelSignal) cancelSignal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+    _uploadTokens = 0;
+    _uploadTokensAt = Date.now();
+  } else {
+    _uploadTokens -= bytes;
+  }
 }
 
 async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName, cancelSignal = null) {
+  await _throttleForUpload(blob.size, cancelSignal);
+  if (cancelSignal?.aborted) {
+    recLog('uploadChunk: %s #%d cancelled by user during throttle wait', trackType, index);
+    return false;
+  }
   recLog('uploadChunk: %s #%d size=%d', trackType, index, blob.size);
   const key = `${trackType}#${index}`;
   const deadline = Date.now() + CHUNK_RETRY_BUDGET_MS;
@@ -466,7 +515,13 @@ async function _doUploadAllRecordedChunks() {
       uploadStats.queued++;
       refreshUploadBanner();
       recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
-      const file = await fsaCloseTrackFile(localTrack);
+      let file = await fsaCloseTrackFile(localTrack);
+      // The on-disk copy of a raw-PCM audio track is wrapped in a real WAV
+      // header (see fsaOpenTrackFile/_fsaWavHeader in fsa-store.js) so it's
+      // playable locally, but the server still expects headerless f32le
+      // samples for its own `pcm` ffmpeg conversion (see below) — strip the
+      // 44-byte header back off just for the copy we upload.
+      if (localTrack.isRawAudio) file = file.slice(44);
       // If this track failed over from FSA to IndexedDB mid-recording, the
       // whole-file we're uploading as chunk 0 already contains the first
       // `chunksWritten` chunks (original indices 0..chunksWritten-1); the rest
@@ -563,18 +618,19 @@ async function waitForUploads() {
       } catch (e) {}
     }
 
-    showUploadBanner('done');
-    setTimeout(() => hideUploadBanner(), 8000);
-
     if (IS_HOST) {
+      showUploadBanner('verifying');
       try {
         const vr = await fetch(`/api/session/${SESSION_ID}/verify-recordings`);
         if (vr.ok) {
           const { issues } = await vr.json();
-          if (issues && issues.length > 0) showUploadWarnings(issues);
+          if (issues && issues.length > 0) { showUploadWarnings(issues); return; }
         }
       } catch (e) {}
     }
+
+    showUploadBanner('done');
+    setTimeout(() => hideUploadBanner(), 8000);
   } catch (e) {
     showUploadBanner('error');
   } finally {
@@ -603,8 +659,31 @@ function _buildUploadBanner(banner, state) {
     fill.style.width = (t > 0 ? Math.round(n / t * 100) : 0) + '%';
     track.appendChild(fill);
     main.appendChild(track);
+
+    const speedSelect = document.createElement('select');
+    speedSelect.className = 'upload-speed-select';
+    speedSelect.title = 'Upload speed';
+    speedSelect.innerHTML = `
+      <option value="unlimited">Unlimited speed</option>
+      <option value="normal">Normal (1 MB/s)</option>
+      <option value="low">Low (250 KB/s)</option>
+    `;
+    try {
+      const saved = localStorage.getItem(UPLOAD_SPEED_KEY);
+      if (saved && [...speedSelect.options].some(o => o.value === saved)) speedSelect.value = saved;
+    } catch (e) {}
+    speedSelect.addEventListener('change', () => {
+      try { localStorage.setItem(UPLOAD_SPEED_KEY, speedSelect.value); } catch (e) {}
+    });
+    main.appendChild(speedSelect);
   } else if (state === 'assembling') {
     lbl.textContent = 'Assembling recordings…';
+    main.appendChild(lbl);
+    const spin = document.createElement('span');
+    spin.className = 'upload-spinner';
+    main.appendChild(spin);
+  } else if (state === 'verifying') {
+    lbl.textContent = 'Verifying recordings…';
     main.appendChild(lbl);
     const spin = document.createElement('span');
     spin.className = 'upload-spinner';
@@ -633,7 +712,7 @@ function showUploadBanner(state) {
   uploadPending = (state === 'uploading');
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
-  banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling', 'cancelled');
+  banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying');
   banner.classList.add(state);
   _buildUploadBanner(banner, state);
 }
@@ -669,7 +748,7 @@ function hideUploadBanner() {
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
   banner.classList.add('hidden');
-  banner.classList.remove('uploading', 'done', 'error', 'assembling', 'cancelled');
+  banner.classList.remove('uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying');
 }
 
 function showUploadWarnings(issues) {
