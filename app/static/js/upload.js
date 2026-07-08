@@ -264,17 +264,19 @@ const CHUNK_RETRY_BUDGET_MS = 10 * 60 * 1000;
 // trouble without us ever abandoning a chunk mid-flight.
 const uploadStruggling = new Set();
 
-// Lets the user cancel an in-progress File System Access whole-file upload
-// (see _doUploadAllRecordedChunks). Only set while such an upload is
-// in-flight — IndexedDB chunk uploads aren't wired to this cancel, since
-// those are many small requests rather than one large one worth aborting.
-let fsaUploadController = null;
+// Lets the user cancel any in-progress File System Access whole-file
+// upload(s) (see _doUploadAllRecordedChunks). Audio/video/screen tracks can
+// each have their own FSA whole-file upload in flight at the same time
+// (_uploadOneTrack runs per-track via Promise.all), so this is a Set rather
+// than a single controller — a single shared variable let one track's
+// completion null it out from under a still-in-flight sibling track.
+const fsaUploadControllers = new Set();
 let uploadCancelled = false;
 
 function cancelFsaUpload() {
-  if (!fsaUploadController) return;
-  recLog('cancelFsaUpload: cancelling in-progress FSA whole-file upload');
-  fsaUploadController.abort();
+  if (fsaUploadControllers.size === 0) return;
+  recLog('cancelFsaUpload: cancelling in-progress FSA whole-file upload(s)');
+  for (const controller of fsaUploadControllers) controller.abort();
 }
 
 // A hung TCP connection (common on a flaky VPN/tunnel link) leaves fetch()
@@ -556,11 +558,12 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
     const wholeMeta = (failedTrack && failedTrack.chunksWritten > 1)
       ? { subsumes_chunks: failedTrack.chunksWritten }
       : {};
-    fsaUploadController = new AbortController();
+    const trackController = new AbortController();
+    fsaUploadControllers.add(trackController);
     refreshUploadBanner();
-    const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, fsaUploadController.signal);
-    const wasCancelled = fsaUploadController.signal.aborted;
-    fsaUploadController = null;
+    const ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, trackController.signal);
+    const wasCancelled = trackController.signal.aborted;
+    fsaUploadControllers.delete(trackController);
     uploadStats.completed++;
     refreshUploadBanner();
     delete fsaFailedTracks[trackType];
@@ -753,14 +756,14 @@ function refreshUploadBanner() {
   // many GB) to be worth letting the user abort mid-transfer.
   const main = banner.querySelector('.upload-banner-main');
   let cancelBtn = banner.querySelector('.upload-cancel-btn');
-  if (fsaUploadController && !cancelBtn && main) {
+  if (fsaUploadControllers.size > 0 && !cancelBtn && main) {
     cancelBtn = document.createElement('button');
     cancelBtn.className = 'upload-cancel-btn';
     cancelBtn.textContent = 'Cancel upload';
     cancelBtn.title = 'Stop sending this recording to the cloud';
     cancelBtn.addEventListener('click', cancelFsaUpload);
     main.appendChild(cancelBtn);
-  } else if (!fsaUploadController && cancelBtn) {
+  } else if (fsaUploadControllers.size === 0 && cancelBtn) {
     cancelBtn.remove();
   }
 }
