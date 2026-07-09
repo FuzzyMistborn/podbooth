@@ -557,6 +557,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   display: block;
 }
 .participant-tile.local video { transform: scaleX(-1); }
+body.no-mirror .participant-tile.local video { transform: none; }
 
 .tile-video-cover {
   position: absolute;
@@ -959,6 +960,7 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   justify-content: space-between;
   padding: 0 20px;
   height: 64px;
+  order: 2;
   border-top: 1px solid var(--border);
   background: var(--bg-1);
   flex-shrink: 0;
@@ -1543,6 +1545,8 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   transition: background 0.4s, border-color 0.4s, box-shadow 0.4s;
 }
 .timer-bar.hidden { display: none; }
+.timer-bar.popped-out { display: none; }
+.timer-bar.timer-pos-bottom { order: 1; margin: 0 16px 4px; }
 .timer-bar.timer-green {
   background: rgba(34, 197, 94, 0.10);
   border-color: rgba(34, 197, 94, 0.30);
@@ -1603,19 +1607,6 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   min-width: 0;
   overflow: hidden;
 }
-.timer-notes-toggle {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  padding: 2px;
-  color: var(--text-3);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  transition: color 0.15s, transform 0.2s;
-}
-.timer-notes-toggle:hover { color: var(--text-2); }
-.timer-notes-toggle.collapsed svg { transform: rotate(-90deg); }
 .timer-topic-name {
   font-size: 13px;
   font-weight: 600;
@@ -1659,6 +1650,12 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 .timer-eye-btn:hover { color: var(--text-2); }
 .timer-eye-btn svg { width: 15px; height: 15px; }
 .timer-eye-btn.inactive { opacity: 0.3; }
+#btn-timer-collapse svg { transition: transform 0.2s; }
+.timer-bar.timer-collapsed #btn-timer-collapse svg { transform: rotate(180deg); }
+.timer-bar.timer-collapsed .timer-topic-name { display: none !important; }
+.timer-bar.timer-collapsed .timer-notes-row,
+.timer-bar.timer-collapsed .timer-progress-track { display: none !important; }
+.timer-bar.timer-collapsed { padding-top: 4px; padding-bottom: 4px; }
 .timer-notes-row {
   font-size: 13px;
   color: var(--text-2);
@@ -2841,20 +2838,32 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 }
 
 /* ── Fullscreen mode ─────────────────────────────────────────── */
+/* The site header (logo, episode title, WebRTC stats) is pure chrome with
+   no controls of its own — in fullscreen it just eats vertical space and,
+   when it used to peek in on mouse-move, collided with the browser's own
+   native "Press Esc to exit full screen" banner at the very top edge,
+   blocking clicks on both (worst on small monitors). Simplest fix: don't
+   show it in fullscreen at all. */
 body.is-fullscreen .site-header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 500;
-  opacity: 0;
-  transform: translateY(-100%);
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  pointer-events: none;
+  display: none;
 }
 body.is-fullscreen .studio-layout {
   height: 100dvh;
   overflow: hidden;
+}
+/* Small top clearance so the timer bar's own controls (move/collapse/
+   pop-out) don't sit exactly where a mouse-move re-triggers that native
+   banner — hovering to click them would otherwise re-summon the overlay
+   that blocks the click. */
+body.is-fullscreen .timer-bar {
+  margin-top: 16px;
+}
+/* Bottom-positioned timer sits in normal flow at the very bottom edge in
+   fullscreen — exactly where the absolutely-positioned .controls-bar (64px
+   tall, peeks in on mouse-move) overlaps it, blocking its own controls the
+   same way the native fullscreen banner blocks the top-positioned bar. */
+body.is-fullscreen .timer-bar.timer-pos-bottom {
+  margin-bottom: 80px;
 }
 body.is-fullscreen .controls-bar {
   position: absolute;
@@ -2866,11 +2875,6 @@ body.is-fullscreen .controls-bar {
   z-index: 400;
   transition: opacity 0.25s ease, transform 0.25s ease;
   pointer-events: none;
-}
-body.is-fullscreen.controls-peek .site-header {
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
 }
 body.is-fullscreen.controls-peek .controls-bar {
   opacity: 1;
@@ -2885,6 +2889,7 @@ body.is-fullscreen.controls-peek .controls-bar {
   .ctrl-btn { width: 40px; height: 40px; }
   .ctrl-btn svg { width: 17px; height: 17px; }
   .device-btn-group .ctrl-btn { width: 36px; }
+  .record-btn, .pause-btn, .resume-btn, .stop-btn { width: auto; height: 40px; }
   .share-wrap input { width: 180px; }
   .session-title-label { max-width: 160px; }
 }
@@ -2899,7 +2904,7 @@ body.is-fullscreen.controls-peek .controls-bar {
   .device-caret { width: 13px; }
   .session-title-label { max-width: 140px; font-size: 12px; }
   .btn-share, .btn-danger { padding: 7px 11px; font-size: 12px; }
-  .record-btn, .pause-btn, .resume-btn, .stop-btn { padding: 0 10px; font-size: 11px; gap: 5px; }
+  .record-btn, .pause-btn, .resume-btn, .stop-btn { width: auto; height: 36px; padding: 0 10px; font-size: 11px; gap: 5px; }
   .video-grid { padding: 10px; gap: 6px; }
   .share-wrap input { width: 150px; }
 }
@@ -2927,7 +2932,7 @@ body.is-fullscreen.controls-peek .controls-bar {
 
   /* Shrink text buttons */
   .btn-share, .btn-danger { padding: 6px 9px; font-size: 11px; }
-  .record-btn, .pause-btn, .resume-btn, .stop-btn { padding: 0 8px; font-size: 10px; gap: 4px; }
+  .record-btn, .pause-btn, .resume-btn, .stop-btn { width: auto; height: 32px; padding: 0 8px; font-size: 10px; gap: 4px; }
   #record-label { display: none; }
   .tile-wave { display: none; }
 

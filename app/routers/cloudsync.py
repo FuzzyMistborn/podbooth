@@ -13,6 +13,7 @@ Remote path layout:
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -305,9 +306,9 @@ class S3Backend(CloudBackend):
         except ImportError:
             return 0, f"{self._name}: boto3 is required for S3-compatible uploads (pip install boto3)"
 
-        import functools
-
         def _do_upload() -> tuple[int, str]:
+            # boto3 clients are thread-safe for making requests, so a single
+            # client can be shared across the pool below.
             s3 = boto3.client(
                 "s3",
                 endpoint_url=self._endpoint_url,
@@ -315,20 +316,34 @@ class S3Backend(CloudBackend):
                 aws_secret_access_key=self._access_key_secret,
                 region_name=self._region,
             )
-            uploaded = 0
+            to_upload = [i for i in items if i.local_path.is_file()]
             errors: list[str] = []
-            for item in items:
-                if not item.local_path.is_file():
-                    continue
+
+            def _upload_one(item) -> bool:
                 key = f"{self._upload_path}/{item.remote_path}" if self._upload_path else item.remote_path
                 try:
                     # Never log presigned URLs — they carry embedded credentials.
                     s3.upload_file(str(item.local_path), self._bucket, key)
-                    uploaded += 1
                     logger.info("%s upload ok: s3://%s/%s", self._name, self._bucket, key)
+                    return True
                 except (BotoCoreError, ClientError) as e:
                     logger.error("%s upload failed: %s: %s", self._name, key, e)
                     errors.append(f"{item.local_path.name}: {e}")
+                    return False
+
+            uploaded = 0
+            if to_upload:
+                # Files upload concurrently to this backend — this is a
+                # datacenter-to-datacenter link, so several files in flight
+                # at once beats one at a time. boto3 already parallelizes
+                # parts *within* a single large file via its own transfer
+                # manager; this adds parallelism *across* files.
+                with ThreadPoolExecutor(max_workers=min(4, len(to_upload))) as pool:
+                    futures = [pool.submit(_upload_one, item) for item in to_upload]
+                    for future in as_completed(futures):
+                        if future.result():
+                            uploaded += 1
+
             if errors:
                 return uploaded, f"{self._name}: upload failed for {len(errors)} file(s): {'; '.join(errors)}"
             return uploaded, ""
@@ -383,20 +398,23 @@ async def run_upload(
     items: list[UploadItem],
     backends: list[CloudBackend],
 ) -> None:
-    """Run items through all backends, updating status_store[job_id] as we go."""
+    """Run items through all backends concurrently, updating status_store[job_id] when done."""
     total = len(items)
-    status_store[job_id] = {"status": "uploading", "message": "Uploading…", "uploaded": 0, "total": total}
+    names = ", ".join(b.name for b in backends)
+    status_store[job_id] = {"status": "uploading", "message": f"Uploading to {names}…", "uploaded": 0, "total": total}
+
+    # Backends are independent remote destinations, so uploading to all of
+    # them at once (rather than one after another) cuts total sync time
+    # roughly to that of the slowest backend instead of their sum.
+    results = await asyncio.gather(*(backend.upload(items) for backend in backends))
 
     errors: list[str] = []
     uploaded = 0
-
-    for backend in backends:
-        status_store[job_id]["message"] = f"Uploading to {backend.name}…"
-        n, err = await backend.upload(items)
+    for n, err in results:
         uploaded += n
-        status_store[job_id]["uploaded"] = uploaded
         if err:
             errors.append(err)
+    status_store[job_id]["uploaded"] = uploaded
 
     if errors:
         status_store[job_id] = {

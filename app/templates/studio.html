@@ -169,15 +169,28 @@
   <div class="timer-bar hidden" id="timer-bar">
     <div class="timer-bar-main">
       <div class="timer-topic-left">
-        <button class="timer-notes-toggle" id="btn-timer-notes-toggle" title="Collapse notes" style="display:none">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12">
-            <polyline points="6 9 12 15 18 9"/>
+        <button class="timer-eye-btn" id="btn-timer-collapse" title="Collapse timer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="18 15 12 9 6 15"/>
           </svg>
         </button>
         <span class="timer-topic-name" id="timer-topic-name"></span>
       </div>
       <div class="timer-bar-end">
         <span class="timer-countdown" id="timer-countdown"></span>
+        <button class="timer-eye-btn" id="btn-timer-pos" title="Move timer to bottom">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <line x1="3" y1="15" x2="21" y2="15"/>
+          </svg>
+        </button>
+        <button class="timer-eye-btn" id="btn-timer-popout" title="Pop out timer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </button>
         <button class="timer-eye-btn" id="btn-timer-eye" title="Hide time">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>

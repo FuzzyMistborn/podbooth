@@ -172,6 +172,7 @@ let recordingStarting = false;
 let uploadStats = { queued: 0, completed: 0 };
 let uploadHasError = false;
 
+const MIRROR_KEY = 'podbooth:mirror-cam';
 const DEVICE_KEY_MIC = 'podbooth:mic-device';
 const DEVICE_KEY_CAM = 'podbooth:cam-device';
 const DEVICE_KEY_SPK = 'podbooth:spk-device';
@@ -179,16 +180,22 @@ let activeSpkDeviceId = '';
 let activeMicDeviceId = '';
 let activeCamDeviceId = '';
 let isSwitchingDevice = false;
+let mirrorOff = false;
 
 const TIMER_SHOW_KEY  = 'podbooth:timer-show-time';
 const TIMER_QUEUE_KEY = 'podbooth:timer-queue';
+const TIMER_POS_KEY   = 'podbooth:timer-position';
+const TIMER_COLLAPSE_KEY = 'podbooth:timer-collapsed';
 const timerQueue = [];
 let timerState      = { active: false, paused: false, expired: false, topicIndex: -1, remaining: 0, total: 0, overtime: 0 };
 let timerInterval   = null;
 let timerThresholds = { yellow: 60, red: 30 };
 let timerShowTime   = true;
 let timerEditIndex  = -1;
-let timerNotesOpen  = true;
+let timerPosition   = 'top';
+let timerCollapsed  = false;
+let timerPopoutWin  = null;
+let timerPopoutWatcher = null;
 
 const raisedHands = new Map();
 const handQueue = [];
@@ -263,7 +270,9 @@ const timerCountEl      = document.getElementById('timer-countdown');
 const timerNotesEl      = document.getElementById('timer-notes-row');
 const timerProgressEl   = document.getElementById('timer-progress-fill');
 const btnTimerEye       = document.getElementById('btn-timer-eye');
-const btnTimerNotesToggle = document.getElementById('btn-timer-notes-toggle');
+const btnTimerPos       = document.getElementById('btn-timer-pos');
+const btnTimerPopout    = document.getElementById('btn-timer-popout');
+const btnTimerCollapse   = document.getElementById('btn-timer-collapse');
 const btnTimerBtn   = document.getElementById('btn-timer');
 const timerPanel    = document.getElementById('timer-panel');
 const btnTimerSettings  = document.getElementById('btn-timer-settings');
@@ -564,7 +573,8 @@ function attachRoomEvents() {
 
   room.on(RoomEvent.DataReceived, async (data) => {
     let msg;
-    try { msg = JSON.parse(new TextDecoder().decode(data)); } catch (e) { return; }
+    try { msg = JSON.parse(new TextDecoder().decode(data)); } catch (e) { console.warn('[timer-debug] DataReceived: failed to parse payload', e); return; }
+    console.log('[timer-debug] DataReceived', msg.type, msg);
 
     if (msg.type === 'recording_started' && !IS_HOST) {
       if (!isRecording) {
@@ -605,6 +615,9 @@ function attachRoomEvents() {
     }
     if (msg.type === 'timer_update' && !IS_HOST) {
       applyTimerUpdate(msg);
+    }
+    if (msg.type === 'timer_resync_request' && IS_HOST && timerState.active) {
+      broadcastTimerState();
     }
     if (msg.type === 'force_unmute' && msg.identity === identity) {
       await room.localParticipant.setMicrophoneEnabled(true);
@@ -699,6 +712,10 @@ function pollSessionStatus() {
           showLocalUploadButton();
           await waitForUploads();
         }
+        // Timer state is push-only over the data channel — a dropped message,
+        // late join, or reconnect can leave a guest stuck on stale state with
+        // nothing to re-trigger it. Ask the host to re-broadcast periodically.
+        broadcastData({ type: 'timer_resync_request' });
       }
     } catch (e) {}
   }, 3000);
@@ -707,10 +724,11 @@ function pollSessionStatus() {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function broadcastData(msg) {
-  if (!room?.localParticipant) return;
+  if (!room?.localParticipant) { console.warn('[timer-debug] broadcastData: no local participant, dropped', msg.type); return; }
   try {
     const encoded = new TextEncoder().encode(JSON.stringify(msg));
     await room.localParticipant.publishData(encoded, { reliable: true });
+    console.log('[timer-debug] broadcastData sent', msg.type, 'remoteParticipants:', room.remoteParticipants?.size ?? room.participants?.size);
   } catch (e) {
     console.warn('broadcastData failed:', e);
   }

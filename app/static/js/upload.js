@@ -589,6 +589,14 @@ async function _doUploadAllRecordedChunks() {
 const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
 
 async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack) {
+  // enqueueChunk's writes are chained onto _persistQueues[trackType] but not
+  // awaited by the caller (MediaRecorder's onstop isn't async-aware), so the
+  // last chunk(s) of a track can still be mid-write when this runs. Closing
+  // the file (below) before that settles silently truncates it — the file
+  // still "uploads successfully", just missing its tail (or, if the whole
+  // final chunk hadn't landed, effectively empty). Wait for the chain to
+  // drain first so close() only ever runs after every chunk is committed.
+  await (_persistQueues[trackType] || Promise.resolve());
   const fsaTrack = fsaOpenPromises[trackType] ? await fsaOpenPromises[trackType] : null;
   const failedTrack = fsaFailedTracks[trackType];
   // fsaTrack and failedTrack are mutually exclusive (once a track fails

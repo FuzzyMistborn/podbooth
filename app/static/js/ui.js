@@ -659,6 +659,26 @@ async function openDeviceDropdown(kind) {
     console.warn('Could not enumerate devices:', e);
   }
 
+  // Append mirror-toggle to camera dropdown
+  if (kind === 'videoinput') {
+    const divider = document.createElement('div');
+    divider.className = 'device-dropdown-divider';
+    dropdown.appendChild(divider);
+    const btn = document.createElement('button');
+    btn.className = 'device-dropdown-item' + (mirrorOff ? '' : ' active');
+    const check = document.createElement('span');
+    check.className = 'check';
+    check.textContent = mirrorOff ? '' : '✓';
+    btn.appendChild(check);
+    btn.appendChild(document.createTextNode('Mirror my preview'));
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleMirror();
+      closeAllDeviceDropdowns();
+    });
+    dropdown.appendChild(btn);
+  }
+
   // Append speaker section to mic dropdown if supported
   if (kind === 'audioinput' && typeof HTMLMediaElement.prototype.setSinkId === 'function') {
     try {
@@ -694,6 +714,12 @@ async function openDeviceDropdown(kind) {
 
   dropdown.classList.add('open');
   document.getElementById(caretId)?.classList.add('open');
+}
+
+function toggleMirror() {
+  mirrorOff = !mirrorOff;
+  document.body.classList.toggle('no-mirror', mirrorOff);
+  try { localStorage.setItem(MIRROR_KEY, String(!mirrorOff)); } catch (e) {}
 }
 
 function updateSpeakerOutput(deviceId) {
@@ -871,6 +897,9 @@ function setupControls() {
     const tile = document.getElementById(`tile-${room.localParticipant.identity}`);
     if (tile) updateCameraCover(tile, room.localParticipant);
   });
+
+  try { mirrorOff = localStorage.getItem(MIRROR_KEY) === 'false'; } catch (e) {}
+  document.body.classList.toggle('no-mirror', mirrorOff);
 
   btnScreen?.addEventListener('click', async () => {
     const isSharing = room.localParticipant.isScreenShareEnabled;
@@ -1529,6 +1558,24 @@ function setupTimerBar() {
   } catch (e) {}
   applyTimerShowTime();
 
+  try {
+    const p = localStorage.getItem(TIMER_POS_KEY);
+    if (p === 'bottom' || p === 'top') timerPosition = p;
+  } catch (e) {}
+  applyTimerPosition();
+
+  try {
+    timerCollapsed = localStorage.getItem(TIMER_COLLAPSE_KEY) === 'true';
+  } catch (e) {}
+  applyTimerCollapsed();
+
+  btnTimerCollapse?.addEventListener('click', e => {
+    e.stopPropagation();
+    timerCollapsed = !timerCollapsed;
+    try { localStorage.setItem(TIMER_COLLAPSE_KEY, String(timerCollapsed)); } catch (e) {}
+    applyTimerCollapsed();
+  });
+
   btnTimerEye?.addEventListener('click', e => {
     e.stopPropagation();
     timerShowTime = !timerShowTime;
@@ -1536,14 +1583,96 @@ function setupTimerBar() {
     applyTimerShowTime();
   });
 
-  btnTimerNotesToggle?.addEventListener('click', e => {
+  btnTimerPos?.addEventListener('click', e => {
     e.stopPropagation();
-    timerNotesOpen = !timerNotesOpen;
-    applyTimerNotesToggle();
+    timerPosition = timerPosition === 'bottom' ? 'top' : 'bottom';
+    try { localStorage.setItem(TIMER_POS_KEY, timerPosition); } catch (e) {}
+    applyTimerPosition();
+  });
+
+  btnTimerPopout?.addEventListener('click', e => {
+    e.stopPropagation();
+    openTimerPopout();
   });
 
   loadTimerQueue();
   renderTimerQueue();
+}
+
+function applyTimerPosition() {
+  if (!timerBar) return;
+  timerBar.classList.toggle('timer-pos-bottom', timerPosition === 'bottom');
+  if (btnTimerPos) btnTimerPos.title = timerPosition === 'bottom' ? 'Move timer to top' : 'Move timer to bottom';
+}
+
+function applyTimerCollapsed() {
+  if (!timerBar) return;
+  timerBar.classList.toggle('timer-collapsed', timerCollapsed);
+  if (btnTimerCollapse) btnTimerCollapse.title = timerCollapsed ? 'Expand timer' : 'Collapse timer';
+}
+
+function openTimerPopout() {
+  if (timerPopoutWin && !timerPopoutWin.closed) {
+    timerPopoutWin.focus();
+    return;
+  }
+  timerPopoutWin = window.open('', 'podbooth-timer-popout', 'width=480,height=320,menubar=no,toolbar=no,location=no,status=no');
+  if (!timerPopoutWin) { showToast('Pop-out blocked — allow pop-ups for this site'); return; }
+  timerPopoutWin.document.write(`<!doctype html><html><head><title>Timer — PodBooth</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#fff;font-family:system-ui,sans-serif;}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center;}
+  #wrap{text-align:center;padding:16px;width:100%;box-sizing:border-box;transition:background .3s;}
+  #topic{font-size:20px;opacity:.85;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  #count{font-size:64px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;}
+  #notes{font-size:15px;line-height:1.5;opacity:.85;margin-top:10px;max-width:34em;text-align:left;display:none;}
+  #notes:not(:empty){display:block;}
+  #notes strong{color:#fff;}
+  .green{background:rgba(34,197,94,.18);}
+  .yellow{background:rgba(234,179,8,.20);}
+  .red{background:rgba(239,68,68,.22);}
+</style></head><body><div id="wrap"><div id="topic"></div><div id="count">--:--</div><div id="notes"></div></div></body></html>`);
+  timerPopoutWin.document.close();
+  pushTimerPopoutState();
+
+  timerBar?.classList.add('popped-out');
+  clearInterval(timerPopoutWatcher);
+  // window.open gives us no reliable cross-window "closed" event (unload on
+  // an about:blank-origin popup is not consistently observable from the
+  // opener), so poll for it instead — as soon as the user closes the pop-out,
+  // put the timer back in the main studio UI rather than leaving it hidden
+  // with no way to see it.
+  timerPopoutWatcher = setInterval(() => {
+    if (!timerPopoutWin || timerPopoutWin.closed) {
+      clearInterval(timerPopoutWatcher);
+      timerPopoutWatcher = null;
+      timerPopoutWin = null;
+      timerBar?.classList.remove('popped-out');
+    }
+  }, 500);
+}
+
+function pushTimerPopoutState() {
+  if (!timerPopoutWin || timerPopoutWin.closed) return;
+  const doc = timerPopoutWin.document;
+  const wrap = doc?.getElementById('wrap');
+  const topicEl = doc?.getElementById('topic');
+  const countEl = doc?.getElementById('count');
+  const notesEl = doc?.getElementById('notes');
+  if (!wrap || !topicEl || !countEl || !notesEl) return;
+
+  if (!timerBar || timerBar.classList.contains('hidden')) {
+    topicEl.textContent = '';
+    countEl.textContent = '--:--';
+    notesEl.innerHTML = '';
+    wrap.className = '';
+    return;
+  }
+  const color = ['timer-red', 'timer-yellow', 'timer-green'].find(c => timerBar.classList.contains(c)) || 'timer-green';
+  notesEl.innerHTML = timerNotesEl?.innerHTML || '';
+  topicEl.textContent = timerTopicEl?.textContent || '';
+  countEl.textContent = timerCountEl?.textContent || '';
+  wrap.className = color.replace('timer-', '');
 }
 
 function setupTimerControls() {
@@ -1905,6 +2034,7 @@ function applyTimerUpdate(msg) {
 
   if (!msg.active) {
     timerBar?.classList.add('hidden');
+    pushTimerPopoutState();
     return;
   }
   timerBar?.classList.remove('hidden');
@@ -1919,6 +2049,7 @@ function applyTimerUpdate(msg) {
     timerProgressEl.style.width = msg.expired ? '0%' : ((msg.remaining / msg.total) * 100) + '%';
   }
   colorTimerBar(msg.remaining, msg.yellowAt, msg.redAt, msg.expired);
+  pushTimerPopoutState();
 }
 
 function _renderMd(text) {
@@ -1972,6 +2103,7 @@ function updateTimerBar() {
   const topic = timerState.active && i >= 0 && i < timerQueue.length ? timerQueue[i] : null;
   if (!timerState.active || !topic) {
     timerBar?.classList.add('hidden');
+    pushTimerPopoutState();
     return;
   }
   timerBar?.classList.remove('hidden');
@@ -1986,6 +2118,7 @@ function updateTimerBar() {
     timerProgressEl.style.width = timerState.expired ? '0%' : ((timerState.remaining / timerState.total) * 100) + '%';
   }
   colorTimerBar(timerState.remaining, timerThresholds.yellow, timerThresholds.red, timerState.expired);
+  pushTimerPopoutState();
 }
 
 function colorTimerBar(remaining, yellowAt, redAt, expired) {
@@ -2010,23 +2143,12 @@ function applyTimerShowTime() {
   }
 }
 
-function applyTimerNotesToggle() {
-  if (!timerNotesEl) return;
-  const hasNotes = timerNotesEl.innerHTML.trim() !== '' && timerNotesEl.dataset.hasNotes === 'true';
-  if (hasNotes) timerNotesEl.style.display = timerNotesOpen ? '' : 'none';
-  if (btnTimerNotesToggle) {
-    btnTimerNotesToggle.title = timerNotesOpen ? 'Collapse notes' : 'Expand notes';
-    btnTimerNotesToggle.classList.toggle('collapsed', !timerNotesOpen);
-  }
-}
-
 function setTimerNotes(notes) {
   if (!timerNotesEl) return;
   const hasNotes = !!notes;
   timerNotesEl.dataset.hasNotes = String(hasNotes);
   timerNotesEl.innerHTML = hasNotes ? _renderMd(notes) : '';
-  if (btnTimerNotesToggle) btnTimerNotesToggle.style.display = hasNotes ? '' : 'none';
-  timerNotesEl.style.display = (hasNotes && timerNotesOpen) ? '' : 'none';
+  timerNotesEl.style.display = hasNotes ? '' : 'none';
 }
 
 const TIMER_ICON_PLAY  = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>';

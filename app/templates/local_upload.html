@@ -294,6 +294,27 @@
     // upload_id → {item, bar, badge, msg, phase}
     let uploadJobs = {};
 
+    // ── Client-side pre-flight validation ────────────────────────────────────
+    // Mirrors the server allowlist in app/routers/localupload.py (_ALLOWED),
+    // plus explicit rejection of common partial-download temp suffixes —
+    // without this, a user can pick an in-progress browser download (e.g. a
+    // .crswap file) and only find out it's invalid after uploading the whole
+    // thing, since the server can't validate until the multipart body lands.
+    const ALLOWED_EXTENSIONS = ['.wav', '.mp3', '.mp4', '.m4a', '.mkv', '.mov', '.avi', '.webm', '.flac', '.ogg', '.aac', '.opus'];
+    const PARTIAL_DOWNLOAD_SUFFIXES = ['.crswap', '.tmp', '.part', '.partial', '.download', '.crdownload'];
+
+    function validateFile(file) {
+      const name = file.name.toLowerCase();
+      for (const suf of PARTIAL_DOWNLOAD_SUFFIXES) {
+        if (name.endsWith(suf)) return `This looks like an in-progress or partial download (${suf}), not a finished recording`;
+      }
+      const dot = name.lastIndexOf('.');
+      const ext = dot === -1 ? '' : name.slice(dot);
+      if (!ALLOWED_EXTENSIONS.includes(ext)) return `Unsupported file type "${ext || name}"`;
+      if (file.size === 0) return 'File is empty';
+      return null;
+    }
+
     // ── Drag & drop ────────────────────────────────────────────────────────────
     dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
     dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
@@ -306,8 +327,9 @@
 
     function handleFiles(files) {
       selectedFiles = files;
-      fileCount.textContent = files.length === 0 ? '' : `${files.length} file${files.length > 1 ? 's' : ''} selected`;
-      btnUpload.disabled = files.length === 0;
+      const validCount = files.filter(f => !validateFile(f)).length;
+      fileCount.textContent = files.length === 0 ? '' : `${validCount} of ${files.length} file${files.length > 1 ? 's' : ''} will upload`;
+      btnUpload.disabled = validCount === 0;
       // Reset list
       fileList.innerHTML = '';
       uploadJobs = {};
@@ -320,16 +342,18 @@
     function renderFileItem(file) {
       const item = document.createElement('div');
       item.className = 'file-item';
+      const rejectReason = validateFile(file);
       item.innerHTML = `
         <div class="file-header">
           <span class="file-icon">${fileIcon(file.name)}</span>
           <span class="file-name" title="${esc(file.name)}">${esc(file.name)}</span>
           <span class="file-size">${formatSize(file.size)}</span>
-          <span class="status-badge pending" data-badge>Pending</span>
+          <span class="status-badge ${rejectReason ? 'error' : 'pending'}" data-badge>${rejectReason ? 'Rejected' : 'Pending'}</span>
         </div>
         <div class="progress-wrap"><div class="progress-bar" data-bar></div></div>
-        <div class="file-message" data-msg></div>
+        <div class="file-message" data-msg>${rejectReason ? esc(rejectReason) : ''}</div>
       `;
+      if (rejectReason) item.classList.add('file-item-rejected');
       fileList.appendChild(item);
       return item;
     }
@@ -355,10 +379,25 @@
       allDone.style.display = 'none';
 
       const items = [...fileList.querySelectorAll('.file-item')];
-
+      const queue = [];
       for (let i = 0; i < selectedFiles.length; i++) {
-        await uploadFile(selectedFiles[i], items[i]);
+        if (validateFile(selectedFiles[i])) continue; // rejected pre-flight — badge already shows why
+        queue.push(i);
       }
+
+      // Upload a few files at once rather than one at a time — this is a
+      // home upload connection, so a handful of concurrent streams can use
+      // more of the available bandwidth than a single sequential stream,
+      // without saturating it the way unlimited concurrency would.
+      const CONCURRENCY = 3;
+      let next = 0;
+      async function worker() {
+        while (next < queue.length) {
+          const i = queue[next++];
+          await uploadFile(selectedFiles[i], items[i]);
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
 
       checkAllDone();
     }
