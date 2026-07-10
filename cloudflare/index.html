@@ -910,10 +910,22 @@
 
   // ── Upload (production files) ─────────────────────────────────────────────
 
-  function uploadUrl(folder) {
-    return "/api/upload/" + encodeURIComponent(_sessionId) +
+  // Cloudflare caps request bodies at ~100 MB, so anything bigger goes up as
+  // an R2 multipart upload in fixed-size chunks (all parts but the last must
+  // be the same size).
+  var CHUNK_BYTES  = 90 * 1024 * 1024;
+  var PART_RETRIES = 3;
+
+  function uploadUrl(folder, extraParams) {
+    var u = "/api/upload/" + encodeURIComponent(_sessionId) +
       "?token=" + encodeURIComponent(_token) +
       "&folder=" + encodeURIComponent(folder);
+    if (extraParams) {
+      Object.keys(extraParams).forEach(function (k) {
+        u += "&" + k + "=" + encodeURIComponent(extraParams[k]);
+      });
+    }
+    return u;
   }
 
   function addUploadRow(listId, filename) {
@@ -932,45 +944,113 @@
     };
   }
 
-  function uploadFile(file, folder, listId) {
-    var ui = addUploadRow(listId, file.name);
+  function setProgress(ui, pct) {
+    ui.fill.style.width = pct + "%";
+    ui.status.textContent = pct + "%";
+  }
 
-    return new Promise(function (resolve) {
+  function markDone(ui) {
+    ui.fill.style.width = "100%";
+    ui.status.textContent = "Done";
+    ui.status.className = "upload-progress-status upload-done";
+  }
+
+  function markFailed(ui, msg) {
+    ui.status.textContent = msg || "Failed";
+    ui.status.className = "upload-progress-status upload-error";
+  }
+
+  // Single XHR POST with upload progress; body is FormData or a Blob chunk.
+  function xhrPost(url, body, onProgress) {
+    return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
-      xhr.open("POST", uploadUrl(folder));
-
-      xhr.upload.addEventListener("progress", function (e) {
-        if (e.lengthComputable) {
-          var pct = Math.round((e.loaded / e.total) * 100);
-          ui.fill.style.width = pct + "%";
-          ui.status.textContent = pct + "%";
-        }
-      });
-
+      xhr.open("POST", url);
+      if (onProgress) {
+        xhr.upload.addEventListener("progress", function (e) {
+          if (e.lengthComputable) onProgress(e.loaded, e.total);
+        });
+      }
       xhr.addEventListener("load", function () {
         if (xhr.status >= 200 && xhr.status < 300) {
-          ui.fill.style.width = "100%";
-          ui.status.textContent = "Done";
-          ui.status.className = "upload-progress-status upload-done";
+          var data = null;
+          try { data = JSON.parse(xhr.responseText); } catch (e) {}
+          resolve(data);
         } else {
           var msg = "Failed";
           try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
-          ui.status.textContent = msg;
-          ui.status.className = "upload-progress-status upload-error";
+          reject(new Error(msg));
         }
-        resolve();
       });
-
-      xhr.addEventListener("error", function () {
-        ui.status.textContent = "Failed";
-        ui.status.className = "upload-progress-status upload-error";
-        resolve();
-      });
-
-      var form = new FormData();
-      form.append("file", file, file.name);
-      xhr.send(form);
+      xhr.addEventListener("error", function () { reject(new Error("Failed")); });
+      xhr.send(body);
     });
+  }
+
+  function uploadSmallFile(file, folder, ui) {
+    var form = new FormData();
+    form.append("file", file, file.name);
+    return xhrPost(uploadUrl(folder), form, function (loaded, total) {
+      setProgress(ui, Math.round((loaded / total) * 100));
+    });
+  }
+
+  async function uploadChunked(file, folder, ui) {
+    var created = await xhrPost(
+      uploadUrl(folder, { action: "create", filename: file.name, contentType: file.type || "application/octet-stream" }),
+      null
+    );
+    if (!created || !created.uploadId) throw new Error("Failed to start upload");
+
+    var uploadId = created.uploadId;
+    var totalParts = Math.ceil(file.size / CHUNK_BYTES);
+    var parts = [];
+
+    try {
+      for (var n = 1; n <= totalParts; n++) {
+        var start = (n - 1) * CHUNK_BYTES;
+        var chunk = file.slice(start, Math.min(start + CHUNK_BYTES, file.size));
+        var partUrl = uploadUrl(folder, { action: "part", filename: file.name, uploadId: uploadId, partNumber: n });
+
+        var result = null;
+        for (var attempt = 1; attempt <= PART_RETRIES; attempt++) {
+          try {
+            result = await xhrPost(partUrl, chunk, function (loaded) {
+              setProgress(ui, Math.round(((start + loaded) / file.size) * 100));
+            });
+            break;
+          } catch (e) {
+            if (attempt === PART_RETRIES) throw e;
+            await new Promise(function (r) { setTimeout(r, 1000 * attempt); });
+          }
+        }
+        parts.push({ partNumber: result.partNumber, etag: result.etag });
+      }
+
+      await xhrPost(
+        uploadUrl(folder, { action: "complete", filename: file.name, uploadId: uploadId }),
+        JSON.stringify({ parts: parts })
+      );
+    } catch (e) {
+      // Best-effort cleanup so abandoned parts don't linger in R2
+      try {
+        await xhrPost(uploadUrl(folder, { action: "abort", filename: file.name, uploadId: uploadId }), null);
+      } catch (e2) {}
+      throw e;
+    }
+  }
+
+  async function uploadFile(file, folder, listId) {
+    var ui = addUploadRow(listId, file.name);
+    try {
+      if (file.size > CHUNK_BYTES) {
+        await uploadChunked(file, folder, ui);
+      } else {
+        await uploadSmallFile(file, folder, ui);
+      }
+      markDone(ui);
+    } catch (e) {
+      markFailed(ui, e && e.message);
+    }
   }
 
   async function handleFiles(fileList, folder, listId) {
