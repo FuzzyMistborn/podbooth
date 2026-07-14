@@ -543,6 +543,14 @@ function _uploadAllRecordedChunks() {
 // A track that used File System Access (see _fsaTrackFor) uploads as one
 // whole-file "chunk 0" instead of many small IndexedDB-backed chunks.
 async function _doUploadAllRecordedChunks() {
+  // Drain every track's persist queue BEFORE snapshotting IndexedDB. The
+  // final chunk(s) of a track (flushPcm(true), the last ondataavailable) are
+  // enqueued but not awaited by stopLocalRecording, so they can still be
+  // mid-write here — a snapshot taken first would miss them, upload the
+  // track without its tail, report a clean run, and then idbDeleteEpoch's
+  // backstop sweep in waitForUploads would delete the unsent chunks for good.
+  // (Each queue already swallows its own errors — see enqueueChunk.)
+  await Promise.all(Object.values(_persistQueues));
   const all = await idbGetAllChunks();
   const mine = all.filter(c => c.sessionId === SESSION_ID && c.identity === identity && c.epoch === recordingEpoch);
 
@@ -619,16 +627,23 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
     const trackController = new AbortController();
     fsaUploadControllers.add(trackController);
     let ok;
-    if (failedTrack && failedTrack.chunksWritten > 1) {
+    if (failedTrack && failedTrack.chunksWritten === 0) {
+      // Failed over before a single chunk was committed to the file — there
+      // is nothing salvaged in it (a raw-audio file is just its WAV header).
+      // Skip the whole-file upload entirely: uploading it as chunk 0 would
+      // collide with the real chunk 0 sitting in IndexedDB below.
+      ok = true;
+    } else if (failedTrack) {
       // This track failed over from FSA to IndexedDB mid-recording, so the
       // salvaged bytes still have to go up as one whole chunk 0 rather than
       // sliced: the trailing IndexedDB chunks uploaded below reuse their
       // original (non-zero) indices, and `subsumes_chunks` tells the
       // server's gap check that chunk 0 already covers original indices
       // 0..chunksWritten-1 — introducing our own slice numbering here would
-      // collide with those real indices. (A clean FSA track — the common
-      // case — has no trailing IndexedDB chunks, so it takes the slicing
-      // path below instead.)
+      // collide with those real indices, even when only one chunk made it
+      // into the file (a >5MB salvaged file would otherwise slice into
+      // indices 0..N right on top of them). Slicing is reserved for a clean
+      // FSA track, which never has trailing IndexedDB chunks.
       uploadStats.queued++;
       refreshUploadBanner();
       const wholeMeta = { subsumes_chunks: failedTrack.chunksWritten };
