@@ -14,7 +14,7 @@
  *  - Host-drop detection via token metadata → guests stop recording
  */
 
-const { Room, RoomEvent, Track, ConnectionQuality } = LivekitClient;
+const { Room, RoomEvent, Track, ConnectionQuality, VideoPresets } = LivekitClient;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -245,6 +245,8 @@ const btnAlertSend = document.getElementById('btn-alert-send');
 const alertBanner  = document.getElementById('alert-banner');
 const alertBannerText = document.getElementById('alert-banner-text');
 const btnAlertDismiss = document.getElementById('btn-alert-dismiss');
+const reconnectBanner = document.getElementById('reconnect-banner');
+const reconnectBannerText = document.getElementById('reconnect-banner-text');
 const btnShowShare = document.getElementById('btn-show-share');
 const shareMenu    = document.getElementById('share-menu');
 const shareLink    = document.getElementById('share-link');
@@ -342,11 +344,29 @@ async function init() {
   const { token } = await resp.json();
 
   room = new Room({
-    adaptiveStream: false,
+    // Lets LiveKit downscale what a *remote* participant renders/subscribes
+    // to based on element visibility and estimated bandwidth. This only
+    // affects the live call view over the network — local recording reads
+    // straight from the camera/mic MediaStream, never from the published
+    // RTP layers, so take quality here has zero effect on recorded output.
+    adaptiveStream: true,
     dynacast: true,
     videoCaptureDefaults: {
       deviceId: camDeviceId || undefined,
       resolution: { width: 1920, height: 1080, frameRate: 30 },
+    },
+    videoPublishDefaults: {
+      // Simulcast sends multiple encoded resolutions; a congested/lossy
+      // link (e.g. a bad interconnect between a guest and this server) lets
+      // subscribers fall back to a lower layer instead of the single stream
+      // stalling outright. The full-res capture above is untouched, so the
+      // local recording still gets the raw camera feed regardless of which
+      // layer the network can currently carry.
+      simulcast: true,
+      videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360],
+      // Prefer dropping resolution over framerate under bandwidth pressure —
+      // smoother motion reads better live than a sharper but janky feed.
+      degradationPreference: 'maintain-framerate',
     },
     audioCaptureDefaults: {
       deviceId: micDeviceId || undefined,
@@ -659,7 +679,22 @@ function attachRoomEvents() {
   });
 
   room.on(RoomEvent.Disconnected, () => {
+    reconnectBanner?.classList.add('hidden');
     showToast('Disconnected from room');
+  });
+
+  // livekit-client retries the connection internally on a flaky/lossy link
+  // (exactly the kind of path that also degrades single-flow uploads — see
+  // upload.js) with zero UI feedback by default. Surface it so a guest sees
+  // "reconnecting" instead of a silent freeze that looks like a hang.
+  room.on(RoomEvent.Reconnecting, () => {
+    if (reconnectBannerText) reconnectBannerText.textContent = 'Reconnecting to room…';
+    reconnectBanner?.classList.remove('hidden');
+  });
+
+  room.on(RoomEvent.Reconnected, () => {
+    reconnectBanner?.classList.add('hidden');
+    showToast('Reconnected');
   });
 }
 

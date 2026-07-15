@@ -403,6 +403,37 @@ async function _throttleForUpload(bytes, cancelSignal = null) {
   }
 }
 
+// How many chunks of one track upload at once. A single TCP flow is the
+// worst case for a lossy/congested path — one bad-luck loss burst on the
+// only flow in flight tanks the whole transfer's effective throughput
+// (severe single-flow TCP degradation under loss/policing on a long-haul
+// path), while several independent flows in parallel still add up to much
+// higher aggregate throughput even though each one sees the same loss rate.
+// Chunks are independent, arrival-order-agnostic files on the server (see
+// assemble_track's sorted glob in upload.py) so uploading several at once
+// is safe — nothing here depends on chunk N landing before chunk N+1.
+const UPLOAD_CONCURRENCY = 4;
+
+// Run `worker(item)` over `items` with at most `concurrency` in flight at
+// once. `worker` returns false to mean "stop starting new work, this run
+// has failed" (mirrors the old serial loops' `if (!ok) return`) — already
+// in-flight workers still finish, but no further items are started.
+async function _uploadPoolRun(items, worker, concurrency = UPLOAD_CONCURRENCY) {
+  let index = 0;
+  let allOk = true;
+  async function runNext() {
+    while (index < items.length) {
+      if (!allOk) return;
+      const item = items[index++];
+      const ok = await worker(item);
+      if (!ok) { allOk = false; return; }
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, runNext);
+  await Promise.all(workers);
+  return allOk;
+}
+
 async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {}, sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName, cancelSignal = null) {
   await _throttleForUpload(blob.size, cancelSignal);
   if (cancelSignal?.aborted) {
@@ -654,14 +685,15 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
       const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
       uploadStats.queued += totalSlices;
       refreshUploadBanner();
-      ok = true;
-      for (let i = 0; i < totalSlices && ok; i++) {
+      const sliceIndices = Array.from({ length: totalSlices }, (_, i) => i);
+      ok = await _uploadPoolRun(sliceIndices, async (i) => {
         const start = i * FSA_UPLOAD_SLICE_BYTES;
         const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
-        ok = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName, trackController.signal);
+        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName, trackController.signal);
         uploadStats.completed++;
         refreshUploadBanner();
-      }
+        return sliceOk;
+      });
     }
     const wasCancelled = trackController.signal.aborted;
     fsaUploadControllers.delete(trackController);
@@ -673,7 +705,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
   }
   if (!fsaTrack) {
     const chunks = chunksByTrack[trackType].sort((a, b) => a.chunkIndex - b.chunkIndex);
-    for (const c of chunks) {
+    const allOk = await _uploadPoolRun(chunks, async (c) => {
       const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
       if (!rec) {
         // The record we just enumerated is gone by the time we go to read
@@ -684,14 +716,16 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
         uploadHasError = true;
         uploadStats.completed++;
         refreshUploadBanner();
-        continue;
+        return true; // not fatal to the rest of the track — keep going
       }
       const ok = await uploadChunkWithRetry(rec.blob, trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, SESSION_ID, identity, displayName);
-      if (!ok) return; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
+      if (!ok) return false; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
       idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
       uploadStats.completed++;
       refreshUploadBanner();
-    }
+      return true;
+    });
+    if (!allOk) return;
   }
   if (!(trackType in pendingFinalizeMeta)) return; // chunks uploaded, but no finalize payload was ever recorded
   const meta = pendingFinalizeMeta[trackType];

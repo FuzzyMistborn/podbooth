@@ -2472,6 +2472,46 @@ body.no-mirror .participant-tile.local video { transform: none; }
   border: 1px solid var(--yellow);
   color: var(--yellow);
 }
+.reconnect-banner {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  background: var(--bg-2);
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.reconnect-banner:not(.hidden) {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+.reconnect-banner.hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-8px);
+}
+.reconnect-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
 .upload-cancel-btn {
   align-self: flex-start;
   background: none;

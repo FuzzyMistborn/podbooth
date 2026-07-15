@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ session.title }} — Studio{% endblock %}
 {% block head %}
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js" defer></script>
 <style>
 .notes-btn-wrap {
   position: relative;
@@ -458,8 +459,12 @@
 
 <div class="upload-banner hidden" id="upload-banner"></div>
 
+<div class="reconnect-banner hidden" id="reconnect-banner">
+  <span class="reconnect-spinner"></span>
+  <span id="reconnect-banner-text">Reconnecting to room…</span>
+</div>
 
-<div class="alert-banner hidden" id="alert-banner">
+<div class="alert-banner hidden" id="alert-banner"
   <svg class="alert-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
   <span class="alert-banner-text" id="alert-banner-text"></span>
   <button class="alert-banner-close" id="btn-alert-dismiss">✕</button>
@@ -481,13 +486,13 @@
   const OUTLINE_ENABLED = {{ "true" if outline_enabled else "false" }};
   const OUTLINE_DOC_ID_INITIAL = "{{ outline_doc_id | e }}";
 </script>
-<script src="/static/js/idb-store.js?v={{ asset_v }}"></script>
-<script src="/static/js/fsa-store.js?v={{ asset_v }}"></script>
-<script src="/static/js/recording.js?v={{ asset_v }}"></script>
-<script src="/static/js/upload.js?v={{ asset_v }}"></script>
-<script src="/static/js/chat.js?v={{ asset_v }}"></script>
-<script src="/static/js/ui.js?v={{ asset_v }}"></script>
-<script src="/static/js/studio.js?v={{ asset_v }}"></script>
+<script src="/static/js/idb-store.js?v={{ asset_v }}" defer></script>
+<script src="/static/js/fsa-store.js?v={{ asset_v }}" defer></script>
+<script src="/static/js/recording.js?v={{ asset_v }}" defer></script>
+<script src="/static/js/upload.js?v={{ asset_v }}" defer></script>
+<script src="/static/js/chat.js?v={{ asset_v }}" defer></script>
+<script src="/static/js/ui.js?v={{ asset_v }}" defer></script>
+<script src="/static/js/studio.js?v={{ asset_v }}" defer></script>
 <script>
 
 // ── Notes panel ──────────────────────────────────────────────────────────────
