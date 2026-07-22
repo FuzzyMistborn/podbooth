@@ -294,13 +294,6 @@ const btnTimerStop  = document.getElementById('btn-timer-stop');
 const timerYellowIn = document.getElementById('timer-yellow');
 const timerRedIn    = document.getElementById('timer-red');
 
-// ── Debug logging ─────────────────────────────────────────────────────────────
-
-function recLog(fmt, ...args) {
-  const ts = new Date().toISOString().slice(11, 23);
-  console.log(`[rec ${identity || '?'}] ${ts} ${fmt}`, ...args);
-}
-
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -593,8 +586,7 @@ function attachRoomEvents() {
 
   room.on(RoomEvent.DataReceived, async (data) => {
     let msg;
-    try { msg = JSON.parse(new TextDecoder().decode(data)); } catch (e) { console.warn('[timer-debug] DataReceived: failed to parse payload', e); return; }
-    console.log('[timer-debug] DataReceived', msg.type, msg);
+    try { msg = JSON.parse(new TextDecoder().decode(data)); } catch (e) { console.warn('DataReceived: failed to parse payload', e); return; }
 
     if (msg.type === 'recording_started' && !IS_HOST) {
       if (!isRecording) {
@@ -759,11 +751,10 @@ function pollSessionStatus() {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function broadcastData(msg) {
-  if (!room?.localParticipant) { console.warn('[timer-debug] broadcastData: no local participant, dropped', msg.type); return; }
+  if (!room?.localParticipant) { console.warn('broadcastData: no local participant, dropped', msg.type); return; }
   try {
     const encoded = new TextEncoder().encode(JSON.stringify(msg));
     await room.localParticipant.publishData(encoded, { reliable: true });
-    console.log('[timer-debug] broadcastData sent', msg.type, 'remoteParticipants:', room.remoteParticipants?.size ?? room.participants?.size);
   } catch (e) {
     console.warn('broadcastData failed:', e);
   }
