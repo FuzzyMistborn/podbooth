@@ -1620,13 +1620,13 @@ function openTimerPopout() {
   if (!timerPopoutWin) { showToast('Pop-out blocked — allow pop-ups for this site'); return; }
   timerPopoutWin.document.write(`<!doctype html><html><head><title>Timer — PodBooth</title>
 <style>
-  html,body{margin:0;height:100%;background:#111;color:#fff;font-family:system-ui,sans-serif;}
-  body{display:flex;flex-direction:column;align-items:center;justify-content:center;}
-  #wrap{text-align:center;padding:16px;width:100%;box-sizing:border-box;transition:background .3s;}
-  #topic{font-size:20px;opacity:.85;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  #count{font-size:64px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;}
-  #notes{font-size:15px;line-height:1.5;opacity:.85;margin-top:10px;max-width:34em;text-align:left;display:none;}
-  #notes:not(:empty){display:block;}
+  html,body{margin:0;height:100%;background:#111;color:#fff;font-family:system-ui,sans-serif;overflow:hidden;}
+  body{display:flex;flex-direction:column;align-items:center;}
+  #wrap{text-align:center;padding:16px;width:100%;height:100%;box-sizing:border-box;transition:background .3s;display:flex;flex-direction:column;align-items:center;min-height:0;}
+  #topic{font-size:20px;opacity:.85;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%;flex:none;}
+  #count{font-size:64px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;flex:none;}
+  #notes{font-size:15px;line-height:1.5;opacity:.85;margin-top:10px;max-width:34em;width:100%;text-align:left;display:none;overflow-y:auto;min-height:0;box-sizing:border-box;}
+  #notes:not(:empty){display:block;flex:1 1 auto;}
   #notes strong{color:#fff;}
   .green{background:rgba(34,197,94,.18);}
   .yellow{background:rgba(234,179,8,.20);}
