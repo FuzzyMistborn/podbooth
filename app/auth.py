@@ -69,6 +69,20 @@ def verify_session_token(token: str) -> bool:
         return False
 
 
+def require_api_key(request: Request) -> None:
+    """FastAPI dependency: gate machine-to-machine endpoints on a static API key.
+
+    Checked via the X-API-Key header. Requires settings.api_key to be
+    configured; if unset, the endpoint is disabled entirely (fails closed)
+    rather than silently allowing unauthenticated access.
+    """
+    if not settings.api_key:
+        raise HTTPException(status_code=503, detail="API key not configured")
+    provided = request.headers.get("x-api-key", "")
+    if not provided or not secrets.compare_digest(provided, settings.api_key):
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+
 def require_host(request: Request) -> None:
     if not password_configured():
         return

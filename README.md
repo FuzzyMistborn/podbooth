@@ -162,6 +162,7 @@ The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers re
 | `HOST_PASSWORD` | No | Password for the host UI. Leave blank to disable authentication |
 | `RETENTION_DAYS` | No | Delete sessions older than this many days on startup. Default: `0` (disabled) |
 | `LOG_LEVEL` | No | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Default: `INFO` |
+| `API_KEY` | No | Enables the machine-to-machine session API (see [API](#api) below). Leave blank to disable it entirely |
 
 ### Transcription (WhisperX)
 
@@ -313,6 +314,62 @@ Files are organized under the configured upload path as:
 13. If cloud upload is configured, an **Upload to Cloud** button appears on each session card with files; clicking it uploads all server-recorded files to the configured backend(s). Guests also see an **Upload Local Recording** button after recording stops — clicking it opens a dedicated upload page where they can upload local OBS recordings with a per-file progress bar
 14. If Outline is configured, the host can click **Sync Outline** before recording to import show notes from a linked document. Only content between the `<!- podbooth -!>` / `<!- /podbooth -!>` tags is pulled in; H2 headings become timer topics
 15. If R2 is configured and files have been uploaded, the host can click **Generate Editor Link** on the session card to produce a time-limited link for a remote editor. The link gives the editor direct download access to all R2 files without needing a PodBooth account. Generating a new link immediately invalidates the previous one
+
+---
+
+## API
+
+PodBooth has a small machine-to-machine API for creating and deleting sessions programmatically — useful for scripting session creation from another tool instead of clicking through the UI.
+
+It's separate from the browser host-login flow (`HOST_PASSWORD`/cookie) and the per-session `host_token` used by the studio itself. It's gated by a single static key.
+
+**Enable it** by setting `API_KEY` in your `.env` (see [Environment Variables](#environment-variables)). Generate one with:
+
+```bash
+openssl rand -base64 32
+```
+
+If `API_KEY` is unset, these endpoints return `503` and are effectively disabled.
+
+Authenticate by sending the key on every request as an `X-API-Key` header.
+
+### Create a session
+
+```
+POST /api/session
+X-API-Key: <your key>
+Content-Type: application/json
+
+{"title": "Episode 42"}
+```
+
+Response:
+
+```json
+{
+  "id": "AbCdEf12345",
+  "title": "Episode 42",
+  "host_token": "…",
+  "join_path": "/join/AbCdEf12345"
+}
+```
+
+- `id` — the session ID.
+- `host_token` — the session's host secret; treat it like a password. It's not needed for the delete API below, but it can be used with the existing `/api/session/{id}/end` and `/api/session/{id}/delete` endpoints or to join the studio as host at `{join_path}?host_token={host_token}`.
+- Returns `409` if a non-ended session with the same title already exists.
+
+### Delete a session
+
+```
+DELETE /api/session/{session_id}
+X-API-Key: <your key>
+```
+
+Deletes the session record and its recordings directory (and any uploaded S3/R2/B2 objects, if present). Returns `404` if the session doesn't exist.
+
+```json
+{"deleted": true}
+```
 
 ---
 

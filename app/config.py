@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     recordings_dir: str = "/recordings"
     base_url: str = "http://localhost:8000"
     host_password: str = ""
+    api_key: str = ""
     retention_days: int = 0
     whisperx_api_url: str = ""
     whisperx_model: str = "large-v3-turbo"

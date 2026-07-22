@@ -17,7 +17,7 @@ from livekit.api import AccessToken, VideoGrants
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
 from app.routers.upload import recover_orphaned_chunks, is_merging
 from app.config import settings, ASSET_VERSION, APP_VERSION
-from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host
+from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host, require_api_key
 from app.limiter import limiter
 from app.routers.cloudsync import cloud_upload_enabled, delete_cloud_session, _session_slug
 
@@ -127,6 +127,47 @@ async def new_session(
         resp = RedirectResponse(url=f"/join/{session.id}", status_code=303)
     _set_host_cookie(resp, session.id, session.host_token)
     return resp
+
+
+@router.post("/api/session")
+async def create_session_route(request: Request, _: None = Depends(require_api_key)):
+    """Machine-to-machine session creation, gated by X-API-Key rather than
+    the browser host-login cookie used by /session/new."""
+    data = await request.json()
+    title = str(data.get("title", "")).strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+    if title_in_use(title):
+        raise HTTPException(status_code=409, detail="A session with this title is already active")
+
+    session = await create_session(title)
+    return JSONResponse({
+        "id": session.id,
+        "title": session.title,
+        "host_token": session.host_token,
+        "join_path": session.guest_link_path,
+    })
+
+
+@router.delete("/api/session/{session_id}")
+async def delete_session_api_route(session_id: str, _: None = Depends(require_api_key)):
+    """Machine-to-machine session deletion, gated by X-API-Key."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.editor_token_hash or session.r2_files:
+        try:
+            from app import s3
+            from app.routers.s3upload import _cloudsync_prefixes
+            extra_pfx = _cloudsync_prefixes(session.title)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
+        except Exception as e:
+            logger.warning("delete_session_api_route: S3 cleanup failed for %s: %s", session_id, e)
+
+    await delete_session(session_id)
+    return JSONResponse({"deleted": True})
 
 
 @router.get("/join/{session_id}", response_class=HTMLResponse)
