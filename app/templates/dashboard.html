@@ -288,7 +288,7 @@
         </div>
         {% endif %}
 
-        <button class="btn-danger" onclick="deleteSession('{{ session.id }}', '{{ session.host_token }}', '{{ session.title }}')">Delete</button>
+        <button class="btn-danger" data-session-id="{{ session.id }}" data-host-token="{{ session.host_token }}" data-title="{{ session.title }}" onclick="deleteSession(this.dataset.sessionId, this.dataset.hostToken, this.dataset.title)">Delete</button>
       </div>
     </div>
     {% endfor %}

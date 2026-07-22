@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 def _safe_name(value: str) -> str:
-    return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
+    cleaned = "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
+    return cleaned[:100]
 
 
 @dataclass
@@ -152,11 +153,11 @@ async def delete_session(session_id: str):
         _save()
     if session:
         recordings_dir = Path(settings.recordings_dir) / session.dir_name
-        if recordings_dir.is_dir():
-            try:
+        try:
+            if recordings_dir.is_dir():
                 shutil.rmtree(recordings_dir)
-            except Exception as e:
-                logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
+        except OSError as e:
+            logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
 
 
 async def purge_expired() -> list[str]:
