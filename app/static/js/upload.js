@@ -272,19 +272,20 @@ const CHUNK_RETRY_BUDGET_MS = 10 * 60 * 1000;
 // trouble without us ever abandoning a chunk mid-flight.
 const uploadStruggling = new Set();
 
-// Lets the user cancel any in-progress File System Access whole-file
-// upload(s) (see _doUploadAllRecordedChunks). Audio/video/screen tracks can
-// each have their own FSA whole-file upload in flight at the same time
-// (_uploadOneTrack runs per-track via Promise.all), so this is a Set rather
-// than a single controller — a single shared variable let one track's
-// completion null it out from under a still-in-flight sibling track.
-const fsaUploadControllers = new Set();
 let uploadCancelled = false;
 
-function cancelFsaUpload() {
-  if (fsaUploadControllers.size === 0) return;
-  recLog('cancelFsaUpload: cancelling in-progress FSA whole-file upload(s)');
-  for (const controller of fsaUploadControllers) controller.abort();
+// One controller per upload pass, aborted by the banner's "Cancel upload"
+// button. Its signal is threaded through every uploadChunkWithRetry call —
+// both the FSA whole-file path and the plain IndexedDB chunk path — so
+// cancelling stops all in-flight and future chunk requests for this pass,
+// not just FSA transfers. Chunks already sent stay uploaded server-side;
+// nothing already-persisted locally is deleted, so a later recording attempt
+// (or a page reload retry) can still pick the rest up.
+let uploadAbortController = null;
+
+function cancelUpload() {
+  if (uploadAbortController) uploadAbortController.abort();
+  recLog('cancelUpload: cancelling in-progress upload');
 }
 
 // A hung TCP connection (common on a flaky VPN/tunnel link) leaves fetch()
@@ -335,6 +336,41 @@ const UPLOAD_STALL_TIMEOUT_MS = 20 * 1000;
 // could hold one attempt open indefinitely.
 const UPLOAD_STALL_HARD_CAP_MS = 30 * 60 * 1000;
 
+// Rolling window of recent upload byte deltas, shared across every in-flight
+// XHR (chunk uploads run with concurrency > 1, so speed must be summed across
+// requests, not read off any single one). Samples older than the window are
+// dropped each time we recompute, so the reading tracks recent throughput
+// rather than an all-time average.
+const UPLOAD_SPEED_WINDOW_MS = 4000;
+let _uploadByteSamples = [];
+
+function _recordUploadBytes(delta) {
+  if (delta <= 0) return;
+  const now = performance.now();
+  _uploadByteSamples.push({ t: now, bytes: delta });
+  const cutoff = now - UPLOAD_SPEED_WINDOW_MS;
+  while (_uploadByteSamples.length && _uploadByteSamples[0].t < cutoff) _uploadByteSamples.shift();
+}
+
+// Current upload throughput in bytes/sec, averaged over the trailing window.
+// Returns 0 once samples age out, so the display naturally falls back to
+// "—" between bursts instead of showing a stale number.
+function currentUploadSpeedBps() {
+  const now = performance.now();
+  const cutoff = now - UPLOAD_SPEED_WINDOW_MS;
+  while (_uploadByteSamples.length && _uploadByteSamples[0].t < cutoff) _uploadByteSamples.shift();
+  if (!_uploadByteSamples.length) return 0;
+  const totalBytes = _uploadByteSamples.reduce((sum, s) => sum + s.bytes, 0);
+  const spanMs = Math.max(now - _uploadByteSamples[0].t, 250); // avoid a tiny span inflating the rate
+  return totalBytes / (spanMs / 1000);
+}
+
+function formatUploadSpeed(bps) {
+  if (!bps || bps <= 0) return '';
+  if (bps >= 1024 * 1024) return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+  return `${Math.round(bps / 1024)} KB/s`;
+}
+
 // XHR (not fetch) because only XHR exposes upload progress events — fetch's
 // request streaming has no equivalent, so there's no way to distinguish
 // "still sending, just slow" from "completely stalled" with fetch alone.
@@ -344,6 +380,7 @@ function _xhrUploadChunk(form, cancelSignal) {
     let stallTimer = null;
     let hardCapTimer = null;
     let settled = false;
+    let lastLoaded = 0;
 
     const cleanup = () => {
       clearTimeout(stallTimer);
@@ -364,6 +401,10 @@ function _xhrUploadChunk(form, cancelSignal) {
     if (cancelSignal) cancelSignal.addEventListener('abort', onCancel);
 
     xhr.upload.addEventListener('progress', resetStallTimer);
+    xhr.upload.addEventListener('progress', (event) => {
+      _recordUploadBytes(event.loaded - lastLoaded);
+      lastLoaded = event.loaded;
+    });
     xhr.addEventListener('loadstart', resetStallTimer);
     xhr.addEventListener('load', () => finish(resolve, { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status }));
     xhr.addEventListener('error', () => finish(reject, new Error('network error')));
@@ -574,6 +615,11 @@ function _uploadAllRecordedChunks() {
 // A track that used File System Access (see _fsaTrackFor) uploads as one
 // whole-file "chunk 0" instead of many small IndexedDB-backed chunks.
 async function _doUploadAllRecordedChunks() {
+  // Captured once per pass and threaded through explicitly (rather than read
+  // from the module-level binding inside track callbacks) so a callback that
+  // resolves late can never end up checking a *different* pass's controller
+  // if the module-level variable has since been reassigned by a newer pass.
+  const abortController = uploadAbortController = new AbortController();
   // Drain every track's persist queue BEFORE snapshotting IndexedDB. The
   // final chunk(s) of a track (flushPcm(true), the last ondataavailable) are
   // enqueued but not awaited by stopLocalRecording, so they can still be
@@ -605,7 +651,7 @@ async function _doUploadAllRecordedChunks() {
   ]);
   await Promise.all([...tracks].map(async (trackType) => {
     try {
-      await _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack);
+      await _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack, abortController);
     } catch (e) {
       // An uncaught throw here (e.g. from fsaCloseTrackFile on a huge file)
       // used to propagate straight out of Promise.all and abort the whole
@@ -627,7 +673,7 @@ async function _doUploadAllRecordedChunks() {
 // already uploads at.
 const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
 
-async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack) {
+async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack, abortController) {
   // enqueueChunk's writes are chained onto _persistQueues[trackType] but not
   // awaited by the caller (MediaRecorder's onstop isn't async-aware), so the
   // last chunk(s) of a track can still be mid-write when this runs. Closing
@@ -655,8 +701,6 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
     // 44-byte header back off just for the copy we upload.
     if (localTrack.isRawAudio) file = file.slice(44);
 
-    const trackController = new AbortController();
-    fsaUploadControllers.add(trackController);
     let ok;
     if (failedTrack && failedTrack.chunksWritten === 0) {
       // Failed over before a single chunk was committed to the file — there
@@ -678,7 +722,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
       uploadStats.queued++;
       refreshUploadBanner();
       const wholeMeta = { subsumes_chunks: failedTrack.chunksWritten };
-      ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, trackController.signal);
+      ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, abortController.signal);
       uploadStats.completed++;
       refreshUploadBanner();
     } else {
@@ -689,14 +733,13 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
       ok = await _uploadPoolRun(sliceIndices, async (i) => {
         const start = i * FSA_UPLOAD_SLICE_BYTES;
         const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
-        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName, trackController.signal);
+        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName, abortController.signal);
         uploadStats.completed++;
         refreshUploadBanner();
         return sliceOk;
       });
     }
-    const wasCancelled = trackController.signal.aborted;
-    fsaUploadControllers.delete(trackController);
+    const wasCancelled = abortController.signal.aborted;
     delete fsaFailedTracks[trackType];
     if (!ok) {
       if (wasCancelled) uploadCancelled = true;
@@ -718,8 +761,11 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
         refreshUploadBanner();
         return true; // not fatal to the rest of the track — keep going
       }
-      const ok = await uploadChunkWithRetry(rec.blob, trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, SESSION_ID, identity, displayName);
-      if (!ok) return false; // uploadChunkWithRetry already set uploadHasError; leave this track unfinalized
+      const ok = await uploadChunkWithRetry(rec.blob, trackType, c.chunkIndex, c.ext, c.epoch, rec.meta || {}, SESSION_ID, identity, displayName, abortController.signal);
+      if (!ok) {
+        if (abortController.signal.aborted) uploadCancelled = true;
+        return false; // uploadChunkWithRetry already set uploadHasError (unless cancelled); leave this track unfinalized
+      }
       idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
       uploadStats.completed++;
       refreshUploadBanner();
@@ -818,6 +864,11 @@ function _buildUploadBanner(banner, state) {
     track.appendChild(fill);
     main.appendChild(track);
 
+    const speedReadout = document.createElement('span');
+    speedReadout.className = 'upload-speed-readout';
+    speedReadout.textContent = formatUploadSpeed(currentUploadSpeedBps());
+    main.appendChild(speedReadout);
+
     const speedSelect = document.createElement('select');
     speedSelect.className = 'upload-speed-select';
     speedSelect.title = 'Upload speed';
@@ -834,6 +885,13 @@ function _buildUploadBanner(banner, state) {
       try { localStorage.setItem(UPLOAD_SPEED_KEY, speedSelect.value); } catch (e) {}
     });
     main.appendChild(speedSelect);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'upload-cancel-btn';
+    cancelBtn.textContent = 'Cancel upload';
+    cancelBtn.title = 'Stop sending this recording to the cloud';
+    cancelBtn.addEventListener('click', cancelUpload);
+    main.appendChild(cancelBtn);
   } else if (state === 'assembling') {
     lbl.textContent = 'Assembling recordings…';
     main.appendChild(lbl);
@@ -866,6 +924,8 @@ function _buildUploadBanner(banner, state) {
   banner.appendChild(closeBtn);
 }
 
+let _uploadSpeedTimer = null;
+
 function showUploadBanner(state) {
   uploadPending = (state === 'uploading');
   const banner = document.getElementById('upload-banner');
@@ -873,6 +933,9 @@ function showUploadBanner(state) {
   banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying');
   banner.classList.add(state);
   _buildUploadBanner(banner, state);
+
+  clearInterval(_uploadSpeedTimer);
+  _uploadSpeedTimer = (state === 'uploading') ? setInterval(refreshUploadBanner, 500) : null;
 }
 
 function refreshUploadBanner() {
@@ -880,29 +943,17 @@ function refreshUploadBanner() {
   if (!banner || banner.classList.contains('hidden') || !banner.classList.contains('uploading')) return;
   const fill = banner.querySelector('.upload-progress-fill');
   const lbl  = banner.querySelector('.upload-banner-label');
+  const speedReadout = banner.querySelector('.upload-speed-readout');
   const { completed: n, queued: t } = uploadStats;
   if (fill && t > 0) fill.style.width = Math.round(n / t * 100) + '%';
   if (lbl)  lbl.textContent = t > 0 ? `Uploading ${n}/${t} chunks` : 'Uploading recordings…';
-
-  // Only show a cancel affordance while a File System Access whole-file
-  // upload is actually in flight — that's the one request big enough (up to
-  // many GB) to be worth letting the user abort mid-transfer.
-  const main = banner.querySelector('.upload-banner-main');
-  let cancelBtn = banner.querySelector('.upload-cancel-btn');
-  if (fsaUploadControllers.size > 0 && !cancelBtn && main) {
-    cancelBtn = document.createElement('button');
-    cancelBtn.className = 'upload-cancel-btn';
-    cancelBtn.textContent = 'Cancel upload';
-    cancelBtn.title = 'Stop sending this recording to the cloud';
-    cancelBtn.addEventListener('click', cancelFsaUpload);
-    main.appendChild(cancelBtn);
-  } else if (fsaUploadControllers.size === 0 && cancelBtn) {
-    cancelBtn.remove();
-  }
+  if (speedReadout) speedReadout.textContent = formatUploadSpeed(currentUploadSpeedBps());
 }
 
 function hideUploadBanner() {
   uploadPending = false;
+  clearInterval(_uploadSpeedTimer);
+  _uploadSpeedTimer = null;
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
   banner.classList.add('hidden');

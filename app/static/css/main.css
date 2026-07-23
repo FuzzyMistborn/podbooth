@@ -2550,6 +2550,14 @@ body.no-mirror .participant-tile.local video { transform: none; }
   border-radius: 2px;
   transition: width 0.3s ease;
 }
+.upload-speed-readout {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+  min-height: 1em;
+}
 .upload-speed-select {
   align-self: flex-start;
   background: none;

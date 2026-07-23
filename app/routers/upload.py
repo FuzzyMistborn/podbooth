@@ -118,8 +118,8 @@ def _find_missing_chunk_indices(chunks: list[Path], subsumes: int = 0) -> list[i
         return []
     if subsumes > 1 and 0 in present:
         present.update(range(0, subsumes))
-    lo, hi = min(present), max(present)
-    return [i for i in range(lo, hi + 1) if i not in present]
+    hi = max(present)
+    return [i for i in range(0, hi + 1) if i not in present]
 
 
 def _oname(base: str, epoch: str, ext: str, mid: str = "") -> str:
@@ -500,6 +500,18 @@ async def assemble_track(
         )
         marker = directory / f"{track_type}{epoch_tag}_MISSING_CHUNKS.txt"
         marker.write_text(f"missing chunk indices: {missing}\n")
+        source_ext = chunks[0].suffix
+        if 0 in missing and source_ext in (".webm", ".mp4"):
+            # Chunk 0 carries the container's init segment (EBML/moov header);
+            # without it ffmpeg can't parse the stream at all, so don't bother
+            # concatenating and running ffmpeg on a known-corrupt source.
+            logger.error(
+                "assemble: %s/%s epoch=%r missing chunk 0 — aborting assembly, "
+                "%s source would have no container header",
+                track_type, directory.name, epoch, source_ext,
+            )
+            subsumes_path.unlink(missing_ok=True)
+            return
 
     # The subsumes sidecar has served its only purpose (the gap check above).
     # A failed ffmpeg run below leaves a .failed source that blocks any
