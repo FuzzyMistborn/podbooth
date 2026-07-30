@@ -30,6 +30,34 @@ class MemoryStorage {
   get length() { return this._data.size; }
 }
 
+// Minimal stand-ins for the LiveKit browser SDK types recording.js reads
+// (Track.Source.* constants) and for MediaRecorder/MediaStream, just enough
+// to drive startScreenRecording()/restartPcmCapture() for real without an
+// actual browser. Deliberately not trying to model real media behavior.
+export const FakeTrackSource = { Microphone: 'microphone', Camera: 'camera', ScreenShare: 'screen_share' };
+
+export class FakeMediaRecorder {
+  static isTypeSupported() { return true; }
+  constructor(stream, opts) { this.stream = stream; this.opts = opts; this.state = 'inactive'; }
+  start(timeslice) { this.state = 'recording'; this._timeslice = timeslice; }
+  stop() {
+    if (this.state === 'inactive') return;
+    this.state = 'inactive';
+    this.onstop?.();
+  }
+}
+
+class FakeMediaStream {
+  constructor(tracks = []) { this.tracks = tracks; }
+}
+
+// A fake LiveKit room exposing exactly one screen-share video publication —
+// enough for recording.js's getScreenTrack() to find it.
+export function makeRoomWithScreenShare() {
+  const pub = { track: { mediaStreamTrack: {} }, source: FakeTrackSource.ScreenShare };
+  return { localParticipant: { videoTrackPublications: new Map([['screen-pub', pub]]) } };
+}
+
 // Studio.js (not loaded here — it destructures the LiveKit UMD global and
 // touches the DOM at import time) is where recordingEpoch, chunkIndex,
 // identity, etc. are actually declared in production. Tests stand in for it
@@ -74,6 +102,27 @@ export function installGlobals(overrides = {}) {
     // is missing, so a getElementById stub returning null is enough to let
     // real upload.js banner-update calls run harmlessly without a real DOM.
     document: { getElementById: () => null },
+    // Only needed when recording.js is also loaded (loadRecordingModules) —
+    // harmless defaults otherwise, since nothing reads them unless the
+    // relevant recording.js function is actually called.
+    Track: { Source: FakeTrackSource },
+    MediaRecorder: FakeMediaRecorder,
+    MediaStream: FakeMediaStream,
+    removeTile: () => {},
+    layoutTiles: () => {},
+    btnScreen: null,
+    pcmNode: null,
+    pcmSource: null,
+    pcmCtx: null,
+    pcmStream: null,
+    pcmCloneTrack: null,
+    pcmBuffers: [],
+    pcmFrames: 0,
+    pcmFramesWritten: 0,
+    pcmChannels: 2,
+    pcmCapturing: false,
+    audioStartTime: 0,
+    audioFormat: 'pcm',
   };
   Object.assign(globalThis, defaults, overrides);
 }
@@ -87,15 +136,24 @@ export function stubXhrUpload(impl) {
 }
 
 let loaded = false;
+let recordingLoaded = false;
 
-// idb-store.js + upload.js only — recording.js needs MediaRecorder/DOM APIs
-// this harness doesn't provide, and isn't needed to exercise the
-// upload/recovery logic these tests target.
+// idb-store.js + upload.js only — enough for the upload/recovery logic tests.
 export function loadUploadModules() {
   if (loaded) return; // function declarations are idempotent to re-eval, but skip the work
   loadScript('idb-store.js');
   loadScript('upload.js');
   loaded = true;
+}
+
+// Also loads recording.js, for tests exercising screen-share restart /
+// PCM-fallback logic — needs the extra MediaRecorder/Track/room stubs
+// installGlobals provides.
+export function loadRecordingModules() {
+  loadUploadModules();
+  if (recordingLoaded) return;
+  loadScript('recording.js');
+  recordingLoaded = true;
 }
 
 export function makeBlob(bytes = 1024) {
