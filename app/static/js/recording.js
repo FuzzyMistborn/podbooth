@@ -428,7 +428,11 @@ function startVideoRecording() {
     if (e.data && e.data.size > 0) {
       const idx = chunkIndex.video;
       recLog('video ondataavailable: chunk=%d size=%d bytes', idx, e.data.size);
-      enqueueChunk(e.data, 'video', videoExt);
+      // start_time_ms travels on every chunk (not just the onstop finalize
+      // payload) so a crash-recovery pass, which never sees onstop's
+      // pendingFinalizeMeta, can still recover A/V offset alignment from
+      // whatever chunk survives in IndexedDB.
+      enqueueChunk(e.data, 'video', videoExt, { start_time_ms: videoStartTime });
     } else {
       recLog('video ondataavailable: empty chunk (skipped)');
     }
@@ -494,7 +498,7 @@ function startScreenRecording() {
   // unchanged from before this existed.
   if (screenEpochHistory.length > 0) {
     screenGen++;
-    screenEpoch = recordingEpoch + 's' + screenGen;
+    screenEpoch = recordingEpoch + '-s' + screenGen;
     chunkIndex.screen = 0;
   } else {
     screenEpoch = recordingEpoch;
@@ -523,7 +527,7 @@ function startScreenRecording() {
   screenRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
       recLog('screen ondataavailable: chunk=%d size=%d bytes epoch=%s', chunkIndex.screen, e.data.size, screenEpoch);
-      enqueueChunk(e.data, 'screen', screenExt, {}, screenEpoch);
+      enqueueChunk(e.data, 'screen', screenExt, { start_time_ms: screenStartTime }, screenEpoch);
     } else {
       recLog('screen ondataavailable: empty chunk (skipped)');
     }
@@ -735,7 +739,7 @@ function flushPcm(isLast) {
     pcmFramesWritten += frames;
     const audioIdx = chunkIndex.audio;
     recLog('flushPcm: chunk=%d offsetS=%.2f durationS=%.2f isLast=%s', audioIdx, chunkOffsetS, durationS, isLast);
-    enqueueChunk(new Blob([interleaved.buffer]), 'audio', 'raw', { chunk_offset_s: chunkOffsetS });
+    enqueueChunk(new Blob([interleaved.buffer]), 'audio', 'raw', { chunk_offset_s: chunkOffsetS, start_time_ms: audioStartTime });
   } else if (isLast) {
     recLog('flushPcm(last): pcmFrames=0, nothing to flush');
   }
@@ -780,7 +784,7 @@ function startOpusFallback() {
   });
   audioRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
-      enqueueChunk(e.data, 'audio', ext);
+      enqueueChunk(e.data, 'audio', ext, { start_time_ms: audioStartTime });
     }
   };
   audioRecorder.onerror = e => {

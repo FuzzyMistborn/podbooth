@@ -76,7 +76,7 @@ _metadata_lock = asyncio.Lock()
 
 # Epoch is client-supplied and ends up in filenames and glob patterns, so it
 # must never contain path separators or glob metacharacters.
-_EPOCH_RE = re.compile(r"^[A-Za-z0-9]{0,64}$")
+_EPOCH_RE = re.compile(r"^[A-Za-z0-9-]{0,64}$")
 
 # Doubles as the cap for a File System Access whole-recording upload (see
 # fsa-store.js), which arrives as a single "chunk 0" rather than many small
@@ -88,7 +88,7 @@ _MAX_CHUNK_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB
 #   audio_chunk_000000.raw          →  track=audio  epoch=None    ext=raw
 # Epoch uses [A-Za-z0-9]+ (no underscores) to avoid ambiguity with _chunk_.
 _CHUNK_SCAN_RE = re.compile(
-    r'^(audio|video|screen)_(?:([A-Za-z0-9]+)_)?chunk_\d+\.(raw|webm|mp4)$'
+    r'^(audio|video|screen)_(?:([A-Za-z0-9-]+)_)?chunk_\d+\.(raw|webm|mp4)$'
 )
 
 
@@ -178,7 +178,12 @@ def _final_name(track_type: str, slug: str, take: int, ext: str) -> str:
 
 
 def _decode_epoch_ms(epoch: str) -> int | None:
-    """Decode a base-36 JS Date.now() epoch string to milliseconds."""
+    """Decode a base-36 JS Date.now() epoch string to milliseconds.
+
+    A screen-share restart's sub-epoch (e.g. "mrv3jq9-s1", see screenEpoch in
+    recording.js) isn't a real Date.now() value, so it's never decodable here —
+    "-" is filename-safe but not a base-36 digit, and int() raises on it.
+    """
     try:
         return int(epoch, 36)
     except Exception:

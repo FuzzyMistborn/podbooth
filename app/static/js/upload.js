@@ -120,6 +120,22 @@ async function _recoverGroup(chunks) {
   chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
   const { sessionId, identity: recIdentity, participant, epoch, trackType, ext: firstExt } = chunks[0];
   const recParticipant = participant || recIdentity;
+  // The live finalize path gets start_time_ms/expected_duration_s from
+  // pendingFinalizeMeta (set by finalizeTrack at onstop), but that's an
+  // in-memory object lost on the reload that triggers recovery. Every chunk
+  // now carries start_time_ms in its own meta (see enqueueChunk callers in
+  // recording.js) specifically so it survives in IndexedDB — pull it from
+  // whichever chunk is still here. expected_duration_s only survives for pcm
+  // audio (chunk_offset_s marks each chunk's position in the stream); other
+  // track types have no reliable end estimate here, so it's left unset —
+  // truncation detection still works, it just can't fire for this recovered
+  // take.
+  const startTimeMs = chunks.find(c => c.meta && c.meta.start_time_ms != null)?.meta.start_time_ms;
+  const lastPcmOffset = chunks.reduce((max, c) => {
+    const off = c.meta && c.meta.chunk_offset_s;
+    return typeof off === 'number' && off > max ? off : max;
+  }, -1);
+  const expectedDurationS = lastPcmOffset >= 0 ? lastPcmOffset : undefined;
 
   // get_chunk_progress 404s if the session itself is gone, which doubles as
   // a cheap "is there anywhere left to recover this into" preflight — no
@@ -185,6 +201,8 @@ async function _recoverGroup(chunks) {
       session_id: sessionId, participant: recParticipant, identity: recIdentity,
       track_type: trackType, format: fmt, epoch: epoch || '',
     };
+    if (startTimeMs != null) body.start_time_ms = startTimeMs;
+    if (expectedDurationS !== undefined) body.expected_duration_s = expectedDurationS;
     if (fmt === 'pcm') { body.sample_rate = 48000; body.channels = 2; }
     try {
       const r = await fetch('/api/upload/finalize', {

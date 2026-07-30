@@ -33,8 +33,8 @@ describe('startScreenRecording (H3: restart gets its own sub-epoch)', () => {
 
     startScreenRecording(); // ...then restarts sharing, same recording
 
-    expect(screenEpoch).toBe('rec-abcs1');
-    expect(screenEpochHistory).toEqual(['rec-abc', 'rec-abcs1']);
+    expect(screenEpoch).toBe('rec-abc-s1');
+    expect(screenEpochHistory).toEqual(['rec-abc', 'rec-abc-s1']);
     // The bug this regresses: continuing chunkIndex.screen from the first
     // segment made the restart's first chunk collide/concatenate with the
     // first segment's sequence instead of starting its own.
@@ -53,7 +53,7 @@ describe('startScreenRecording (H3: restart gets its own sub-epoch)', () => {
 
     screenRecorder.ondataavailable({ data: { size: 100 } });
 
-    expect(enqueued).toEqual([{ trackType: 'screen', epochOverride: 'rec-abcs1' }]);
+    expect(enqueued).toEqual([{ trackType: 'screen', epochOverride: 'rec-abc-s1' }]);
   });
 
   it('a second restart increments the generation again', () => {
@@ -63,7 +63,7 @@ describe('startScreenRecording (H3: restart gets its own sub-epoch)', () => {
     cleanupLocalScreen();
     startScreenRecording();
 
-    expect(screenEpoch).toBe('rec-abcs2');
-    expect(screenEpochHistory).toEqual(['rec-abc', 'rec-abcs1', 'rec-abcs2']);
+    expect(screenEpoch).toBe('rec-abc-s2');
+    expect(screenEpochHistory).toEqual(['rec-abc', 'rec-abc-s1', 'rec-abc-s2']);
   });
 });

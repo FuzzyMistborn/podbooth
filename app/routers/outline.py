@@ -24,15 +24,32 @@ import logging
 import re
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.auth import require_host
+from app.auth import COOKIE_NAME, password_configured, require_host, verify_session_token
 from app.config import settings
 from app.models import get_session, touch
 from app.utils import _is_host
 
 logger = logging.getLogger(__name__)
+
+
+def _authorize_host(request: Request, session, request_data: dict) -> None:
+    """Allow either a valid per-session host_token or a logged-in host cookie.
+
+    require_host alone used to run as a route dependency before this body
+    ever executed, so a host who reached the session via a host_token link
+    (e.g. an API-created session, never logged in through /login) got a 303
+    redirect instead of the host_token check ever having a chance to pass
+    them. Checking host_token first, and only falling back to the cookie
+    check, fixes that without weakening the no-token case (still 403).
+    """
+    if _is_host(request_data.get("host_token", ""), session):
+        return
+    if password_configured() and verify_session_token(request.cookies.get(COOKIE_NAME, "")):
+        return
+    raise HTTPException(status_code=403, detail="Not authorized")
 
 router = APIRouter()
 
@@ -246,7 +263,7 @@ async def _fetch_outline_document(doc_id: str) -> dict:
 async def import_outline_notes(
     session_id: str,
     request_data: dict,
-    _: None = Depends(require_host),
+    request: Request,
 ):
     """
     Fetch an Outline document and import the show notes section into this
@@ -268,8 +285,7 @@ async def import_outline_notes(
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
-    if not _is_host(request_data.get("host_token", ""), session):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _authorize_host(request, session, request_data)
 
     doc_id_raw = str(request_data.get("doc_id", "")).strip()
     if not doc_id_raw:
@@ -336,7 +352,7 @@ async def import_outline_notes(
 async def refresh_outline_notes(
     session_id: str,
     request_data: dict,
-    _: None = Depends(require_host),
+    request: Request,
 ):
     """
     Re-fetch and re-import from the previously linked Outline document.
@@ -354,8 +370,7 @@ async def refresh_outline_notes(
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
-    if not _is_host(request_data.get("host_token", ""), session):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _authorize_host(request, session, request_data)
 
     doc_id = getattr(session, "outline_doc_id", "")
     if not doc_id:

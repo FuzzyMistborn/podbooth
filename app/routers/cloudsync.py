@@ -12,6 +12,7 @@ Remote path layout:
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -33,6 +34,20 @@ router = APIRouter()
 # session_id → {"status": "uploading"|"done"|"error", "message": str, "uploaded": int, "total": int}
 _upload_status: dict[str, dict] = {}
 _upload_task_refs: set[asyncio.Task] = set()
+
+# Neither _upload_status nor localupload.py's _local_upload_status (same
+# shape, keyed by upload_id) ever had entries removed, so a long-running
+# server would grow both without bound. Sweep stale entries every time a new
+# job starts — reusing run_upload as the one place both dicts always pass
+# through avoids needing a background task just for this.
+_STATUS_TTL_S = 24 * 60 * 60
+
+
+def _evict_stale_status(status_store: dict) -> None:
+    cutoff = time.time() - _STATUS_TTL_S
+    stale = [k for k, v in status_store.items() if v.get("ts", cutoff) < cutoff]
+    for k in stale:
+        del status_store[k]
 
 
 _UPLOAD_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
@@ -426,7 +441,11 @@ async def run_upload(
     # read as "20 of 10".
     total = total_files * len(backends)
     names = ", ".join(b.name for b in backends)
-    status_store[job_id] = {"status": "uploading", "message": f"Uploading to {names}…", "uploaded": 0, "total": total}
+    _evict_stale_status(status_store)
+    status_store[job_id] = {
+        "status": "uploading", "message": f"Uploading to {names}…",
+        "uploaded": 0, "total": total, "ts": time.time(),
+    }
 
     # Backends are independent remote destinations, so uploading to all of
     # them at once (rather than one after another) cuts total sync time
@@ -458,6 +477,7 @@ async def run_upload(
             "message": "; ".join(errors),
             "uploaded": uploaded,
             "total": total,
+            "ts": time.time(),
         }
     else:
         status_store[job_id] = {
@@ -465,6 +485,7 @@ async def run_upload(
             "message": f"Uploaded {total_files} file(s)",
             "uploaded": uploaded,
             "total": total,
+            "ts": time.time(),
         }
 
 
