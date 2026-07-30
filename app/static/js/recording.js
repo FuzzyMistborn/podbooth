@@ -1,3 +1,13 @@
+// ── Debug logging ─────────────────────────────────────────────────────────────
+// Re-added after being deleted in a "remove debug code" pass that missed the
+// ~40 call sites still using it across this file and upload.js, leaving every
+// one of them throwing ReferenceError on first call.
+
+function recLog(fmt, ...args) {
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`[rec ${identity || '?'}] ${ts} ${fmt}`, ...args);
+}
+
 // ── Recording countdown ───────────────────────────────────────────────────────
 
 function showCountdown() {
