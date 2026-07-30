@@ -207,8 +207,15 @@ async function _recoverGroup(chunks) {
 
 async function recoverOrphanedChunks() {
   const all = await idbGetAllChunks();
-  if (all.length === 0) return;
-  recLog('recoverOrphanedChunks: found %d leftover chunk(s) in IndexedDB', all.length);
+  // No early return on an empty store: a recording that crashed before a
+  // single chunk was ever written to IndexedDB leaves its "interrupted
+  // session" localStorage marker behind with nothing to recover it into —
+  // returning here before the stale-marker sweep below made that marker
+  // (and the recovery banner it drives on prejoin) permanently stuck, since
+  // every future join would hit this same empty-store case again.
+  if (all.length > 0) {
+    recLog('recoverOrphanedChunks: found %d leftover chunk(s) in IndexedDB', all.length);
+  }
 
   const groups = new Map();
   for (const rec of all) {
