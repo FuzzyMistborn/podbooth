@@ -1,0 +1,13 @@
+{
+  "name": "podbooth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "vitest": "^2.1.8"
+  }
+}

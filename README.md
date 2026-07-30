@@ -470,6 +470,23 @@ The prebuilt image at `ghcr.io/fuzzymistborn/podbooth` tracks the `main` branch.
 
 ---
 
+## Testing
+
+Two test suites cover the recording/upload pipeline without needing a real browser or a real long recording session:
+
+- **`test/js/`** — Vitest, exercises the real `app/static/js/upload.js`/`idb-store.js` logic (chunk epochs, crash recovery) against a fake IndexedDB, driving hundreds of simulated chunks in milliseconds.
+  ```
+  npm install
+  npm test
+  ```
+- **`test/python/`** — pytest, exercises the real `app/routers/upload.py` endpoints (chunk upload, recovery gap reporting, storage caps) via FastAPI's TestClient against a throwaway recordings directory.
+  ```
+  python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+  .venv/bin/pytest
+  ```
+
+---
+
 ## Roadmap
 
 - Nothing at the moment
