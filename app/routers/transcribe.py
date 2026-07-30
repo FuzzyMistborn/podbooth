@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 import shutil
 import tempfile
 from pathlib import Path
@@ -23,6 +22,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.models import get_session
+from app.utils import _is_host, _take_sort_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,8 +41,9 @@ def _gather_participant_wavs(session_dir: Path) -> dict[str, list[Path]]:
         if not pdir.is_dir():
             continue
         wavs = sorted(
-            f for f in pdir.glob("*.wav")
-            if "_source" not in f.stem and "_chunk_" not in f.name
+            (f for f in pdir.glob("*.wav")
+             if "_source" not in f.stem and "_chunk_" not in f.name),
+            key=lambda f: _take_sort_key(f.name)
         )
         if wavs:
             # Convert directory slug back to display name: Alice_Smith → Alice Smith
@@ -279,6 +280,7 @@ async def _run_session_transcription(session_id: str):
                 to_transcribe.append((speaker, mp3_path))
 
             tracks: list[tuple[str, dict]] = []
+            failed_speakers: list[str] = []
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=10.0, read=3600.0, write=300.0, pool=10.0)
             ) as client:
@@ -286,6 +288,8 @@ async def _run_session_transcription(session_id: str):
                     result = await _transcribe_chunked(client, speaker, audio_path)
                     if result:
                         tracks.append(result)
+                    else:
+                        failed_speakers.append(speaker)
 
             if not tracks:
                 logger.error("All transcriptions failed for session %s", session_id)
@@ -294,6 +298,15 @@ async def _run_session_transcription(session_id: str):
 
             transcript = _merge_transcripts(tracks)
             transcript_path.write_text(transcript)
+            incomplete_path = session_dir / "transcript_incomplete.json"
+            if failed_speakers:
+                logger.error(
+                    "Transcript for session %s is missing %d speaker(s): %s",
+                    session_id, len(failed_speakers), ", ".join(failed_speakers),
+                )
+                incomplete_path.write_text(json.dumps({"failed_speakers": failed_speakers}))
+            else:
+                incomplete_path.unlink(missing_ok=True)
             logger.info("Transcript saved for session %s (%d chars)", session_id, len(transcript))
 
         finally:
@@ -328,18 +341,19 @@ async def transcription_status(session_id: str):
 
     session_dir = Path(settings.recordings_dir) / session.dir_name
     if (session_dir / "transcript.txt").exists():
+        incomplete_path = session_dir / "transcript_incomplete.json"
+        if incomplete_path.exists():
+            try:
+                failed_speakers = json.loads(incomplete_path.read_text()).get("failed_speakers", [])
+            except Exception:
+                failed_speakers = []
+            return JSONResponse({"status": "done_with_errors", "failed_speakers": failed_speakers})
         return JSONResponse({"status": "done"})
     if session_id in _session_transcribing:
         return JSONResponse({"status": "transcribing"})
     if session_id in _session_transcribe_failed:
         return JSONResponse({"status": "failed"})
     return JSONResponse({"status": "idle"})
-
-
-def _is_host(host_token: str, session) -> bool:
-    if not isinstance(host_token, str) or not host_token:
-        return False
-    return secrets.compare_digest(host_token, session.host_token)
 
 
 @router.post("/api/session/{session_id}/retranscribe")

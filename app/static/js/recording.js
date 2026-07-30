@@ -116,6 +116,11 @@ async function stopRecording() {
   await _postRecordingAction('stop');
   await broadcastData({ type: 'recording_stopped' });
   await stopLocalRecording();
+  // Safe to flip the UI back to "Record" before the upload pass below
+  // finishes: waitForUploads captures recordingEpoch at its own entry and
+  // threads it through the whole pass, so a fast retake reassigning
+  // recordingEpoch here can't make this pass finalize/delete under the new
+  // take's epoch. Don't reorder these without keeping that guarantee.
   setRecordingUI(false);
   await waitForUploads();
   if (btnStopRec) btnStopRec.disabled = false;
@@ -244,6 +249,9 @@ async function startLocalRecording() {
     // own session storage is gone, so the marker needs to outlive the tab.
     try { localStorage.setItem(`podbooth:epoch:${SESSION_ID}:${identity}`, recordingEpoch); } catch (e) {}
     chunkIndex = { audio: 0, video: 0, screen: 0 };
+    screenEpoch = null;
+    screenGen = 0;
+    screenEpochHistory = [];
     pendingFinalizeMeta = {};
     uploadStats = { queued: 0, completed: 0 };
     uploadHasError = false;
@@ -459,7 +467,7 @@ function cleanupLocalScreen() {
       finalizeTrack('screen', {
         format: 'container',
         expected_duration_s: screenStartTime != null ? (performance.now() - screenStartTime) / 1000 : undefined,
-      });
+      }, screenEpoch || recordingEpoch);
     }
   }
   screenRecorder = null;
@@ -468,6 +476,20 @@ function cleanupLocalScreen() {
 function startScreenRecording() {
   const screenTrack = getScreenTrack();
   if (!screenTrack) return;
+
+  // A restart within the same recording (screen share stopped, then started
+  // again) gets a fresh epoch and chunk-index namespace — see the comment on
+  // screenEpoch's declaration for why. The first segment keeps using the
+  // recording's own epoch so a recording with no restart is byte-for-byte
+  // unchanged from before this existed.
+  if (screenEpochHistory.length > 0) {
+    screenGen++;
+    screenEpoch = recordingEpoch + 's' + screenGen;
+    chunkIndex.screen = 0;
+  } else {
+    screenEpoch = recordingEpoch;
+  }
+  screenEpochHistory.push(screenEpoch);
 
   // See note in startVideoRecording: mp4 chunks can't be safely concatenated.
   const candidates = [
@@ -490,8 +512,8 @@ function startScreenRecording() {
   });
   screenRecorder.ondataavailable = e => {
     if (e.data && e.data.size > 0) {
-      recLog('screen ondataavailable: chunk=%d size=%d bytes', chunkIndex.screen, e.data.size);
-      enqueueChunk(e.data, 'screen', screenExt);
+      recLog('screen ondataavailable: chunk=%d size=%d bytes epoch=%s', chunkIndex.screen, e.data.size, screenEpoch);
+      enqueueChunk(e.data, 'screen', screenExt, {}, screenEpoch);
     } else {
       recLog('screen ondataavailable: empty chunk (skipped)');
     }
@@ -504,7 +526,7 @@ function startScreenRecording() {
     finalizeTrack('screen', {
       format: 'container',
       expected_duration_s: (performance.now() - screenStartTime) / 1000,
-    });
+    }, screenEpoch);
   };
   screenStartTime = performance.now();
   screenRecorder.start(5000);
@@ -941,8 +963,16 @@ async function restartPcmCapture() {
       recLog('restartPcmCapture: padded %dms gap (%d silence frames)', gapMs, silenceFrames);
     }
   } catch (e) {
-    console.warn('Could not restart PCM after mic switch:', e);
-    startOpusFallback();
+    // Falling back to startOpusFallback() here used to keep writing .webm
+    // chunks into the same chunkIndex.audio/epoch that already holds .raw
+    // PCM chunks from before the restart. The server assembles a track by
+    // byte-concatenating all its chunks regardless of extension and picks
+    // the container format from chunk 0 alone (see assemble_track in
+    // upload.py), so mixing formats mid-track corrupts the whole take
+    // instead of just losing the tail — treat this as fatal for the audio
+    // track instead of silently producing bad data.
+    console.error('Could not restart PCM after mic switch — audio track is unrecoverable:', e);
+    await handleFatalRecordingError('audio', e);
   }
 }
 

@@ -1125,7 +1125,9 @@ async function leaveSession() {
   }
 
   showUploadBanner('uploading');
-  await _uploadAllRecordedChunks().catch(() => {});
+  const _leaveEpoch = recordingEpoch;
+  await _uploadAllRecordedChunks(_leaveEpoch).catch(() => {});
+  _clearEpochMarker(identity, _leaveEpoch);
   // Clear flag so onBeforeUnload doesn't fire a second confirmation on navigation
   uploadPending = false;
 
@@ -1156,7 +1158,9 @@ async function endSession() {
   } catch (e) { console.warn('End session API failed:', e); }
 
   showUploadBanner('uploading');
-  await _uploadAllRecordedChunks().catch(() => {});
+  const _endEpoch = recordingEpoch;
+  await _uploadAllRecordedChunks(_endEpoch).catch(() => {});
+  _clearEpochMarker(identity, _endEpoch);
   // Clear flag so onBeforeUnload doesn't fire a second confirmation on navigation
   uploadPending = false;
 
@@ -1173,7 +1177,9 @@ async function handleSessionEnded() {
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
   await new Promise(r => setTimeout(r, 100));
-  await _uploadAllRecordedChunks().catch(() => {});
+  const _endedEpoch = recordingEpoch;
+  await _uploadAllRecordedChunks(_endedEpoch).catch(() => {});
+  _clearEpochMarker(identity, _endedEpoch);
   window.removeEventListener('beforeunload', _unloadGuard);
 
   // If cloud upload is configured, send guests to the local upload page so they

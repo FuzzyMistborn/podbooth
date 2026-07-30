@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     host_password: str = ""
     api_key: str = ""
     retention_days: int = 0
+    # Aggregate cap on a single participant's chunk-upload disk usage per
+    # session (in GB). Any client holding a valid 72-bit session ID can
+    # otherwise write unlimited chunks — this bounds the blast radius of a
+    # runaway or malicious uploader. 0 disables the check.
+    max_participant_upload_gb: float = 100.0
     whisperx_api_url: str = ""
     whisperx_model: str = "large-v3-turbo"
     whisperx_language: str = ""

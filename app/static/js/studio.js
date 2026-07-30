@@ -36,6 +36,16 @@ let videoDrawRAF = null;
 
 let screenRecorder = null;
 let screenExt = 'webm';
+// A screen share stopped and restarted mid-recording gets its own epoch (see
+// startScreenRecording) rather than continuing the same one — each
+// MediaRecorder instance emits its own self-contained WebM with its own EBML
+// header, and byte-concatenating two of them into one assembled file corrupts
+// ffmpeg's parse partway through. screenEpoch is the epoch the *current*
+// screen segment's chunks are tagged with; screenEpochHistory accumulates
+// every epoch used this recording so the upload pass can find all of them.
+let screenEpoch = null;
+let screenGen = 0;
+let screenEpochHistory = [];
 
 let pcmCtx = null;
 let pcmNode = null;

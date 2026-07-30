@@ -14,15 +14,12 @@ from fastapi.responses import Response
 from app.auth import require_host
 from app.config import settings
 from app.models import get_session
+from app.utils import _safe_name
 
 router = APIRouter()
 
 RATE = 48000  # audio sample rate used as shared timebase
 _SKIP_RE = re.compile(r'_noaudio|_source|_chunk_')
-
-
-def _safe_name(value: str) -> str:
-    return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
 
 
 def _xml_escape(value: str) -> str:

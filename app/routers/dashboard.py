@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from app.models import list_sessions, get_session
+from app.utils import _safe_name, _parse_take, _take_sort_key
 
 logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION, APP_VERSION
@@ -26,10 +27,7 @@ _VALID_MEDIA_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(wav|mp4|txt)$")
 _export_tasks: set[str] = set()          # session IDs currently exporting
 _export_task_refs: set[asyncio.Task] = set()  # keep tasks alive
 _export_progress: dict[str, dict] = {}  # session_id → progress info
-
-
-def _safe_name(value: str) -> str:
-    return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
+_export_failures: set[str] = set()       # session IDs whose last export attempt failed
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -96,10 +94,20 @@ async def _concat_takes(paths: list[Path]) -> Path:
         Path(list_path).unlink(missing_ok=True)
 
 
-def _build_export_cmd(video_paths: list[Path], output_path: Path, speakers: list[str] | None = None) -> list[str]:
+def _build_export_cmd(
+    video_paths: list[Path],
+    output_path: Path,
+    speakers: list[str] | None = None,
+    durations: list[float] | None = None,
+) -> list[str]:
     n = len(video_paths)
     if speakers is None:
         speakers = [vp.parent.name for vp in video_paths]
+    # Longest participant sets the output length; everyone shorter gets padded
+    # up to it instead of the output being cut short with -shortest, which
+    # would otherwise truncate every speaker's track (mixed audio, individual
+    # audio, and the video grid) to whoever left first.
+    max_duration = max(durations) if durations else 0.0
     cmd = ["ffmpeg", "-y"]
     for vp in video_paths:
         cmd += ["-i", str(vp)]
@@ -125,16 +133,24 @@ def _build_export_cmd(video_paths: list[Path], output_path: Path, speakers: list
 
     fc = []
 
-    # Scale each real video into its cell, preserving aspect ratio with black bars
+    # Scale each real video into its cell, preserving aspect ratio with black
+    # bars, then freeze its last frame for the remainder of max_duration so a
+    # speaker who left early doesn't end the whole grid.
     for i in range(n):
+        dur = durations[i] if durations and i < len(durations) else 0.0
+        pad_clause = ""
+        if dur > 0 and max_duration > dur:
+            pad_clause = f",tpad=stop_mode=clone:stop_duration={max_duration - dur:.3f}"
         fc.append(
             f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
-            f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black[v{i}]"
+            f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black{pad_clause}[v{i}]"
         )
 
-    # Blank filler tiles (infinite duration; -shortest ends at the real video)
+    # Blank filler tiles get an explicit duration matching the real tiles
+    # (rather than running infinitely) so the grid ends at max_duration
+    # without needing a global -shortest.
     for i in range(n_blank):
-        fc.append(f"color=black:size={cell_w}x{cell_h}:rate=30[blank{i}]")
+        fc.append(f"color=black:size={cell_w}x{cell_h}:rate=30:duration={max_duration:.3f}[blank{i}]")
 
     tile_refs = "".join(f"[v{i}]" for i in range(n)) + "".join(f"[blank{i}]" for i in range(n_blank))
     layout = "|".join(
@@ -144,22 +160,27 @@ def _build_export_cmd(video_paths: list[Path], output_path: Path, speakers: list
     fc.append(f"{tile_refs}xstack=inputs={total_tiles}:layout={layout}[xstacked]")
     fc.append("[xstacked]pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[vout]")
 
+    # Pad each speaker's audio up to max_duration before mixing/mapping, same
+    # reasoning as the video tpad above.
+    for i in range(n):
+        fc.append(f"[{i}:a]apad=whole_dur={max_duration:.3f}[a{i}]")
+
     # Track 0: mixed audio from all speakers
-    audio_refs = "".join(f"[{i}:a]" for i in range(n))
+    audio_refs = "".join(f"[a{i}]" for i in range(n))
     fc.append(f"{audio_refs}amix=inputs={n}:normalize=0[aout]")
 
     cmd += ["-filter_complex", ";".join(fc)]
     cmd += ["-map", "[vout]", "-map", "[aout]"]
-    # Tracks 1..n: per-speaker audio
+    # Tracks 1..n: per-speaker audio (padded, not the raw input stream)
     for i in range(n):
-        cmd += ["-map", f"{i}:a"]
+        cmd += ["-map", f"[a{i}]"]
 
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20"]
     cmd += ["-c:a", "aac", "-b:a", "320k"]
     cmd += ["-metadata:s:a:0", "title=Mixed"]
     for i, name in enumerate(speakers):
         cmd += [f"-metadata:s:a:{i + 1}", f"title={name}"]
-    cmd += ["-movflags", "+faststart", "-shortest"]
+    cmd += ["-movflags", "+faststart"]
     cmd += [str(output_path)]
     return cmd
 
@@ -180,6 +201,12 @@ async def _probe_duration(path: Path) -> float:
 async def _run_grid_export(session_id: str, video_groups: list[list[Path]], output_path: Path):
     progress_file = Path(f"/tmp/pb_progress_{session_id}")
     tmp_files: list[Path] = []
+    # ffmpeg writes here, not directly to output_path — export-status only
+    # ever sees a fully-written file this way, never a partial one left by a
+    # killed/failed run.
+    tmp_output_path = output_path.with_name(output_path.stem + ".tmp" + output_path.suffix)
+    _export_failures.discard(session_id)
+    ok = False
     try:
         resolved: list[Path] = []
         speaker_names: list[str] = []
@@ -196,7 +223,7 @@ async def _run_grid_export(session_id: str, video_groups: list[list[Path]], outp
         durations = [await _probe_duration(p) for p in resolved]
         total_duration = max(durations) if durations else 0.0
 
-        cmd = _build_export_cmd(resolved, output_path, speakers=speaker_names)
+        cmd = _build_export_cmd(resolved, tmp_output_path, speakers=speaker_names, durations=durations)
         # Insert -progress flag right after 'ffmpeg -y'
         cmd = [cmd[0], cmd[1], "-progress", str(progress_file)] + cmd[2:]
 
@@ -214,14 +241,22 @@ async def _run_grid_export(session_id: str, video_groups: list[list[Path]], outp
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             logger.error("Grid export failed (%s): %s", session_id, stderr.decode()[-2000:])
+        elif not tmp_output_path.exists() or tmp_output_path.stat().st_size == 0:
+            logger.error("Grid export produced no output (%s)", session_id)
+        else:
+            tmp_output_path.replace(output_path)
+            ok = True
     except Exception as e:
         logger.error("Grid export error (%s): %s", session_id, e)
     finally:
         for f in tmp_files:
             f.unlink(missing_ok=True)
+        tmp_output_path.unlink(missing_ok=True)
         progress_file.unlink(missing_ok=True)
         _export_progress.pop(session_id, None)
         _export_tasks.discard(session_id)
+        if not ok:
+            _export_failures.add(session_id)
 
 
 @router.get("/api/session/{session_id}/export-progress")
@@ -340,6 +375,8 @@ async def grid_export_status(session_id: str, _: None = Depends(require_host)):
 
     if session_id in _export_tasks:
         return JSONResponse({"status": "processing"})
+    if session_id in _export_failures:
+        return JSONResponse({"status": "failed"})
     if output_path.exists():
         size_mb = round(output_path.stat().st_size / (1024 * 1024), 1)
         return JSONResponse({
@@ -348,24 +385,6 @@ async def grid_export_status(session_id: str, _: None = Depends(require_host)):
             "size_mb": size_mb,
         })
     return JSONResponse({"status": "idle"})
-
-
-def _parse_take(stem: str, ftype: str) -> int | None:
-    """Extract take number from a slug-based filename stem, e.g. Alice_1 → 1, Alice_1_video → 1."""
-    try:
-        base = stem
-        if ftype in ("video", "screen"):
-            suffix = f"_{ftype}"
-            if stem.endswith(suffix):
-                base = stem[: -len(suffix)]
-            else:
-                return None
-        parts = base.rsplit("_", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            return int(parts[1])
-    except Exception:
-        pass
-    return None
 
 
 def _get_session_files(session) -> list[dict]:
@@ -394,7 +413,9 @@ def _get_session_files(session) -> list[dict]:
     for participant_dir in sorted(session_path.iterdir()):
         if not participant_dir.is_dir():
             continue
-        for fpath in sorted(participant_dir.iterdir()):
+        # Natural sort by take number — plain lexicographic order would put
+        # Alice_10.wav before Alice_2.wav once a session passes 9 takes.
+        for fpath in sorted(participant_dir.iterdir(), key=lambda f: _take_sort_key(f.name)):
             if not fpath.is_file() or fpath.suffix not in (".wav", ".mp4"):
                 continue
             stem = fpath.stem

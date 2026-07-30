@@ -87,6 +87,9 @@ services:
     ports:
       - "7880:7880"       # HTTP/WebSocket
       - "7881:7881"       # RTC TCP
+      - "7882:7882/udp"   # RTC UDP mux port (livekit.yaml udp_port) — without
+                          # this published, it's unreachable and all media
+                          # falls back to TURN/TCP despite the UDP range below
       - "50000-50200:50000-50200/udp"  # RTC UDP range
     volumes:
       - ./livekit/livekit.yaml:/livekit.yaml

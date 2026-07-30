@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse
 from app.auth import require_host
 from app.config import settings
 from app.models import get_session, touch
+from app.utils import _is_host
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +268,8 @@ async def import_outline_notes(
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    if not _is_host(request_data.get("host_token", ""), session):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     doc_id_raw = str(request_data.get("doc_id", "")).strip()
     if not doc_id_raw:
@@ -351,6 +354,8 @@ async def refresh_outline_notes(
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    if not _is_host(request_data.get("host_token", ""), session):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     doc_id = getattr(session, "outline_doc_id", "")
     if not doc_id:

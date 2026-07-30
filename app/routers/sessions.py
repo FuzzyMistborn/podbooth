@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 import asyncio
 import json
 import logging
-import secrets
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,6 +19,7 @@ from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host, require_api_key
 from app.limiter import limiter
 from app.routers.cloudsync import cloud_upload_enabled, delete_cloud_session, _session_slug
+from app.utils import _is_host, _parse_take
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -51,12 +51,6 @@ def _kick_recovery(session) -> None:
     task = asyncio.ensure_future(_run())
     _recovery_tasks.add(task)
     task.add_done_callback(_recovery_tasks.discard)
-
-
-def _is_host(host_token, session) -> bool:
-    if not isinstance(host_token, str):
-        return False
-    return secrets.compare_digest(host_token, session.host_token)
 
 
 def _get_or_create_csrf(request: Request) -> tuple[str, bool]:
@@ -406,24 +400,6 @@ async def delete_session_route(session_id: str, request: Request):
             return JSONResponse({"deleted": True, "cloud_errors": errors})
 
     return JSONResponse({"deleted": True})
-
-
-def _parse_take(stem: str, ftype: str) -> int | None:
-    """Extract take number from a slug filename, e.g. Alice_1 → 1, Alice_1_video → 1."""
-    try:
-        base = stem
-        if ftype in ("video", "screen"):
-            suffix = f"_{ftype}"
-            if stem.endswith(suffix):
-                base = stem[: -len(suffix)]
-            else:
-                return None
-        parts = base.rsplit("_", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            return int(parts[1])
-    except Exception:
-        pass
-    return None
 
 
 @router.get("/api/session/{session_id}/recordings")

@@ -75,9 +75,9 @@ async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uplo
   await idbPutChunk({ sessionId, identity: uploadIdentity, participant, epoch, trackType, chunkIndex: index, ext, meta, blob });
 }
 
-function enqueueChunk(blob, trackType, ext, meta = {}) {
+function enqueueChunk(blob, trackType, ext, meta = {}, epochOverride = null) {
   const index = chunkIndex[trackType]++;
-  const epoch = recordingEpoch;
+  const epoch = epochOverride || recordingEpoch;
   const sessionId = SESSION_ID, uploadIdentity = identity, participant = displayName;
   uploadStats.queued++;
   refreshUploadBanner();
@@ -124,7 +124,7 @@ async function _recoverGroup(chunks) {
   // get_chunk_progress 404s if the session itself is gone, which doubles as
   // a cheap "is there anywhere left to recover this into" preflight — no
   // need to discover that mid-upload on a per-chunk basis.
-  let nextChunk = 0;
+  let presentIndices = null; // null = unknown server progress, resend everything
   let sessionGone = false;
   try {
     const r = await fetch('/api/upload/chunks?' + new URLSearchParams({
@@ -134,7 +134,12 @@ async function _recoverGroup(chunks) {
     if (r.status === 404) {
       sessionGone = true;
     } else if (r.ok) {
-      nextChunk = (await r.json()).next_chunk ?? 0;
+      const body = await r.json();
+      // Trust only the confirmed-present set, not next_chunk's max+1 —
+      // concurrent 4-wide chunk uploads can leave a gap below the max index
+      // (one chunk exhausts retries while later ones succeed), and next_chunk
+      // alone can't tell a real gap from "everything below here landed".
+      presentIndices = new Set(body.present_indices ?? []);
     }
   } catch (e) {
     // Unknown server progress — fall back to resending everything; the
@@ -150,12 +155,12 @@ async function _recoverGroup(chunks) {
     return true;
   }
 
-  let uploadedAny = nextChunk > 0;
+  let uploadedAny = !!(presentIndices && presentIndices.size > 0);
   let failed = false;
 
   for (const c of chunks) {
-    if (c.chunkIndex < nextChunk) {
-      // Server already has this one from before the crash — just clear it.
+    if (presentIndices && presentIndices.has(c.chunkIndex)) {
+      // Server confirmed it already has this exact index — just clear it.
       idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
       continue;
     }
@@ -583,12 +588,15 @@ async function _sendFinalizeWithRetry(trackType, body) {
   }
 }
 
-function finalizeTrack(trackType, meta) {
-  recLog('finalizeTrack: %s epoch=%s meta=%o (deferred until stop)', trackType, recordingEpoch, meta);
+function finalizeTrack(trackType, meta, epoch = recordingEpoch) {
+  recLog('finalizeTrack: %s epoch=%s meta=%o (deferred until stop)', trackType, epoch, meta);
   // Recording is local-only until the stop — just remember this track's
   // finalize payload. _uploadAllRecordedChunks sends it once every chunk for
-  // this track has been uploaded.
-  pendingFinalizeMeta[trackType] = meta;
+  // this (trackType, epoch) group has been uploaded. Keyed by both, not just
+  // trackType, so a screen-share restart (a second group under its own
+  // epoch — see screenEpoch in recording.js) gets its own finalize instead of
+  // clobbering the first segment's.
+  pendingFinalizeMeta[`${trackType}::${epoch}`] = meta;
 }
 
 // Multiple call sites can each decide the recording needs to be flushed to
@@ -601,20 +609,36 @@ function finalizeTrack(trackType, meta) {
 // for the same run shares one outcome instead of re-triggering it.
 let _uploadPass = { epoch: null, promise: null };
 
-function _uploadAllRecordedChunks() {
-  if (_uploadPass.epoch === recordingEpoch && _uploadPass.promise) return _uploadPass.promise;
-  const promise = _doUploadAllRecordedChunks();
-  _uploadPass = { epoch: recordingEpoch, promise };
+// epoch defaults to a read of the module global at call time — every caller
+// invokes this synchronously (no prior await in the same tick) right when it
+// decides to flush, so the default-parameter read happens at the right
+// instant. Once captured here, epoch is threaded through explicitly for the
+// rest of the pass instead of being re-read from the module global, which
+// can be reassigned mid-pass by a retake's startLocalRecording.
+// screenEpochs defaults to a snapshot of every epoch a screen-share restart
+// has used this recording (see screenEpochHistory in recording.js) — like
+// `epoch`, read via a default parameter at call time so it reflects the
+// state of *this* recording rather than being re-read later mid-pass.
+function _uploadAllRecordedChunks(epoch = recordingEpoch, screenEpochs = (typeof screenEpochHistory !== 'undefined' ? screenEpochHistory.slice() : [])) {
+  if (_uploadPass.epoch === epoch && _uploadPass.promise) return _uploadPass.promise;
+  const promise = _doUploadAllRecordedChunks(epoch, screenEpochs);
+  _uploadPass = { epoch, promise };
   return promise;
 }
 
-// Upload every chunk this tab captured for the current recording
+// Upload every chunk this tab captured for the given recording
 // (sessionId/identity/epoch), track by track, then finalize each track once
 // its chunks are up. This is what turns a stopped local-only recording into
 // an actual upload — nothing was sent to the server while capture was live.
 // A track that used File System Access (see _fsaTrackFor) uploads as one
 // whole-file "chunk 0" instead of many small IndexedDB-backed chunks.
-async function _doUploadAllRecordedChunks() {
+//
+// Chunks are grouped by (trackType, epoch) rather than trackType alone: a
+// screen-share restart mid-recording produces a second group under its own
+// epoch (see screenEpoch in recording.js) so it assembles server-side as its
+// own independent take instead of being concatenated onto the first segment.
+// Audio/video only ever have one group each, using the pass epoch.
+async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
   // Captured once per pass and threaded through explicitly (rather than read
   // from the module-level binding inside track callbacks) so a callback that
   // resolves late can never end up checking a *different* pass's controller
@@ -629,37 +653,51 @@ async function _doUploadAllRecordedChunks() {
   // (Each queue already swallows its own errors — see enqueueChunk.)
   await Promise.all(Object.values(_persistQueues));
   const all = await idbGetAllChunks();
-  const mine = all.filter(c => c.sessionId === SESSION_ID && c.identity === identity && c.epoch === recordingEpoch);
+  // Only screen chunks may belong to one of this pass's known sub-epochs —
+  // audio/video must match the pass epoch exactly, so a fast retake's
+  // in-progress chunks (a different epoch, from startLocalRecording) can
+  // never be swept into this pass.
+  const screenEpochSet = new Set(screenEpochs);
+  const mine = all.filter(c => c.sessionId === SESSION_ID && c.identity === identity &&
+    (c.epoch === epoch || (c.trackType === 'screen' && screenEpochSet.has(c.epoch))));
 
-  const chunksByTrack = { audio: [], video: [], screen: [] };
-  for (const rec of mine) chunksByTrack[rec.trackType]?.push(rec);
+  const chunksByGroup = new Map(); // `${trackType}::${epoch}` -> chunk records
+  for (const rec of mine) {
+    const key = `${rec.trackType}::${rec.epoch}`;
+    if (!chunksByGroup.has(key)) chunksByGroup.set(key, []);
+    chunksByGroup.get(key).push(rec);
+  }
 
   uploadStats.queued = mine.length;
   uploadStats.completed = 0;
   refreshUploadBanner();
 
-  // Union of tracks that have a finalize payload, an open or failed FSA file,
-  // or leftover IndexedDB chunks — a track can have chunks/an open file
-  // without finalize ever having been called for it (e.g. its recorder never
-  // fired onstop), and those chunks still need to go up even though there's
-  // no meta to finalize.
-  const tracks = new Set([
+  // Union of groups that have a finalize payload, an open/failed FSA file
+  // (always keyed under the pass epoch — FSA doesn't support a mid-recording
+  // screen restart's extra group), or leftover IndexedDB chunks — a group can
+  // have chunks/an open file without finalize ever having been called for it
+  // (e.g. its recorder never fired onstop), and those chunks still need to go
+  // up even though there's no meta to finalize.
+  const groupKeys = new Set([
     ...Object.keys(pendingFinalizeMeta),
-    ...Object.keys(fsaOpenPromises),
-    ...Object.keys(fsaFailedTracks),
-    ...Object.keys(chunksByTrack).filter(t => chunksByTrack[t].length > 0),
+    ...Object.keys(fsaOpenPromises).map(t => `${t}::${epoch}`),
+    ...Object.keys(fsaFailedTracks).map(t => `${t}::${epoch}`),
+    ...chunksByGroup.keys(),
   ]);
-  await Promise.all([...tracks].map(async (trackType) => {
+  await Promise.all([...groupKeys].map(async (key) => {
+    const sep = key.indexOf('::');
+    const trackType = key.slice(0, sep);
+    const groupEpoch = key.slice(sep + 2);
     try {
-      await _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack, abortController);
+      await _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByGroup.get(key) || [], abortController, groupEpoch);
     } catch (e) {
       // An uncaught throw here (e.g. from fsaCloseTrackFile on a huge file)
       // used to propagate straight out of Promise.all and abort the whole
-      // batch silently — other tracks that had already finished stayed
+      // batch silently — other groups that had already finished stayed
       // finished, but this one vanished with no console trace at all and
       // the generic "may be incomplete" banner gave no hint why. Log it and
       // flag it like any other upload failure instead.
-      console.error(`_doUploadAllRecordedChunks: ${trackType} failed:`, e);
+      console.error(`_doUploadAllRecordedChunks: ${key} failed:`, e);
       uploadHasError = true;
     }
   }));
@@ -673,7 +711,7 @@ async function _doUploadAllRecordedChunks() {
 // already uploads at.
 const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
 
-async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chunksByTrack, abortController) {
+async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, groupChunks, abortController, epoch) {
   // enqueueChunk's writes are chained onto _persistQueues[trackType] but not
   // awaited by the caller (MediaRecorder's onstop isn't async-aware), so the
   // last chunk(s) of a track can still be mid-write when this runs. Closing
@@ -722,8 +760,8 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
       uploadStats.queued++;
       refreshUploadBanner();
       const wholeMeta = { subsumes_chunks: failedTrack.chunksWritten };
-      ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, recordingEpoch, wholeMeta, SESSION_ID, identity, displayName, abortController.signal);
-      uploadStats.completed++;
+      ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, epoch, wholeMeta, SESSION_ID, identity, displayName, abortController.signal);
+      if (ok) uploadStats.completed++;
       refreshUploadBanner();
     } else {
       const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
@@ -733,8 +771,8 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
       ok = await _uploadPoolRun(sliceIndices, async (i) => {
         const start = i * FSA_UPLOAD_SLICE_BYTES;
         const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
-        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, recordingEpoch, {}, SESSION_ID, identity, displayName, abortController.signal);
-        uploadStats.completed++;
+        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, epoch, {}, SESSION_ID, identity, displayName, abortController.signal);
+        if (sliceOk) uploadStats.completed++;
         refreshUploadBanner();
         return sliceOk;
       });
@@ -747,7 +785,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
     }
   }
   if (!fsaTrack) {
-    const chunks = chunksByTrack[trackType].sort((a, b) => a.chunkIndex - b.chunkIndex);
+    const chunks = groupChunks.slice().sort((a, b) => a.chunkIndex - b.chunkIndex);
     const allOk = await _uploadPoolRun(chunks, async (c) => {
       const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
       if (!rec) {
@@ -773,27 +811,39 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, chun
     });
     if (!allOk) return;
   }
-  if (!(trackType in pendingFinalizeMeta)) return; // chunks uploaded, but no finalize payload was ever recorded
-  const meta = pendingFinalizeMeta[trackType];
-  delete pendingFinalizeMeta[trackType];
-  recLog('finalizeTrack: sending /finalize for %s', trackType);
+  const metaKey = `${trackType}::${epoch}`;
+  if (!(metaKey in pendingFinalizeMeta)) return; // chunks uploaded, but no finalize payload was ever recorded
+  const meta = pendingFinalizeMeta[metaKey];
+  delete pendingFinalizeMeta[metaKey];
+  recLog('finalizeTrack: sending /finalize for %s epoch=%s', trackType, epoch);
   await _sendFinalizeWithRetry(trackType, {
     session_id: SESSION_ID,
     participant: displayName,
     identity: identity,
     track_type: trackType,
-    epoch: recordingEpoch || '',
+    epoch: epoch || '',
     ...meta,
   });
 }
 
+// Clears the interrupted-session marker only if it still points at this
+// exact epoch — guards against clobbering a marker a newer recording pass
+// (retake) has since written for its own epoch.
+function _clearEpochMarker(forIdentity, epoch) {
+  try {
+    const key = `podbooth:epoch:${SESSION_ID}:${forIdentity}`;
+    if (localStorage.getItem(key) === epoch) localStorage.removeItem(key);
+  } catch (e) {}
+}
+
 async function waitForUploads() {
+  const epoch = recordingEpoch;
   showUploadBanner('uploading');
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
   try {
-    await _uploadAllRecordedChunks();
-    localStorage.removeItem(`podbooth:epoch:${SESSION_ID}:${identity}`);
+    await _uploadAllRecordedChunks(epoch);
+    _clearEpochMarker(identity, epoch);
 
     if (uploadCancelled) {
       showUploadBanner('cancelled');
@@ -810,7 +860,7 @@ async function waitForUploads() {
     // Every chunk uploaded cleanly, so its IndexedDB copy should already be
     // gone (deleted in _uploadAllRecordedChunks's loop) — this is just a
     // backstop sweep in case any individual delete failed along the way.
-    idbDeleteEpoch(SESSION_ID, identity, recordingEpoch);
+    idbDeleteEpoch(SESSION_ID, identity, epoch);
 
     // Wait for server-side assembly to complete
     showUploadBanner('assembling');

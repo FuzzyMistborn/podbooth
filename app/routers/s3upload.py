@@ -9,6 +9,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -190,7 +191,7 @@ async def get_upload_url(
         upload_url = await loop.run_in_executor(
             None, lambda: s3.generate_upload_url(key, body.content_type)
         )
-    except RuntimeError as e:
+    except (RuntimeError, BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -221,7 +222,7 @@ async def list_files(session_id: str, _: None = Depends(require_host)):
         extra = [f["key"] for f in session.r2_files]
         extra_pfx = _cloudsync_prefixes(session.title)
         objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra, extra_pfx))
-    except RuntimeError as e:
+    except (RuntimeError, BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     expiry_secs = _expiry_secs()
@@ -241,7 +242,7 @@ async def delete_s3_files(session_id: str, _: None = Depends(require_host)):
     try:
         extra_pfx = _cloudsync_prefixes(session.title)
         n = await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
-    except RuntimeError as e:
+    except (RuntimeError, BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     session.r2_files = []
@@ -263,7 +264,7 @@ async def create_editor_link(session_id: str, _: None = Depends(require_host)):
         extra = [f["key"] for f in session.r2_files]
         extra_pfx = _cloudsync_prefixes(session.title)
         objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra, extra_pfx))
-    except RuntimeError as e:
+    except (RuntimeError, BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     if not objs:
@@ -282,7 +283,7 @@ async def create_editor_link(session_id: str, _: None = Depends(require_host)):
     try:
         extra2 = [f["key"] for f in session.r2_files]
         objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra2, extra_pfx))
-    except RuntimeError:
+    except (RuntimeError, BotoCoreError, ClientError):
         pass  # fall through with original objs list
 
     r2_meta = {f["key"]: f for f in session.r2_files}
@@ -341,7 +342,7 @@ async def manifest_refresh(session_id: str, _: None = Depends(require_host)):
         extra = [f["key"] for f in session.r2_files]
         extra_pfx = _cloudsync_prefixes(session.title)
         objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra, extra_pfx))
-    except RuntimeError as e:
+    except (RuntimeError, BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     if not objs:
@@ -358,7 +359,7 @@ async def manifest_refresh(session_id: str, _: None = Depends(require_host)):
         extra2 = [f["key"] for f in session.r2_files]
         extra_pfx = _cloudsync_prefixes(session.title)
         objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra2, extra_pfx))
-    except RuntimeError:
+    except (RuntimeError, BotoCoreError, ClientError):
         pass
 
     r2_meta = {f["key"]: f for f in session.r2_files}

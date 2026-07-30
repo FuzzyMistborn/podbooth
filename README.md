@@ -128,7 +128,7 @@ rtc:
 docker compose up -d
 ```
 
-The app runs on port `8100`. Put Caddy or nginx in front for TLS — browsers require HTTPS for microphone and camera access.
+The app runs on port `8000`. Put Caddy or nginx in front for TLS — browsers require HTTPS for microphone and camera access.
 
 ---
 
@@ -238,8 +238,8 @@ When R2 is configured, hosts can generate a time-limited editor link that lets a
 
 | Variable | Required | Description |
 |---|---|---|
-| `EDITOR_PORTAL_URL` | No | Base URL of the editor portal (e.g. `https://editor.example.com`). If set, the generated link is formatted as `{EDITOR_PORTAL_URL}/?session={id}&token={token}` |
-| `EDITOR_LINK_EXPIRY_DAYS` | No | How many days before the editor link and presigned URLs expire. Default: `7` |
+| `EDITOR_PORTAL_URL` | No | Base URL of the editor portal (e.g. `https://editor.example.com`). If set, the generated link is formatted as `{EDITOR_PORTAL_URL}/session/{id}?token={token}` |
+| `S3_UPLOAD_EXPIRY_DAYS` | No | How many days before the editor link and presigned URLs expire. Default: `7` |
 
 The R2 bucket must allow public GET requests on the `sessions/` prefix (for the manifest) and have CORS configured to permit requests from the editor portal domain. Actual file downloads use presigned URLs and do not require public bucket access.
 

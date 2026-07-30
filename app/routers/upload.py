@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.models import get_session
+from app.utils import _safe_name
 
 logger = logging.getLogger(__name__)
 
@@ -176,10 +177,6 @@ def _final_name(track_type: str, slug: str, take: int, ext: str) -> str:
     return f"{slug}_{take}_{track_type}.{ext}"
 
 
-def _safe_name(value: str) -> str:
-    return "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
-
-
 def _decode_epoch_ms(epoch: str) -> int | None:
     """Decode a base-36 JS Date.now() epoch string to milliseconds."""
     try:
@@ -230,8 +227,27 @@ def participant_dir(session, participant: str, identity: str = "") -> Path:
     name = _display_slug(participant) if participant else _safe_name(identity or "")
     if not name:
         raise HTTPException(status_code=400, detail="Invalid participant name")
-    path = Path(settings.recordings_dir) / session.dir_name / name
-    path.mkdir(parents=True, exist_ok=True)
+    base = Path(settings.recordings_dir) / session.dir_name
+    path = base / name
+
+    # Directory is keyed by display-name slug (not identity) so filenames stay
+    # human-readable, but that means two different guests using the same
+    # display name would otherwise interleave their takes in one directory.
+    # A first-writer-wins ".identity" marker detects that and disambiguates
+    # the second identity into its own directory instead.
+    if identity:
+        marker = path / ".identity"
+        if path.is_dir() and marker.exists():
+            owner = marker.read_text().strip()
+            if owner and owner != identity:
+                name = f"{name}_{identity[-6:]}"
+                path = base / name
+                marker = path / ".identity"
+        path.mkdir(parents=True, exist_ok=True)
+        if not marker.exists():
+            marker.write_text(identity)
+    else:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -263,6 +279,7 @@ async def get_chunk_progress(
         return JSONResponse({"next_chunk": 0})
 
     max_index = -1
+    present_indices = set()
     for f in directory.iterdir():
         if not f.is_file():
             continue
@@ -277,9 +294,20 @@ async def get_chunk_progress(
         # Extract chunk index from the filename
         idx_match = re.search(r'_chunk_(\d+)\.', f.name)
         if idx_match:
-            max_index = max(max_index, int(idx_match.group(1)))
+            idx = int(idx_match.group(1))
+            max_index = max(max_index, idx)
+            present_indices.add(idx)
 
-    return JSONResponse({"next_chunk": max_index + 1})
+    # next_chunk is kept for backwards compatibility (older clients), but
+    # uploads run several-wide concurrently, so a retry-exhausted chunk in
+    # the middle of the range can leave a gap below max_index — a client
+    # trusting "everything below next_chunk is on the server" would delete
+    # its only copy of that gap. present_indices lets the client only ever
+    # delete chunks it can confirm the server actually has.
+    return JSONResponse({
+        "next_chunk": max_index + 1,
+        "present_indices": sorted(present_indices),
+    })
 
 
 @router.post("/chunk")
@@ -307,6 +335,19 @@ async def upload_chunk(
     _validate_epoch(epoch)
 
     directory = participant_dir(session, participant, identity)
+
+    # Aggregate cap: _MAX_CHUNK_BYTES above only bounds a single chunk, so
+    # anyone holding a valid session ID could otherwise write unlimited
+    # chunks. Checked against what's already on disk for this participant
+    # before accepting another chunk, rather than tracked in memory, so it
+    # survives a server restart and needs no separate bookkeeping to stay
+    # in sync with the filesystem.
+    if settings.max_participant_upload_gb > 0:
+        cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
+        existing_bytes = sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
+        if existing_bytes >= cap_bytes:
+            raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
+
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
     chunk_path = directory / f"{prefix}chunk_{chunk_index:06d}.{ext}"
 

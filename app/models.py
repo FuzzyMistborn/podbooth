@@ -10,13 +10,9 @@ import secrets
 import shutil
 
 from app.config import settings
+from app.utils import _safe_name
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_name(value: str) -> str:
-    cleaned = "".join(c if c.isalnum() or c in "- " else "_" for c in value).strip()
-    return cleaned[:100]
 
 
 @dataclass
@@ -155,7 +151,10 @@ async def delete_session(session_id: str):
         recordings_dir = Path(settings.recordings_dir) / session.dir_name
         try:
             if recordings_dir.is_dir():
-                shutil.rmtree(recordings_dir)
+                # A multi-GB recordings directory can take a while to remove;
+                # running it synchronously would block the whole event loop
+                # (all other requests) for the duration.
+                await asyncio.to_thread(shutil.rmtree, recordings_dir)
         except OSError as e:
             logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
 

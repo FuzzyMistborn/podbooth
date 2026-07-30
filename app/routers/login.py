@@ -42,7 +42,11 @@ def _set_csrf_cookie(response, token: str) -> None:
         CSRF_COOKIE, token,
         httponly=True, samesite="strict",
         secure=settings.base_url.startswith("https"),
-        max_age=3600,
+        # Match the session cookie's lifetime — a shorter-lived CSRF cookie
+        # expired mid-session while the login form/page was still open and
+        # cached, producing a stale-form 403 well before the actual session
+        # timed out.
+        max_age=SESSION_TTL_SECONDS,
     )
 
 

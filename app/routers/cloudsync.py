@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+import aiofiles
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -32,6 +33,20 @@ router = APIRouter()
 # session_id → {"status": "uploading"|"done"|"error", "message": str, "uploaded": int, "total": int}
 _upload_status: dict[str, dict] = {}
 _upload_task_refs: set[asyncio.Task] = set()
+
+
+_UPLOAD_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+async def _stream_file(path: Path):
+    """Read a local file in fixed-size chunks for a streaming HTTP request body,
+    so a multi-GB recording doesn't have to be held whole in memory to upload it."""
+    async with aiofiles.open(path, "rb") as fh:
+        while True:
+            data = await fh.read(_UPLOAD_STREAM_CHUNK_BYTES)
+            if not data:
+                break
+            yield data
 
 
 # ── File descriptor ────────────────────────────────────────────────────────────
@@ -72,9 +87,18 @@ class NextcloudBackend(CloudBackend):
         return bool(settings.nextcloud_url and settings.nextcloud_user and settings.nextcloud_password)
 
     async def _ensure_dir(self, client: httpx.AsyncClient, url: str) -> None:
-        r = await client.request("MKCOL", url)
-        if r.status_code not in (201, 405, 301, 302):
-            logger.warning("MKCOL %s → %d", url, r.status_code)
+        try:
+            r = await client.request("MKCOL", url)
+            if r.status_code not in (201, 405, 301, 302):
+                logger.warning("MKCOL %s → %d", url, r.status_code)
+        except Exception as e:
+            # An unreachable server here (network down, DNS failure) used to
+            # raise straight out of upload() and past run_upload's gather,
+            # which skipped the status_store update entirely and left the
+            # "already uploading" guard wedged until a process restart. Log
+            # and continue — the subsequent PUT will fail on its own and
+            # surface a normal per-item error instead.
+            logger.warning("MKCOL %s failed: %s", url, e)
 
     async def delete_folder(self, folder_path: str) -> str:
         base = settings.nextcloud_url.rstrip("/")
@@ -122,9 +146,7 @@ class NextcloudBackend(CloudBackend):
                 remote = f"{upload_path}/{item.remote_path}" if upload_path else item.remote_path
                 url = f"{dav_root}/{remote}"
                 try:
-                    with open(item.local_path, "rb") as fh:
-                        content = fh.read()
-                    r = await client.put(url, content=content)
+                    r = await client.put(url, content=_stream_file(item.local_path))
                     if r.status_code in (200, 201, 204):
                         uploaded += 1
                         logger.info("nextcloud upload ok: %s → %d", remote, r.status_code)
@@ -209,9 +231,7 @@ class FileBrowserBackend(CloudBackend):
                 remote = f"{upload_path}/{item.remote_path}" if upload_path else item.remote_path
                 url = f"{base}/api/resources/{remote}?override=true"
                 try:
-                    with open(item.local_path, "rb") as fh:
-                        content = fh.read()
-                    r = await client.post(url, content=content, headers=headers)
+                    r = await client.post(url, content=_stream_file(item.local_path), headers=headers)
                     if r.status_code in (200, 201, 204):
                         uploaded += 1
                         logger.info("filebrowser upload ok: %s → %d", remote, r.status_code)
@@ -399,18 +419,34 @@ async def run_upload(
     backends: list[CloudBackend],
 ) -> None:
     """Run items through all backends concurrently, updating status_store[job_id] when done."""
-    total = len(items)
+    total_files = len(items)
+    # Each item is uploaded once per backend, so the running "uploaded" count
+    # below (summed across backends) is compared against total-per-backend,
+    # not the distinct file count — otherwise 10 files x 2 backends would
+    # read as "20 of 10".
+    total = total_files * len(backends)
     names = ", ".join(b.name for b in backends)
     status_store[job_id] = {"status": "uploading", "message": f"Uploading to {names}…", "uploaded": 0, "total": total}
 
     # Backends are independent remote destinations, so uploading to all of
     # them at once (rather than one after another) cuts total sync time
     # roughly to that of the slowest backend instead of their sum.
-    results = await asyncio.gather(*(backend.upload(items) for backend in backends))
+    # return_exceptions=True so one backend raising (e.g. a network error
+    # that slips past a backend's own error handling) can't propagate out of
+    # gather and skip the status_store update below — that used to leave the
+    # "already uploading" guard wedged until a process restart.
+    results = await asyncio.gather(
+        *(backend.upload(items) for backend in backends), return_exceptions=True
+    )
 
     errors: list[str] = []
     uploaded = 0
-    for n, err in results:
+    for backend, result in zip(backends, results):
+        if isinstance(result, BaseException):
+            logger.error("%s upload raised: %s", backend.name, result)
+            errors.append(f"{backend.name}: {result}")
+            continue
+        n, err = result
         uploaded += n
         if err:
             errors.append(err)
@@ -426,7 +462,7 @@ async def run_upload(
     else:
         status_store[job_id] = {
             "status": "done",
-            "message": f"Uploaded {uploaded} file(s)",
+            "message": f"Uploaded {total_files} file(s)",
             "uploaded": uploaded,
             "total": total,
         }
