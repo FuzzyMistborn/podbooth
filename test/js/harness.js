@@ -124,7 +124,15 @@ export function installGlobals(overrides = {}) {
     audioStartTime: 0,
     audioFormat: 'pcm',
   };
-  Object.assign(globalThis, defaults, overrides);
+  // Not Object.assign: newer Node versions define globalThis.navigator as a
+  // getter-only accessor (its own experimental global), so a plain
+  // assignment throws. Defining the property outright replaces it instead of
+  // going through whatever accessor Node already installed.
+  for (const [key, value] of Object.entries({ ...defaults, ...overrides })) {
+    Object.defineProperty(globalThis, key, {
+      value, writable: true, configurable: true, enumerable: true,
+    });
+  }
 }
 
 // Replaces the real XHR-based uploader with one driven by a fetch-shaped
