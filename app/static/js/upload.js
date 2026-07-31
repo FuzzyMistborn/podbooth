@@ -26,23 +26,40 @@ function _fsaTakeNumber() {
   return fsaTakeNumberPromise;
 }
 
-function _fsaTrackFor(trackType, ext) {
+// Keyed by `${trackType}::${epoch}`, not just trackType — a screen-share
+// restart gets its own epoch (see screenEpoch in recording.js) and, like the
+// IndexedDB path, its own file and its own upload/finalize group. Reusing
+// one file across restarts (the previous behavior) meant a second restart's
+// group and the first segment's group both pointed at the very same file
+// object; _doUploadAllRecordedChunks processes every group concurrently, so
+// both would race to close/upload it — one throwing ("Cannot close a closed
+// or closing stream") or finalizing the whole shared file against only the
+// second segment's (much shorter) duration. Audio/video only ever have one
+// epoch per recording pass, so this is a no-op key change for them.
+function _fsaTrackFor(trackType, ext, epoch) {
   if (!fsaDirHandle) return Promise.resolve(null);
-  if (!fsaOpenPromises[trackType]) {
-    fsaOpenPromises[trackType] = _fsaTakeNumber()
-      .then(take => fsaOpenTrackFile(fsaDirHandle, trackType, ext, SESSION_TITLE, displayName, take))
+  const key = `${trackType}::${epoch}`;
+  if (!fsaOpenPromises[key]) {
+    // Number this segment's on-disk filename by how many groups already
+    // exist for this trackType (always 0 for audio/video).
+    const segment = Object.keys(fsaOpenPromises).filter(k => k.startsWith(`${trackType}::`)).length;
+    fsaOpenPromises[key] = _fsaTakeNumber()
+      .then(take => fsaOpenTrackFile(fsaDirHandle, trackType, ext, SESSION_TITLE, displayName, take, segment))
       .then(track => {
         track.ext = ext;
         if (_incrementalCloudUploadAllowed()) {
-          // Captured once, here, rather than read from the mutable
-          // recordingEpoch global inside onFlush — this FSA file (and its
-          // cloud multipart upload, if any) always belongs to the pass epoch
-          // for the whole recording, even for 'screen' whose chunks may carry
-          // a later sub-epoch after a restart (see the comment on
-          // groupKeys in _doUploadAllRecordedChunks: FSA doesn't support a
-          // mid-recording screen restart getting its own group).
-          track.cloudEpoch = recordingEpoch;
-          track.onFlush = () => _maybeStartOrContinueFsaCloudUpload(trackType, track);
+          track.cloudEpoch = epoch;
+          // Chained onto its own queue, separate from _persistQueues — a
+          // flush fires this without awaiting it (see fsaFlushTrackFile), so
+          // back-to-back flushes need their own serialization to keep parts
+          // uploading in order without blocking local disk writes on the
+          // network. _uploadOneTrack awaits track.cloudQueue before treating
+          // track.cloud as final, so nothing here needs to race stop().
+          track.onFlush = () => {
+            track.cloudQueue = (track.cloudQueue || Promise.resolve())
+              .then(() => _maybeStartOrContinueFsaCloudUpload(trackType, track))
+              .catch(e => console.warn(`onFlush cloud-upload queue failed for ${trackType}:`, e));
+          };
         }
         return track;
       })
@@ -51,7 +68,7 @@ function _fsaTrackFor(trackType, ext) {
         return null;
       });
   }
-  return fsaOpenPromises[trackType];
+  return fsaOpenPromises[key];
 }
 
 // A chunk's write-through is the only copy of that chunk that will ever
@@ -62,7 +79,8 @@ function _fsaTrackFor(trackType, ext) {
 // loud instead: stop recording immediately and tell the user, same as any
 // other unrecoverable capture error.
 async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uploadIdentity, participant, meta) {
-  const track = await _fsaTrackFor(trackType, ext);
+  const track = await _fsaTrackFor(trackType, ext, epoch);
+  const groupKey = `${trackType}::${epoch}`;
   if (track) {
     try {
       await fsaWriteChunk(track, blob);
@@ -73,7 +91,7 @@ async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uplo
       // and mixing backends within one track complicates recovery. Fall back
       // to IndexedDB for every remaining chunk of this track instead.
       console.warn(`_persistChunk: FSA write failed for ${trackType}#${index}, falling back to IndexedDB for rest of track:`, e);
-      fsaOpenPromises[trackType] = Promise.resolve(null);
+      fsaOpenPromises[groupKey] = Promise.resolve(null);
       // Everything already committed to the local file before this failure is
       // real captured data — stash it so _doUploadAllRecordedChunks still
       // uploads it (as chunk 0) instead of silently dropping it once this
@@ -88,7 +106,7 @@ async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uplo
           try { await _postJson('/api/upload/cloud/abort', { session_id: SESSION_ID, key: track.cloud.key, upload_id: track.cloud.uploadId }); } catch (abortErr) {}
           try { localStorage.removeItem(_cloudMarkerKey(SESSION_ID, identity, trackType, track.cloudEpoch)); } catch (e2) {}
         }
-        fsaFailedTracks[trackType] = track;
+        fsaFailedTracks[groupKey] = track;
       } catch (closeErr) {
         console.warn(`_persistChunk: could not close failed FSA file for ${trackType} — data written before the failure is lost:`, closeErr);
       }
@@ -824,15 +842,15 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
   refreshUploadBanner();
 
   // Union of groups that have a finalize payload, an open/failed FSA file
-  // (always keyed under the pass epoch — FSA doesn't support a mid-recording
-  // screen restart's extra group), or leftover IndexedDB chunks — a group can
-  // have chunks/an open file without finalize ever having been called for it
-  // (e.g. its recorder never fired onstop), and those chunks still need to go
-  // up even though there's no meta to finalize.
+  // (already keyed by trackType::epoch — see _fsaTrackFor), or leftover
+  // IndexedDB chunks — a group can have chunks/an open file without finalize
+  // ever having been called for it (e.g. its recorder never fired onstop),
+  // and those chunks still need to go up even though there's no meta to
+  // finalize.
   const groupKeys = new Set([
     ...Object.keys(pendingFinalizeMeta),
-    ...Object.keys(fsaOpenPromises).map(t => `${t}::${epoch}`),
-    ...Object.keys(fsaFailedTracks).map(t => `${t}::${epoch}`),
+    ...Object.keys(fsaOpenPromises),
+    ...Object.keys(fsaFailedTracks),
     ...chunksByGroup.keys(),
   ]);
   await Promise.all([...groupKeys].map(async (key) => {
@@ -1129,8 +1147,9 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
   // final chunk hadn't landed, effectively empty). Wait for the chain to
   // drain first so close() only ever runs after every chunk is committed.
   await (_persistQueues[trackType] || Promise.resolve());
-  const fsaTrack = fsaOpenPromises[trackType] ? await fsaOpenPromises[trackType] : null;
-  const failedTrack = fsaFailedTracks[trackType];
+  const groupKey = `${trackType}::${epoch}`;
+  const fsaTrack = fsaOpenPromises[groupKey] ? await fsaOpenPromises[groupKey] : null;
+  const failedTrack = fsaFailedTracks[groupKey];
   // fsaTrack and failedTrack are mutually exclusive (once a track fails
   // over, its fsaOpenPromises entry is cleared for good — see
   // _persistChunk), but a failed-over track can still have IndexedDB
@@ -1138,6 +1157,13 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
   // local whole-file upload and IndexedDB chunk uploads can both apply to
   // the same track.
   const localTrack = fsaTrack || failedTrack;
+  // The last flush's cloud-part upload (see onFlush in _fsaTrackFor) runs in
+  // the background and may still be in flight here — closing the file and
+  // snapshotting track.cloud.parts/uploadedBytes before it settles would let
+  // the tail upload below re-cover byte ranges that part is still in the
+  // middle of sending under a different part number, corrupting the
+  // assembled object with overlapping/duplicated ranges.
+  if (localTrack && localTrack.cloudQueue) await localTrack.cloudQueue;
   if (localTrack) {
     recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
     let file = await fsaCloseTrackFile(localTrack);
@@ -1210,7 +1236,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
       }
     }
     const wasCancelled = abortController.signal.aborted;
-    delete fsaFailedTracks[trackType];
+    delete fsaFailedTracks[groupKey];
     if (!ok) {
       if (wasCancelled) uploadCancelled = true;
       return; // uploadChunkWithRetry already set uploadHasError (unless cancelled); leave this track unfinalized
@@ -1566,30 +1592,44 @@ function stopFilesPoll() {
 }
 
 // ── Studio-page toggle for incremental cloud upload ─────────────────────────
-// See the checkbox in the rec-status-popover (studio.html) and
-// _incrementalCloudUploadAllowed above. document is undefined in the vitest
-// harness (plain node, no DOM), so every DOM touch here is guarded.
+// A toolbar button (not buried in a hover popover — a participant deciding
+// they want to stop background-uploading mid-recording needs to find this
+// fast) next to the screen-share button. "active" (the same highlighted
+// state btn-mic/btn-screen use) means on. document is undefined in the
+// vitest harness (plain node, no DOM), so every DOM touch here is guarded.
+function _incrementalUploadToggleBtn() {
+  return typeof document === 'undefined' ? null : document.getElementById('btn-incremental-upload');
+}
+
 function _initIncrementalCloudUploadToggle() {
-  if (typeof document === 'undefined') return;
-  const checkbox = document.getElementById('chk-incremental-cloud-upload');
-  if (!checkbox) return;
-  try { checkbox.checked = localStorage.getItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY) !== '0'; } catch (e) {}
-  checkbox.addEventListener('change', () => {
-    try { localStorage.setItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY, checkbox.checked ? '1' : '0'); } catch (e) {}
+  const btn = _incrementalUploadToggleBtn();
+  if (!btn) return;
+  const on = _incrementalCloudUploadAllowed();
+  btn.classList.toggle('active', on);
+  btn.addEventListener('click', () => {
+    const nowOn = !btn.classList.contains('active');
+    btn.classList.toggle('active', nowOn);
+    try { localStorage.setItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY, nowOn ? '1' : '0'); } catch (e) {}
+    btn.title = nowOn
+      ? "Upload while recording: ON — your local recording uploads to the cloud in the background as it's captured, so there's less to push when you stop. Click to turn off."
+      : 'Upload while recording: OFF — the whole recording uploads at once when you stop, as before. Click to turn back on.';
   });
 }
 
-// The row is only meaningful once we know both that direct-to-cloud upload
-// is configured at all and that this participant actually has a local (FSA)
-// recording folder in play for the upcoming take — called from
+// The button is only meaningful once we know both that direct-to-cloud
+// upload is configured at all and that this participant actually has a
+// local (FSA) recording folder in play for the upcoming take — called from
 // startLocalRecording right after fsaDirHandle is (re)resolved, since that's
-// the only point either of those can change.
+// the only point either of those can change. Turning it off mid-recording
+// (_incrementalCloudUploadAllowed is read live, not cached) only stops any
+// *new* part uploads from being kicked off — an already-started multipart
+// upload for a track just keeps being fed by its own onFlush hook, since
+// half-abandoning it would waste the parts already sent.
 function _updateIncrementalCloudToggleVisibility() {
-  if (typeof document === 'undefined') return;
-  const row = document.getElementById('rstatus-incremental-toggle');
-  if (!row) return;
+  const btn = _incrementalUploadToggleBtn();
+  if (!btn) return;
   const show = typeof DIRECT_CLOUD_UPLOAD_ENABLED !== 'undefined' && DIRECT_CLOUD_UPLOAD_ENABLED && !!fsaDirHandle;
-  row.style.display = show ? '' : 'none';
+  btn.style.display = show ? '' : 'none';
 }
 
 _initIncrementalCloudUploadToggle();

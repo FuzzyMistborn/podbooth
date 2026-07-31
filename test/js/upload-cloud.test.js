@@ -32,7 +32,7 @@ describe('_uploadOneTrack (direct-to-cloud FSA path)', () => {
     fakeFile.name = 'Take_1.wav';
     globalThis.fsaCloseTrackFile = async () => fakeFile;
     const fsaOpenPromises = {
-      audio: Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
+      'audio::epoch1': Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
     };
 
     const calls = [];
@@ -84,7 +84,7 @@ describe('_uploadOneTrack (direct-to-cloud FSA path)', () => {
     fakeFile.name = 'Take_1.wav';
     globalThis.fsaCloseTrackFile = async () => fakeFile;
     const fsaOpenPromises = {
-      audio: Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
+      'audio::epoch1': Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
     };
     pendingFinalizeMeta['audio::epoch1'] = { format: 'pcm', sample_rate: 44100, channels: 2, expected_duration_s: 12.3 };
 
@@ -120,7 +120,7 @@ describe('_uploadOneTrack (direct-to-cloud FSA path)', () => {
     fakeFile.name = 'Take_1.wav';
     globalThis.fsaCloseTrackFile = async () => fakeFile;
     const fsaOpenPromises = {
-      audio: Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
+      'audio::epoch1': Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
     };
 
     // Already cancelled by the time part upload starts (e.g. the user hit
@@ -153,7 +153,7 @@ describe('_uploadOneTrack (direct-to-cloud FSA path)', () => {
     fakeFile.name = 'Take_1.wav';
     globalThis.fsaCloseTrackFile = async () => fakeFile;
     const fsaOpenPromises = {
-      audio: Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
+      'audio::epoch1': Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
     };
 
     globalThis.fetch = vi.fn(() => Promise.resolve(fakeResponse({ detail: 'not configured' }, { ok: false, status: 503 })));

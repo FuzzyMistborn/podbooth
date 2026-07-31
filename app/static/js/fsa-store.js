@@ -186,14 +186,19 @@ function _fsaWavHeader(dataBytes) {
   return buf;
 }
 
-async function fsaOpenTrackFile(dirHandle, trackType, ext, sessionTitle, participant, take) {
+async function fsaOpenTrackFile(dirHandle, trackType, ext, sessionTitle, participant, take, segment = 0) {
   const isRawAudio = trackType === 'audio' && ext === 'raw';
   const fileExt = isRawAudio ? 'wav' : ext;
   const base = _fsaTakeBaseName(sessionTitle, participant, take);
   // Audio is the "primary" file for the take (matches the server's own
   // _final_name convention — see app/routers/upload.py); video/screen get an
   // explicit suffix since a take can have more than one non-audio track.
-  const name = trackType === 'audio' ? `${base}.${fileExt}` : `${base} - ${trackType}.${fileExt}`;
+  // `segment` disambiguates a screen-share restart within the same
+  // recording (each restart opens its own file — see the comment on the
+  // fsaOpenPromises key in upload.js's _fsaTrackFor for why): the first
+  // segment's filename is unchanged, later ones get " 2", " 3", etc.
+  const trackLabel = segment > 0 ? `${trackType} ${segment + 1}` : trackType;
+  const name = trackType === 'audio' ? `${base}.${fileExt}` : `${base} - ${trackLabel}.${fileExt}`;
   const fileHandle = await dirHandle.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
   const track = { fileHandle, writable, bytesWritten: 0, flushedBytes: 0, chunksWritten: 0, closed: false, isRawAudio, dataBytes: 0 };
@@ -235,8 +240,15 @@ async function fsaFlushTrackFile(track) {
   // committed to the real on-disk file and safe to read back with
   // fileHandle.getFile(), so it's also the only safe point to hand a
   // finished byte range off as a multipart upload part mid-recording.
+  // Deliberately NOT awaited: this hook PUTs the part straight to the
+  // bucket over the network, which can take far longer than a local disk
+  // write — awaiting it here would stall every subsequent chunk write for
+  // this track (they're all serialized behind this same flush call) until
+  // that PUT finishes, backing up MediaRecorder/PCM chunks in memory for as
+  // long as the upload takes. The hook is responsible for its own ordering
+  // (see the per-track cloud queue in upload.js's _fsaTrackFor).
   if (track.onFlush) {
-    try { await track.onFlush(); } catch (e) { console.warn('fsaFlushTrackFile: onFlush hook failed:', e); }
+    try { track.onFlush(); } catch (e) { console.warn('fsaFlushTrackFile: onFlush hook failed:', e); }
   }
 }
 

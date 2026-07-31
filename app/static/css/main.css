@@ -953,6 +953,29 @@ body.no-mirror .participant-tile.local video { transform: none; }
 .latency-indicator.fair { color: var(--yellow); }
 .latency-indicator.poor { color: var(--red); }
 
+.incremental-upload-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.incremental-upload-toggle svg { width: 12px; height: 12px; flex-shrink: 0; }
+.incremental-upload-toggle:hover { opacity: 0.85; }
+.incremental-upload-toggle.active {
+  color: var(--green);
+  border-color: var(--green);
+  background: rgba(34, 197, 94, 0.08);
+}
+
 /* ── Controls bar ────────────────────────────────────────────── */
 .controls-bar {
   display: flex;
@@ -2752,23 +2775,6 @@ body.no-mirror .participant-tile.local video { transform: none; }
 .rec-status-row[data-state="error"] .rstatus-icon { color: var(--red); }
 .rec-status-row[data-state="ok"]    .rstatus-label { color: var(--text-1, #ddd); }
 .rec-status-row[data-state="error"] .rstatus-label { color: var(--red); }
-.rec-status-setting {
-  margin-top: 4px;
-  padding-top: 7px;
-  border-top: 1px solid var(--border-1, rgba(255,255,255,0.1));
-}
-.rstatus-toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  cursor: pointer;
-}
-.rstatus-toggle-label input[type="checkbox"] {
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-  cursor: pointer;
-}
 
 /* ── Rec status participants section ─────────────────────────── */
 .rec-status-sep {
