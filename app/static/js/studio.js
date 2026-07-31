@@ -874,7 +874,7 @@ function playAdmitChime() {
 async function pollPendingGuests() {
   if (!IS_HOST) return;
   try {
-    const r = await fetch(`/api/session/${SESSION_ID}/pending-guests?host_token=${encodeURIComponent(HOST_TOKEN)}`);
+    const r = await fetch(`/api/session/${SESSION_ID}/pending-guests`, { headers: { 'X-Host-Token': HOST_TOKEN } });
     if (!r.ok) return;
     const { guests } = await r.json();
     renderWaitroomPanel(guests);

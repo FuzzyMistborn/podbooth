@@ -92,6 +92,13 @@ def test_full_lifecycle_create_join_admit_end(client, recordings_dir):
     r = client.get(f"/api/session/{session_id}/pending-guests", params={"host_token": "wrong"})
     assert r.status_code == 403
 
+    # The X-Host-Token header works too (this is what the client actually
+    # sends now — see pollPendingGuests in studio.js — so the token isn't
+    # sitting in server access logs on every poll).
+    r = client.get(f"/api/session/{session_id}/pending-guests", headers={"X-Host-Token": host_token})
+    assert r.status_code == 200
+    assert r.json()["guests"] == [{"identity": "guest-1", "display_name": "Alice"}]
+
     # Host admits the guest.
     r = client.post(f"/api/session/{session_id}/admit/guest-1", json={"host_token": host_token})
     assert r.status_code == 200

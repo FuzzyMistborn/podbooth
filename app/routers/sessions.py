@@ -542,7 +542,13 @@ async def check_admission(session_id: str, identity: str):
 
 
 @router.get("/api/session/{session_id}/pending-guests")
-async def pending_guests_list(session_id: str, host_token: str = ""):
+async def pending_guests_list(session_id: str, request: Request, host_token: str = ""):
+    # Prefer the header over the query param — this endpoint is polled every
+    # few seconds (see pollPendingGuests in studio.js), and a token sent as a
+    # URL param on every poll ends up in server access logs and any proxy's
+    # request logging. Query param kept only for backwards compatibility with
+    # any old cached client JS.
+    host_token = request.headers.get("X-Host-Token", "") or host_token
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -634,7 +640,7 @@ async def kick_participant(session_id: str, p_identity: str, request: Request):
             )
     except Exception as e:
         logging.error("LiveKit remove_participant failed for %s: %s", p_identity, e)
-        raise HTTPException(status_code=500, detail=f"LiveKit error: {e}")
+        raise HTTPException(status_code=500, detail="Could not remove participant")
     return JSONResponse({"ok": True})
 
 
@@ -667,7 +673,7 @@ async def mute_participant(session_id: str, p_identity: str, request: Request):
             )
     except Exception as e:
         logging.error("LiveKit mute_published_track failed for %s (track %s): %s", p_identity, track_sid, e)
-        raise HTTPException(status_code=500, detail=f"LiveKit error: {e}")
+        raise HTTPException(status_code=500, detail="Could not update participant's track")
     return JSONResponse({"ok": True})
 
 

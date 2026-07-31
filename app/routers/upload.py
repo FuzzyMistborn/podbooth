@@ -55,6 +55,27 @@ def is_merging(directory: Path) -> bool:
     prefix = f"{directory}|"
     return any(key.startswith(prefix) for key in _merge_in_progress)
 
+
+def purge_session_state(session_dir: Path) -> None:
+    """Drop every _merge_locks/_epoch_take_map/_dir_take_counter entry under
+    session_dir — called from delete_session once a session (and its
+    recordings directory) is gone for good.
+
+    Without this, these dicts are keyed by participant directory and never
+    otherwise pruned, so a long-running server accumulates one entry per
+    (directory, epoch) or (directory, participant-slug) ever assembled,
+    forever. Safe to do unconditionally here: once a session is deleted,
+    get_session() returns None for it, so no request can reach the code that
+    would create a *new* entry for this directory again — anything already
+    holding a reference to an old Lock object finishes using it fine, a
+    dict-key deletion doesn't invalidate the object itself.
+    """
+    prefix = str(session_dir) + "/"  # participant dirs live one level under the session dir
+    for d in (_merge_locks, _epoch_take_map, _dir_take_counter):
+        stale = [k for k in d if str(k[0] if isinstance(k, tuple) else k).startswith(prefix)]
+        for k in stale:
+            del d[k]
+
 # Tracks (str(directory), track_type, epoch) tuples currently being assembled.
 # Prevents recover_orphaned_chunks from queuing duplicate tasks while ffmpeg runs.
 _assembly_in_progress: set[tuple[str, str, str]] = set()
@@ -1208,7 +1229,13 @@ async def _run_ffmpeg(cmd: list[str], directory: Path, track_type: str) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=settings.ffmpeg_timeout_s)
+        except asyncio.TimeoutError:
+            logger.error("ffmpeg timed out after %.0fs (%s/%s), killing it", settings.ffmpeg_timeout_s, directory.name, track_type)
+            proc.kill()
+            await proc.wait()
+            return False
         if proc.returncode != 0:
             logger.error("ffmpeg failed (%s/%s): %s", directory.name, track_type, stderr.decode()[-2000:])
             return False

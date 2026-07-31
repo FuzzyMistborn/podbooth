@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # otherwise write unlimited chunks — this bounds the blast radius of a
     # runaway or malicious uploader. 0 disables the check.
     max_participant_upload_gb: float = 100.0
+    # Hard ceiling on one ffmpeg assembly/merge call. A hung or maliciously
+    # crafted input could otherwise block that group's assembly slot (and
+    # orphan-recovery for it) forever — 4 hours comfortably covers even a
+    # slow VPS transcoding a multi-hour 1080p recording.
+    ffmpeg_timeout_s: float = 4 * 60 * 60
     whisperx_api_url: str = ""
     whisperx_model: str = "large-v3-turbo"
     whisperx_language: str = ""

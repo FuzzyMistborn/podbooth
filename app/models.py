@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import secrets
 import shutil
 
@@ -51,8 +52,10 @@ def _store_path() -> Path:
     return Path(settings.recordings_dir) / ".sessions.json"
 
 
-def _save():
-    """Persist sessions to disk so they survive restarts."""
+def _save_sync():
+    """Synchronous implementation of _save — always run via asyncio.to_thread
+    (see _save below), never called directly, so it doesn't block the event
+    loop for the duration of the disk write."""
     try:
         _store_path().parent.mkdir(parents=True, exist_ok=True)
         data = []
@@ -61,10 +64,19 @@ def _save():
             d["created_at"] = s.created_at.isoformat()
             data.append(d)
         tmp = _store_path().with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
+        with open(tmp, "w") as f:
+            f.write(json.dumps(data, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(_store_path())
     except Exception as e:
         logger.error("Session persistence failed: %s", e)
+
+
+async def _save():
+    """Persist sessions to disk so they survive restarts. Every call site
+    holds _lock while calling this, so callers only need `await _save()`."""
+    await asyncio.to_thread(_save_sync)
 
 
 def load():
@@ -73,7 +85,23 @@ def load():
     if not path.exists():
         return
     try:
-        for d in json.loads(path.read_text()):
+        records = json.loads(path.read_text())
+    except Exception as e:
+        # A corrupt store previously meant every session silently vanished on
+        # restart, with the same corrupt file left in place to fail the same
+        # way forever after. Move it aside instead: the server still starts
+        # up with no sessions (there's no way to recover data from a file
+        # that doesn't parse), but the broken file survives for inspection
+        # instead of being overwritten by the next _save().
+        logger.error("Failed to load sessions (store may be corrupt): %s", e)
+        try:
+            path.replace(path.with_suffix(f".corrupt-{int(datetime.now().timestamp())}.json"))
+        except OSError as rename_err:
+            logger.error("Could not move aside corrupt session store %s: %s", path, rename_err)
+        return
+
+    for d in records:
+        try:
             d["created_at"] = datetime.fromisoformat(d["created_at"])
             d.setdefault("pending_guests", {})
             d.setdefault("admitted_guests", {})
@@ -92,8 +120,12 @@ def load():
             session = Session(**d)
             session.recording = False
             _sessions[session.id] = session
-    except Exception as e:
-        logger.error("Failed to load sessions: %s", e)
+        except Exception as e:
+            # One malformed record (e.g. a field from an even older schema
+            # this migration doesn't know about) used to abort the whole
+            # loop via the shared try/except — every session after it in the
+            # file silently vanished too, not just the bad one.
+            logger.error("Failed to load one session record, skipping it: %s", e)
 
 
 def title_in_use(title: str) -> bool:
@@ -116,7 +148,7 @@ async def create_session(title: str) -> Session:
     )
     async with _lock:
         _sessions[session_id] = session
-        _save()
+        await _save()
     return session
 
 
@@ -131,7 +163,7 @@ def list_sessions() -> list[Session]:
 async def touch(session_id: str):
     """Persist after external mutation of a session object."""
     async with _lock:
-        _save()
+        await _save()
 
 
 async def end_session(session_id: str):
@@ -140,13 +172,13 @@ async def end_session(session_id: str):
         if session:
             session.ended = True
             session.recording = False
-            _save()
+            await _save()
 
 
 async def delete_session(session_id: str):
     async with _lock:
         session = _sessions.pop(session_id, None)
-        _save()
+        await _save()
     if session:
         recordings_dir = Path(settings.recordings_dir) / session.dir_name
         try:
@@ -157,6 +189,10 @@ async def delete_session(session_id: str):
                 await asyncio.to_thread(shutil.rmtree, recordings_dir)
         except OSError as e:
             logger.error("Failed to remove session directory %s: %s", recordings_dir, e)
+        # Deferred import to avoid a models<->upload circular import (same
+        # pattern already used for the s3 import in purge_expired_r2 below).
+        from app.routers.upload import purge_session_state
+        purge_session_state(recordings_dir)
 
 
 async def purge_expired() -> list[str]:
@@ -202,5 +238,5 @@ async def purge_expired_r2() -> list[str]:
             logger.error("purge_expired_r2: error for session %s: %s", session.id, e)
     if purged:
         async with _lock:
-            _save()
+            await _save()
     return purged
