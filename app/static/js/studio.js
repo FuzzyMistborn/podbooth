@@ -329,6 +329,7 @@ async function init() {
   // stranded in IndexedDB (write-through copies whose upload never
   // completed). Fire-and-forget — never block joining on it.
   if (typeof recoverOrphanedChunks === 'function') recoverOrphanedChunks();
+  if (typeof recoverCloudUploads === 'function') recoverCloudUploads();
 
   const resp = await fetch('/api/token', {
     method: 'POST',
@@ -873,7 +874,7 @@ function playAdmitChime() {
 async function pollPendingGuests() {
   if (!IS_HOST) return;
   try {
-    const r = await fetch(`/api/session/${SESSION_ID}/pending-guests?host_token=${encodeURIComponent(HOST_TOKEN)}`);
+    const r = await fetch(`/api/session/${SESSION_ID}/pending-guests`, { headers: { 'X-Host-Token': HOST_TOKEN } });
     if (!r.ok) return;
     const { guests } = await r.json();
     renderWaitroomPanel(guests);

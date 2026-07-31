@@ -289,6 +289,101 @@ async function recoverOrphanedChunks() {
   } catch (e) {}
 }
 
+// A cloud multipart upload started by _uploadFsaTrackDirectToCloud survives
+// entirely outside this page — the bytes already in the bucket don't go away
+// if the tab crashes/closes/reloads before /cloud/complete fires — but
+// nothing would otherwise ever finish it. On every join, sweep localStorage
+// for markers an interrupted cloud upload left behind and resume each one:
+// ask the bucket which parts already landed (GET /cloud/parts), reopen the
+// same local file via the persisted FSA directory grant, and upload only
+// what's still missing.
+async function _resumeCloudUpload(markerKey, parsed, sessionId, forIdentity, trackType, epoch, dirHandle) {
+  const fileHandle = await dirHandle.getFileHandle(parsed.fileName);
+  const file = await fileHandle.getFile();
+
+  let alreadyUploaded = [];
+  try {
+    const r = await fetch('/api/upload/cloud/parts?' + new URLSearchParams({ session_id: sessionId, key: parsed.key, upload_id: parsed.uploadId }));
+    ({ parts: alreadyUploaded } = await r.json());
+  } catch (e) {
+    console.warn(`recoverCloudUploads: could not list existing parts for ${markerKey}:`, e);
+  }
+
+  const abortController = new AbortController();
+  const uploaded = await _uploadCloudParts(sessionId, file, parsed.key, parsed.uploadId, parsed.partSize, alreadyUploaded, abortController);
+  if (!uploaded) {
+    console.warn(`recoverCloudUploads: could not finish resuming ${markerKey}`);
+    return;
+  }
+
+  await _postJson('/api/upload/cloud/complete', {
+    session_id: sessionId, participant: parsed.participant || '', identity: forIdentity,
+    track_type: trackType, epoch: epoch || '', ext: parsed.ext,
+    key: parsed.key, upload_id: parsed.uploadId, parts: uploaded,
+    ...(parsed.meta || {}),
+  });
+  try { localStorage.removeItem(markerKey); } catch (e) {}
+  recLog('recoverCloudUploads: resumed and completed %s', markerKey);
+}
+
+async function recoverCloudUploads() {
+  let markers;
+  try {
+    markers = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('podbooth:cloud:')) markers.push(k);
+    }
+  } catch (e) {
+    return;
+  }
+  if (markers.length === 0) return;
+
+  const dirHandle = await fsaGetDirectory();
+  for (const markerKey of markers) {
+    let parsed;
+    try {
+      parsed = JSON.parse(localStorage.getItem(markerKey));
+    } catch (e) {
+      try { localStorage.removeItem(markerKey); } catch (e2) {}
+      continue;
+    }
+    // Format: podbooth:cloud:{sessionId}:{identity}:{trackType}:{epoch} — the
+    // trailing three parts are all validated at write time to be
+    // colon-free (session/identity are opaque IDs, epoch matches _EPOCH_RE).
+    const parts = markerKey.split(':');
+    if (parts.length < 6 || !parsed || !parsed.key || !parsed.uploadId || !parsed.fileName) {
+      try { localStorage.removeItem(markerKey); } catch (e) {}
+      continue;
+    }
+    const [, , sessionId, forIdentity, trackType, epoch] = parts;
+
+    if (!dirHandle) {
+      recLog('recoverCloudUploads: no FSA directory access, cannot resume %s', markerKey);
+      continue;
+    }
+    // Two tabs on the same session (or a tab left open across a reload)
+    // could otherwise both see the same "missing" parts from /cloud/parts,
+    // both upload them, and both call /cloud/complete — the second
+    // complete_multipart_upload would just fail server-side. Same Web Locks
+    // exclusivity pattern as recoverOrphanedChunks's group lock.
+    const resumeOne = () => _resumeCloudUpload(markerKey, parsed, sessionId, forIdentity, trackType, epoch, dirHandle);
+    const lockName = `podbooth-recover-cloud:${sessionId}:${forIdentity}:${trackType}:${epoch}`;
+    try {
+      if (navigator.locks && navigator.locks.request) {
+        await navigator.locks.request(lockName, { ifAvailable: true }, async (lock) => {
+          if (!lock) { recLog('recoverCloudUploads: %s held by another tab, skipping', lockName); return; }
+          await resumeOne();
+        });
+      } else {
+        await resumeOne();
+      }
+    } catch (e) {
+      console.warn(`recoverCloudUploads: resume failed for ${markerKey}:`, e);
+    }
+  }
+}
+
 // Keep retrying a failing chunk for this long before giving up. The per-track
 // upload queue is serial, so as long as a chunk is retrying, later chunks wait
 // behind it — retrying until success therefore guarantees strictly in-order,
@@ -736,6 +831,160 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
 // already uploads at.
 const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
 
+// ── Direct-to-cloud upload (FSA tracks only) ────────────────────────────────
+// A clean FSA track (never failed over to IndexedDB) normally slices its
+// closed local file and POSTs each slice through this server — but this
+// server's link to guests can be much slower than guests' own uplinks (see
+// the direct-cloud-upload plan). When DIRECT_CLOUD_UPLOAD_ENABLED, upload
+// straight from the browser to the configured S3-compatible backend via
+// presigned multipart URLs instead: the server never sees these bytes until
+// it pulls the finished object back down over its own link. Falls back to
+// the server-proxied slice path (return null) if anything about the cloud
+// path can't even get started.
+
+function _cloudMarkerKey(sessionId, forIdentity, trackType, epoch) {
+  return `podbooth:cloud:${sessionId}:${forIdentity}:${trackType}:${epoch}`;
+}
+
+async function _postJson(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// Uploads one part to a presigned URL, retrying on transient failure with the
+// same budget/backoff shape as uploadChunkWithRetry. Returns the part's ETag
+// on success, or null if cancelled/permanently failed.
+async function _uploadCloudPartWithRetry(url, piece, cancelSignal) {
+  const budget = Math.max(CHUNK_RETRY_BUDGET_MS, _uploadTimeoutForSize(piece.size) * 2);
+  const deadline = Date.now() + budget;
+  let attempt = 0;
+  while (true) {
+    if (cancelSignal?.aborted) return null;
+    attempt++;
+    try {
+      const r = await fetch(url, { method: 'PUT', body: piece, signal: cancelSignal || undefined });
+      if (r.ok) {
+        const etag = r.headers.get('ETag') || r.headers.get('etag');
+        if (!etag) throw new Error('part upload response missing ETag');
+        return etag;
+      }
+      throw new Error(`HTTP ${r.status}`);
+    } catch (err) {
+      if (cancelSignal?.aborted) return null;
+      console.warn(`Cloud part upload failing, attempt ${attempt}:`, err);
+      if (Date.now() >= deadline) {
+        console.error(`Cloud part permanently lost after ${Math.round(budget / 1000)}s of retries`);
+        return null;
+      }
+      await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+    }
+  }
+}
+
+// Slices `file` into partSize pieces, requests a presigned URL per part not
+// already in `alreadyUploaded` (used by the resume sweep — see
+// recoverCloudUploads), and PUTs them directly to the bucket with bounded
+// concurrency. Returns the full sorted parts list (already-uploaded +
+// newly-uploaded) on success, or null if any part is unrecoverable.
+async function _uploadCloudParts(sessionId, file, key, uploadId, partSize, alreadyUploaded, abortController) {
+  const totalParts = Math.max(1, Math.ceil(file.size / partSize));
+  const parts = alreadyUploaded.map(p => ({ part_number: p.part_number, etag: p.etag }));
+  const alreadyDone = new Set(alreadyUploaded.map(p => p.part_number));
+  const remaining = [];
+  for (let i = 1; i <= totalParts; i++) {
+    if (!alreadyDone.has(i)) remaining.push(i);
+  }
+  // Count every part (not just the ones still to upload) so a resume that
+  // skips already-landed parts shows e.g. "1/3 done" instead of a banner
+  // that looks like it restarted from scratch at "0/2".
+  uploadStats.queued += totalParts;
+  uploadStats.completed += alreadyDone.size;
+  refreshUploadBanner();
+  const ok = await _uploadPoolRun(remaining, async (partNumber) => {
+    if (abortController.signal.aborted) return false;
+    const start = (partNumber - 1) * partSize;
+    const piece = file.slice(start, start + partSize);
+    let url;
+    try {
+      ({ url } = await _postJson('/api/upload/cloud/part-url', { session_id: sessionId, key, upload_id: uploadId, part_number: partNumber }));
+    } catch (e) {
+      console.error(`_uploadCloudParts: could not get part-url for part ${partNumber}:`, e);
+      uploadHasError = true;
+      return false;
+    }
+    const etag = await _uploadCloudPartWithRetry(url, piece, abortController.signal);
+    if (!etag) {
+      if (abortController.signal.aborted) uploadCancelled = true;
+      else uploadHasError = true;
+      return false;
+    }
+    parts.push({ part_number: partNumber, etag });
+    uploadStats.completed++;
+    refreshUploadBanner();
+    return true;
+  });
+  return ok ? parts : null;
+}
+
+async function _uploadFsaTrackDirectToCloud(trackType, file, epoch, ext, abortController) {
+  const markerKey = _cloudMarkerKey(SESSION_ID, identity, trackType, epoch);
+  let key, uploadId, partSize;
+  try {
+    const started = await _postJson('/api/upload/cloud/start', {
+      session_id: SESSION_ID, participant: displayName, identity,
+      track_type: trackType, epoch: epoch || '', ext, total_size: file.size,
+    });
+    ({ key, upload_id: uploadId, part_size: partSize } = started);
+  } catch (e) {
+    console.warn('_uploadFsaTrackDirectToCloud: /cloud/start failed, falling back to server-proxied upload:', e);
+    return null;
+  }
+  // Snapshot the finalize meta (format/sample_rate/channels/expected_duration_s)
+  // now, while it's still in memory, and persist it alongside the marker. If
+  // the tab dies before /cloud/complete fires, pendingFinalizeMeta is gone on
+  // reload — without this, a resumed upload would transcode with server
+  // defaults (48kHz/1ch/"container") instead of the track's real parameters.
+  const metaKey = `${trackType}::${epoch}`;
+  const meta = pendingFinalizeMeta[metaKey] || {};
+  try {
+    localStorage.setItem(markerKey, JSON.stringify({ key, uploadId, ext, partSize, fileName: file.name, participant: displayName, meta }));
+  } catch (e) {}
+
+  const parts = await _uploadCloudParts(SESSION_ID, file, key, uploadId, partSize, [], abortController);
+  if (!parts) {
+    if (abortController.signal.aborted) {
+      // Explicit user cancel — abort the multipart upload so the bucket
+      // doesn't keep an orphaned incomplete upload around forever, and drop
+      // the resume marker since a cancelled recording isn't retried
+      // automatically (resuming it would just fail against the now-aborted
+      // upload_id).
+      try { await _postJson('/api/upload/cloud/abort', { session_id: SESSION_ID, key, upload_id: uploadId }); } catch (e) {}
+      try { localStorage.removeItem(markerKey); } catch (e) {}
+    }
+    return false;
+  }
+
+  try {
+    await _postJson('/api/upload/cloud/complete', {
+      session_id: SESSION_ID, participant: displayName, identity,
+      track_type: trackType, epoch: epoch || '', ext, key, upload_id: uploadId, parts,
+      ...meta,
+    });
+  } catch (e) {
+    console.error(`_uploadFsaTrackDirectToCloud: /cloud/complete failed for ${trackType}:`, e);
+    uploadHasError = true;
+    return false;
+  }
+  delete pendingFinalizeMeta[metaKey];
+  try { if (localStorage.getItem(markerKey)) localStorage.removeItem(markerKey); } catch (e) {}
+  return true;
+}
+
 async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, groupChunks, abortController, epoch) {
   // enqueueChunk's writes are chained onto _persistQueues[trackType] but not
   // awaited by the caller (MediaRecorder's onstop isn't async-aware), so the
@@ -789,18 +1038,29 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
       if (ok) uploadStats.completed++;
       refreshUploadBanner();
     } else {
-      const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
-      uploadStats.queued += totalSlices;
-      refreshUploadBanner();
-      const sliceIndices = Array.from({ length: totalSlices }, (_, i) => i);
-      ok = await _uploadPoolRun(sliceIndices, async (i) => {
-        const start = i * FSA_UPLOAD_SLICE_BYTES;
-        const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
-        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, epoch, {}, SESSION_ID, identity, displayName, abortController.signal);
-        if (sliceOk) uploadStats.completed++;
+      let cloudResult = null;
+      if (typeof DIRECT_CLOUD_UPLOAD_ENABLED !== 'undefined' && DIRECT_CLOUD_UPLOAD_ENABLED) {
+        cloudResult = await _uploadFsaTrackDirectToCloud(trackType, file, epoch, localTrack.ext, abortController);
+      }
+      if (cloudResult !== null) {
+        // true: uploaded + /cloud/complete already sent (which also cleared
+        // pendingFinalizeMeta) — nothing more to do for this track. false:
+        // cancelled or permanently failed, same as the server-proxied path.
+        ok = cloudResult;
+      } else {
+        const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
+        uploadStats.queued += totalSlices;
         refreshUploadBanner();
-        return sliceOk;
-      });
+        const sliceIndices = Array.from({ length: totalSlices }, (_, i) => i);
+        ok = await _uploadPoolRun(sliceIndices, async (i) => {
+          const start = i * FSA_UPLOAD_SLICE_BYTES;
+          const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
+          const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, epoch, {}, SESSION_ID, identity, displayName, abortController.signal);
+          if (sliceOk) uploadStats.completed++;
+          refreshUploadBanner();
+          return sliceOk;
+        });
+      }
     }
     const wasCancelled = abortController.signal.aborted;
     delete fsaFailedTracks[trackType];

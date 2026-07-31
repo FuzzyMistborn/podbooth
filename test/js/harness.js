@@ -123,6 +123,7 @@ export function installGlobals(overrides = {}) {
     pcmCapturing: false,
     audioStartTime: 0,
     audioFormat: 'pcm',
+    DIRECT_CLOUD_UPLOAD_ENABLED: false,
   };
   // Not Object.assign: newer Node versions define globalThis.navigator as a
   // getter-only accessor (its own experimental global), so a plain

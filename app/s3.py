@@ -69,6 +69,17 @@ def _bucket() -> str:
     return _active_backend()[0]
 
 
+def s3_upload_configured() -> bool:
+    """True if an S3-compatible backend (S3/R2/B2) is configured — as opposed to a
+    WebDAV-only backend (Nextcloud/FileBrowser), which has no presigned-URL support
+    and can't be used for direct browser-to-storage upload."""
+    try:
+        _active_backend()
+        return True
+    except RuntimeError:
+        return False
+
+
 def upload_prefix() -> str:
     """Return the upload path prefix for the active backend (e.g. 'PodBooth')."""
     if settings.s3_bucket_name:
@@ -131,6 +142,97 @@ def generate_download_url(key: str, expires_in: int = 604800) -> str:
         ExpiresIn=expires_in,
     )
     return url
+
+
+def create_multipart_upload(key: str, content_type: str = "application/octet-stream") -> str:
+    """Start a multipart upload, returning its UploadId.
+
+    Unlike generate_upload_url, this isn't restricted to ALLOWED_CONTENT_TYPES —
+    it's used for raw/intermediate recording sources (see
+    /api/upload/cloud/start), not the final deliverable types that editor
+    delivery validates against."""
+    _validate_key(key)
+    s3 = get_client()
+    resp = s3.create_multipart_upload(Bucket=_bucket(), Key=key, ContentType=content_type)
+    return resp["UploadId"]
+
+
+def generate_part_upload_url(key: str, upload_id: str, part_number: int, expires_in: int = 3600) -> str:
+    """Presigned PUT URL for one part of a multipart upload."""
+    _validate_key(key)
+    s3 = get_client()
+    # Never log the returned URL — it is a bearer token
+    return s3.generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": _bucket(),
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=expires_in,
+    )
+
+
+def list_uploaded_parts(key: str, upload_id: str) -> list[dict]:
+    """List parts already landed for a multipart upload (for client-side resume)."""
+    _validate_key(key)
+    s3 = get_client()
+    bucket = _bucket()
+    parts = []
+    paginator = s3.get_paginator("list_parts")
+    for page in paginator.paginate(Bucket=bucket, Key=key, UploadId=upload_id):
+        for p in page.get("Parts", []):
+            parts.append({
+                "part_number": p["PartNumber"],
+                "etag": p["ETag"],
+                "size": p["Size"],
+            })
+    return parts
+
+
+def complete_multipart_upload(key: str, upload_id: str, parts: list[dict]) -> None:
+    """Complete a multipart upload. `parts` is [{"part_number": int, "etag": str}, ...]."""
+    _validate_key(key)
+    s3 = get_client()
+    ordered = sorted(parts, key=lambda p: p["part_number"])
+    s3.complete_multipart_upload(
+        Bucket=_bucket(),
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [
+            {"PartNumber": p["part_number"], "ETag": p["etag"]} for p in ordered
+        ]},
+    )
+
+
+def abort_multipart_upload(key: str, upload_id: str) -> None:
+    """Best-effort abort of an incomplete multipart upload. Logs warning on error."""
+    try:
+        _validate_key(key)
+        s3 = get_client()
+        s3.abort_multipart_upload(Bucket=_bucket(), Key=key, UploadId=upload_id)
+    except Exception as e:
+        logger.warning("S3 abort_multipart_upload failed for %s: %s", key, e)
+
+
+def download_object_to_path(key: str, dest) -> int:
+    """Stream an object down to a local path. Returns bytes written."""
+    from pathlib import Path as _Path
+    _validate_key(key)
+    dest = _Path(dest)
+    s3 = get_client()
+    obj = s3.get_object(Bucket=_bucket(), Key=key)
+    body = obj["Body"]
+    written = 0
+    with open(dest, "wb") as f:
+        while True:
+            piece = body.read(8 * 1024 * 1024)
+            if not piece:
+                break
+            f.write(piece)
+            written += len(piece)
+    return written
 
 
 def delete_object(key: str) -> None:
