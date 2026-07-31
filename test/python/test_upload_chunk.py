@@ -56,13 +56,23 @@ def test_aggregate_upload_cap_rejects_once_participant_exceeds_it(client, sessio
     # A tiny cap makes this fast to trigger without writing real gigabytes —
     # the mechanism (sum of on-disk file sizes for the participant dir) is
     # the same regardless of the configured threshold.
-    monkeypatch.setattr(settings, "max_participant_upload_gb", 20 / (1024 ** 3))  # 20 bytes
+    monkeypatch.setattr(settings, "max_participant_upload_gb", 50 / (1024 ** 3))  # 50 bytes
 
     r1 = _post_chunk(client, chunk_index=0, content=b"x" * 25)
     assert r1.status_code == 200, r1.text
 
-    r2 = _post_chunk(client, chunk_index=1, content=b"y" * 10)
+    # A single chunk that would itself push the participant over the
+    # remaining headroom (25 already used, only 25 left, this one is 30) must
+    # be rejected outright rather than accepted and only caught on the next
+    # request — otherwise one oversized chunk can blow straight past the cap.
+    r2 = _post_chunk(client, chunk_index=1, content=b"y" * 30)
     assert r2.status_code == 413
+
+    r3 = _post_chunk(client, chunk_index=2, content=b"z" * 10)
+    assert r3.status_code == 200, r3.text
+
+    r4 = _post_chunk(client, chunk_index=3, content=b"w" * 20)
+    assert r4.status_code == 413
 
 
 def test_aggregate_cap_disabled_when_zero(client, session, recordings_dir, monkeypatch):
@@ -77,6 +87,8 @@ def test_two_guests_with_same_display_name_get_separate_directories(client, sess
     # L1 fix: participant_dir used to key purely by display-name slug, so two
     # different guests both named "Bob" would interleave takes in one folder.
     session.participants["Bob"] = "2024-01-01T00:00:00+00:00"
+    session.identities["bob-A"] = "Bob"
+    session.identities["bob-B"] = "Bob"
     r1 = client.post(
         "/api/upload/chunk",
         data={

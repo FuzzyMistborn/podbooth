@@ -28,11 +28,13 @@ def session(recordings_dir):
         created_at=datetime.now(timezone.utc),
         dir_name="test-session",
     )
-    # Most upload tests act as "Alice", already joined via /api/token — real
-    # clients only reach the chunk/finalize/cloud endpoints after that call
-    # succeeds (see _require_joined_participant in upload.py), so pre-seed it
-    # here rather than in every test.
+    # Most upload tests act as "Alice"/"alice-id", already joined via
+    # /api/token — real clients only reach the chunk/finalize/cloud endpoints
+    # after that call succeeds (see _require_joined_participant in
+    # upload.py), so pre-seed it here rather than in every test.
     s.participants["Alice"] = datetime.now(timezone.utc).isoformat()
+    s.identities["alice-id"] = "Alice"
+    s.identities["id-1"] = "Alice"
     _sessions[s.id] = s
     yield s
     _sessions.pop(s.id, None)

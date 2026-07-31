@@ -337,6 +337,7 @@ async def get_token(request: Request):
     )
 
     session.participants[display_name] = datetime.now().isoformat()
+    session.identities[identity] = display_name
     await touch(session_id)
 
     return JSONResponse({"token": token, "is_host": is_host})

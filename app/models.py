@@ -27,6 +27,7 @@ class Session:
     ended: bool = False
     ended_at: str = ""       # ISO timestamp; set when end_session() runs
     participants: dict = field(default_factory=dict)   # display name -> joined_at iso
+    identities: dict = field(default_factory=dict)     # LiveKit identity -> display name
     pending_guests: dict = field(default_factory=dict) # identity -> {display_name, requested_at}
     admitted_guests: dict = field(default_factory=dict) # identity -> True
     denied_guests: dict = field(default_factory=dict)   # identity -> True
@@ -117,6 +118,7 @@ def load():
             d.setdefault("editor_token_hash", "")
             d.setdefault("r2_expires_at", "")
             d.setdefault("ended_at", "")
+            d.setdefault("identities", {})
             d.pop("participant_upload_token", None)
             d.pop("participant_token_expires_at", None)
             session = Session(**d)

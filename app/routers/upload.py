@@ -47,21 +47,34 @@ router = APIRouter(prefix="/api/upload")
 _POST_END_UPLOAD_GRACE = timedelta(hours=2)
 
 
-def _require_joined_participant(session, participant: str) -> None:
+def _require_joined_participant(session, participant: str, identity: str = "") -> None:
     """Anyone with the session ID could otherwise call the upload endpoints
     directly, bypassing the lobby admission flow entirely — /api/token only
-    hands out a LiveKit token (and records the caller in session.participants)
-    to the host or an admitted guest, so requiring the caller's display name
-    to already be there reuses that gate instead of re-checking host_token/
-    admitted_guests independently in every upload route."""
+    hands out a LiveKit token (and records the caller in session.participants
+    and session.identities) to the host or an admitted guest, so requiring
+    the caller's display name to already be there reuses that gate instead of
+    re-checking host_token/admitted_guests independently in every upload
+    route. Checking participant name alone isn't enough on its own — display
+    names aren't secret (visible in the studio UI to every other
+    participant) — so also require the caller's identity to be the one that
+    actually registered under that name at token time, closing the gap where
+    anyone who merely knows a joined participant's name could upload/finalize
+    into their directory.
+    """
     if not participant or participant not in session.participants:
         raise HTTPException(status_code=403, detail="Not a participant of this session")
-    if session.ended and session.ended_at:
+    if not identity or session.identities.get(identity) != participant:
+        raise HTTPException(status_code=403, detail="Identity does not match participant")
+    if session.ended:
         try:
-            ended_at = datetime.fromisoformat(session.ended_at)
+            ended_at = datetime.fromisoformat(session.ended_at) if session.ended_at else None
         except ValueError:
             ended_at = None
-        if ended_at and datetime.now() - ended_at > _POST_END_UPLOAD_GRACE:
+        # A missing ended_at means this session ended before the field
+        # existed (migrated from an older sessions.json) — treat that as
+        # long past the grace window rather than granting it unrestricted
+        # upload access forever.
+        if ended_at is None or datetime.now() - ended_at > _POST_END_UPLOAD_GRACE:
             raise HTTPException(status_code=403, detail="Session has ended")
 
 # Keep references to background tasks so they aren't garbage-collected mid-run
@@ -380,7 +393,7 @@ async def upload_chunk(
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    _require_joined_participant(session, participant)
+    _require_joined_participant(session, participant, identity)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
@@ -397,11 +410,17 @@ async def upload_chunk(
     # before accepting another chunk, rather than tracked in memory, so it
     # survives a server restart and needs no separate bookkeeping to stay
     # in sync with the filesystem.
+    max_size = _MAX_CHUNK_BYTES
     if settings.max_participant_upload_gb > 0:
         cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
         existing_bytes = sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
         if existing_bytes >= cap_bytes:
             raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
+        # A single chunk allowed up to _MAX_CHUNK_BYTES (20 GB, for the FSA
+        # whole-file-as-one-chunk path) could otherwise blow straight past
+        # the aggregate cap in one request — bound this chunk by whatever
+        # headroom is actually left, not just the per-chunk ceiling.
+        max_size = min(max_size, cap_bytes - existing_bytes)
 
     prefix = f"{track_type}_{epoch}_" if epoch else f"{track_type}_"
     chunk_path = directory / f"{prefix}chunk_{chunk_index:06d}.{ext}"
@@ -429,7 +448,7 @@ async def upload_chunk(
                 if not piece:
                     break
                 size += len(piece)
-                if size > _MAX_CHUNK_BYTES:
+                if size > max_size:
                     raise HTTPException(status_code=413, detail="Chunk exceeds size limit")
                 await f.write(piece)
     except HTTPException:
@@ -519,7 +538,7 @@ async def finalize_track(request: Request):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    _require_joined_participant(session, participant)
+    _require_joined_participant(session, participant, identity)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     _validate_epoch(epoch)
@@ -605,7 +624,7 @@ async def cloud_upload_start(request: Request):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    _require_joined_participant(session, participant)
+    _require_joined_participant(session, participant, identity)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
@@ -659,6 +678,15 @@ async def cloud_upload_part_url(request: Request):
     if not get_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     _require_cloud_key_in_session(key, session_id)
+    # The bytes for this path go straight from the browser to the bucket —
+    # the server never sees them — so there's no on-disk total to check the
+    # way /chunk does. Bound the part count instead, so unbounded parts at
+    # CLOUD_UPLOAD_PART_BYTES each can't blow past the configured cap.
+    if settings.max_participant_upload_gb > 0:
+        cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
+        max_parts = max(1, -(-cap_bytes // CLOUD_UPLOAD_PART_BYTES))  # ceil div
+        if part_number > max_parts:
+            raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
 
     loop = asyncio.get_running_loop()
     try:
@@ -737,7 +765,7 @@ async def cloud_upload_complete(request: Request):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    _require_joined_participant(session, participant)
+    _require_joined_participant(session, participant, identity)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
