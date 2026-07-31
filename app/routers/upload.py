@@ -607,6 +607,23 @@ async def cloud_upload_parts(key: str, upload_id: str):
     return JSONResponse({"parts": parts})
 
 
+@router.post("/cloud/abort")
+async def cloud_upload_abort(request: Request):
+    """Best-effort abort of an in-progress multipart upload — called when the
+    client cancels an upload (see cancelUpload/uploadAbortController in
+    upload.js) so the bucket doesn't keep an orphaned incomplete multipart
+    upload around indefinitely. Never raises: this is cleanup on a
+    best-effort path, not something worth failing the client's cancel over."""
+    data = await request.json()
+    key = data.get("key")
+    upload_id = data.get("upload_id")
+    if not key or not upload_id:
+        raise HTTPException(status_code=400, detail="Missing key/upload_id")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: s3.abort_multipart_upload(key, upload_id))
+    return JSONResponse({"ok": True})
+
+
 @router.post("/cloud/complete")
 async def cloud_upload_complete(request: Request):
     """Complete a direct-to-cloud multipart upload: finish it in the bucket,

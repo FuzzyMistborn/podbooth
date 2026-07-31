@@ -88,6 +88,26 @@ def test_cloud_parts_lists_uploaded_parts_for_resume(client, session, recordings
     assert r.json()["parts"] == [{"part_number": 1, "etag": '"a"', "size": 5}]
 
 
+# ── /cloud/abort ─────────────────────────────────────────────────────────────
+
+def test_cloud_abort_calls_s3_abort(client, session, recordings_dir, monkeypatch):
+    # Called when the client cancels an in-progress upload — without this
+    # wired up, a cancelled recording leaves an orphaned incomplete
+    # multipart upload sitting in the bucket forever.
+    _stub_cloud_backend(monkeypatch)
+    aborted = []
+    monkeypatch.setattr(upload.s3, "abort_multipart_upload", lambda key, uid: aborted.append((key, uid)))
+    r = client.post("/api/upload/cloud/abort", json={"key": "raw-uploads/x/audio_ep1.wav", "upload_id": "fake-upload-id"})
+    assert r.status_code == 200
+    assert aborted == [("raw-uploads/x/audio_ep1.wav", "fake-upload-id")]
+
+
+def test_cloud_abort_requires_key_and_upload_id(client, session, recordings_dir, monkeypatch):
+    _stub_cloud_backend(monkeypatch)
+    r = client.post("/api/upload/cloud/abort", json={"key": "", "upload_id": "fake-upload-id"})
+    assert r.status_code == 400
+
+
 # ── /cloud/complete ──────────────────────────────────────────────────────────
 
 def test_cloud_complete_downloads_source_deletes_bucket_object_and_triggers_assembly(client, session, recordings_dir, monkeypatch):

@@ -78,6 +78,75 @@ describe('_uploadOneTrack (direct-to-cloud FSA path)', () => {
     expect(calls.some(c => c.url === '/api/upload/chunk')).toBe(false);
   });
 
+  it('persists the finalize meta (sample_rate/channels/format) into the resume marker and sends it on /cloud/complete', async () => {
+    const fileSize = 2 * 1024 * 1024;
+    const fakeFile = makeBlob(fileSize);
+    fakeFile.name = 'Take_1.wav';
+    globalThis.fsaCloseTrackFile = async () => fakeFile;
+    const fsaOpenPromises = {
+      audio: Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
+    };
+    pendingFinalizeMeta['audio::epoch1'] = { format: 'pcm', sample_rate: 44100, channels: 2, expected_duration_s: 12.3 };
+
+    let completeBody = null;
+    globalThis.fetch = vi.fn((url, opts = {}) => {
+      if (url === '/api/upload/cloud/start') {
+        return Promise.resolve(fakeResponse({ key: 'k', upload_id: 'up-1', part_size: 5 * 1024 * 1024 }));
+      }
+      if (url === '/api/upload/cloud/part-url') {
+        return Promise.resolve(fakeResponse({ url: 'https://bucket.example/part-1' }));
+      }
+      if (String(url).startsWith('https://bucket.example/')) {
+        return Promise.resolve(fakeResponse({}, { headers: { etag: '"etag-1"' } }));
+      }
+      if (url === '/api/upload/cloud/complete') {
+        completeBody = JSON.parse(opts.body);
+        return Promise.resolve(fakeResponse({ ok: true }));
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await _uploadOneTrack('audio', fsaOpenPromises, {}, [], new AbortController(), 'epoch1');
+
+    expect(completeBody.format).toBe('pcm');
+    expect(completeBody.sample_rate).toBe(44100);
+    expect(completeBody.channels).toBe(2);
+    expect(completeBody.expected_duration_s).toBe(12.3);
+  });
+
+  it('aborts the multipart upload and clears the marker when the user cancels the upload', async () => {
+    const fileSize = 12 * 1024 * 1024;
+    const fakeFile = makeBlob(fileSize);
+    fakeFile.name = 'Take_1.wav';
+    globalThis.fsaCloseTrackFile = async () => fakeFile;
+    const fsaOpenPromises = {
+      audio: Promise.resolve({ ext: 'wav', bytesWritten: fileSize, isRawAudio: false }),
+    };
+
+    // Already cancelled by the time part upload starts (e.g. the user hit
+    // "Cancel upload" right after the recording stopped) — no part should
+    // ever be PUT, but the multipart upload still needs cleaning up.
+    const abortController = new AbortController();
+    abortController.abort();
+
+    let abortCalled = null;
+    globalThis.fetch = vi.fn((url, opts = {}) => {
+      if (url === '/api/upload/cloud/start') {
+        return Promise.resolve(fakeResponse({ key: 'k', upload_id: 'up-cancel', part_size: 5 * 1024 * 1024 }));
+      }
+      if (url === '/api/upload/cloud/abort') {
+        abortCalled = JSON.parse(opts.body);
+        return Promise.resolve(fakeResponse({ ok: true }));
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await _uploadOneTrack('audio', fsaOpenPromises, {}, [], abortController, 'epoch1');
+
+    expect(abortCalled).toEqual({ key: 'k', upload_id: 'up-cancel' });
+    expect(localStorage.getItem('podbooth:cloud:sess-1:identity-1:audio:epoch1')).toBeNull();
+  });
+
   it('falls back to the server-proxied slice path when /cloud/start fails', async () => {
     const fileSize = 6 * 1024 * 1024;
     const fakeFile = makeBlob(fileSize);
@@ -145,6 +214,38 @@ describe('recoverCloudUploads', () => {
     // /cloud/parts reported it already in the bucket.
     expect(puts.sort()).toEqual([2, 3]);
     expect(localStorage.getItem('podbooth:cloud:sess-1:identity-1:audio:epoch1')).toBeNull();
+  });
+
+  it('sends the marker-persisted finalize meta on resume, not server defaults', async () => {
+    localStorage.setItem(
+      'podbooth:cloud:sess-1:identity-1:audio:epoch1',
+      JSON.stringify({
+        key: 'raw-uploads/x/audio_epoch1.wav', uploadId: 'up-4', ext: 'wav',
+        partSize: 5 * 1024 * 1024, fileName: 'Take_1.wav', participant: 'Tester',
+        meta: { format: 'pcm', sample_rate: 44100, channels: 2, expected_duration_s: 5 },
+      }),
+    );
+    const fakeFile = makeBlob(1024);
+    globalThis.fsaGetDirectory = async () => ({
+      getFileHandle: async () => ({ getFile: async () => fakeFile }),
+    });
+    let completeBody = null;
+    globalThis.fetch = vi.fn((url, opts = {}) => {
+      if (String(url).startsWith('/api/upload/cloud/parts')) return Promise.resolve(fakeResponse({ parts: [] }));
+      if (url === '/api/upload/cloud/part-url') return Promise.resolve(fakeResponse({ url: 'https://bucket.example/part-1' }));
+      if (String(url).startsWith('https://bucket.example/')) return Promise.resolve(fakeResponse({}, { headers: { etag: '"etag-1"' } }));
+      if (url === '/api/upload/cloud/complete') {
+        completeBody = JSON.parse(opts.body);
+        return Promise.resolve(fakeResponse({ ok: true }));
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await recoverCloudUploads();
+
+    expect(completeBody.sample_rate).toBe(44100);
+    expect(completeBody.channels).toBe(2);
+    expect(completeBody.format).toBe('pcm');
   });
 
   it('leaves the marker in place if resuming fails, so a later join can retry', async () => {

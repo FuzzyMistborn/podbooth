@@ -356,6 +356,7 @@ async function recoverCloudUploads() {
         session_id: sessionId, participant: parsed.participant || '', identity: forIdentity,
         track_type: trackType, epoch: epoch || '', ext: parsed.ext,
         key: parsed.key, upload_id: parsed.uploadId, parts: uploaded,
+        ...(parsed.meta || {}),
       });
       try { localStorage.removeItem(markerKey); } catch (e) {}
       recLog('recoverCloudUploads: resumed and completed %s', markerKey);
@@ -921,15 +922,31 @@ async function _uploadFsaTrackDirectToCloud(trackType, file, epoch, ext, abortCo
     console.warn('_uploadFsaTrackDirectToCloud: /cloud/start failed, falling back to server-proxied upload:', e);
     return null;
   }
+  // Snapshot the finalize meta (format/sample_rate/channels/expected_duration_s)
+  // now, while it's still in memory, and persist it alongside the marker. If
+  // the tab dies before /cloud/complete fires, pendingFinalizeMeta is gone on
+  // reload — without this, a resumed upload would transcode with server
+  // defaults (48kHz/1ch/"container") instead of the track's real parameters.
+  const metaKey = `${trackType}::${epoch}`;
+  const meta = pendingFinalizeMeta[metaKey] || {};
   try {
-    localStorage.setItem(markerKey, JSON.stringify({ key, uploadId, ext, partSize, fileName: file.name, participant: displayName }));
+    localStorage.setItem(markerKey, JSON.stringify({ key, uploadId, ext, partSize, fileName: file.name, participant: displayName, meta }));
   } catch (e) {}
 
   const parts = await _uploadCloudParts(file, key, uploadId, partSize, [], abortController);
-  if (!parts) return false;
+  if (!parts) {
+    if (abortController.signal.aborted) {
+      // Explicit user cancel — abort the multipart upload so the bucket
+      // doesn't keep an orphaned incomplete upload around forever, and drop
+      // the resume marker since a cancelled recording isn't retried
+      // automatically (resuming it would just fail against the now-aborted
+      // upload_id).
+      try { await _postJson('/api/upload/cloud/abort', { key, upload_id: uploadId }); } catch (e) {}
+      try { localStorage.removeItem(markerKey); } catch (e) {}
+    }
+    return false;
+  }
 
-  const metaKey = `${trackType}::${epoch}`;
-  const meta = pendingFinalizeMeta[metaKey] || {};
   try {
     await _postJson('/api/upload/cloud/complete', {
       session_id: SESSION_ID, participant: displayName, identity,
