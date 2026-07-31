@@ -73,19 +73,44 @@ def test_cloud_start_rejects_invalid_ext(client, session, recordings_dir, monkey
 
 # ── /cloud/part-url and /cloud/parts ────────────────────────────────────────
 
+def _own_key(session):
+    return f"raw-uploads/{session.id}/Alice/audio_ep1.wav"
+
+
 def test_cloud_part_url_returns_presigned_url(client, session, recordings_dir, monkeypatch):
     _stub_cloud_backend(monkeypatch)
-    r = client.post("/api/upload/cloud/part-url", json={"key": "raw-uploads/x/audio_ep1.wav", "upload_id": "fake-upload-id", "part_number": 2})
+    key = _own_key(session)
+    r = client.post("/api/upload/cloud/part-url", json={"session_id": session.id, "key": key, "upload_id": "fake-upload-id", "part_number": 2})
     assert r.status_code == 200
-    assert r.json()["url"] == "https://bucket.example/raw-uploads/x/audio_ep1.wav/2"
+    assert r.json()["url"] == f"https://bucket.example/{key}/2"
+
+
+def test_cloud_part_url_rejects_a_key_from_another_session(client, session, recordings_dir, monkeypatch):
+    # Without this check a client that somehow learned another session's
+    # key+upload_id could get a presigned URL to upload parts into that
+    # session's multipart upload.
+    _stub_cloud_backend(monkeypatch)
+    r = client.post("/api/upload/cloud/part-url", json={
+        "session_id": session.id, "key": "raw-uploads/some-other-session/Alice/audio_ep1.wav",
+        "upload_id": "fake-upload-id", "part_number": 2,
+    })
+    assert r.status_code == 403
 
 
 def test_cloud_parts_lists_uploaded_parts_for_resume(client, session, recordings_dir, monkeypatch):
     _stub_cloud_backend(monkeypatch)
     monkeypatch.setattr(upload.s3, "list_uploaded_parts", lambda key, uid: [{"part_number": 1, "etag": '"a"', "size": 5}])
-    r = client.get("/api/upload/cloud/parts", params={"key": "k", "upload_id": "u"})
+    r = client.get("/api/upload/cloud/parts", params={"session_id": session.id, "key": _own_key(session), "upload_id": "u"})
     assert r.status_code == 200
     assert r.json()["parts"] == [{"part_number": 1, "etag": '"a"', "size": 5}]
+
+
+def test_cloud_parts_rejects_a_key_from_another_session(client, session, recordings_dir, monkeypatch):
+    _stub_cloud_backend(monkeypatch)
+    r = client.get("/api/upload/cloud/parts", params={
+        "session_id": session.id, "key": "raw-uploads/some-other-session/Alice/audio_ep1.wav", "upload_id": "u",
+    })
+    assert r.status_code == 403
 
 
 # ── /cloud/abort ─────────────────────────────────────────────────────────────
@@ -97,15 +122,24 @@ def test_cloud_abort_calls_s3_abort(client, session, recordings_dir, monkeypatch
     _stub_cloud_backend(monkeypatch)
     aborted = []
     monkeypatch.setattr(upload.s3, "abort_multipart_upload", lambda key, uid: aborted.append((key, uid)))
-    r = client.post("/api/upload/cloud/abort", json={"key": "raw-uploads/x/audio_ep1.wav", "upload_id": "fake-upload-id"})
+    key = _own_key(session)
+    r = client.post("/api/upload/cloud/abort", json={"session_id": session.id, "key": key, "upload_id": "fake-upload-id"})
     assert r.status_code == 200
-    assert aborted == [("raw-uploads/x/audio_ep1.wav", "fake-upload-id")]
+    assert aborted == [(key, "fake-upload-id")]
 
 
-def test_cloud_abort_requires_key_and_upload_id(client, session, recordings_dir, monkeypatch):
+def test_cloud_abort_requires_session_key_and_upload_id(client, session, recordings_dir, monkeypatch):
     _stub_cloud_backend(monkeypatch)
-    r = client.post("/api/upload/cloud/abort", json={"key": "", "upload_id": "fake-upload-id"})
+    r = client.post("/api/upload/cloud/abort", json={"session_id": session.id, "key": "", "upload_id": "fake-upload-id"})
     assert r.status_code == 400
+
+
+def test_cloud_abort_rejects_a_key_from_another_session(client, session, recordings_dir, monkeypatch):
+    _stub_cloud_backend(monkeypatch)
+    r = client.post("/api/upload/cloud/abort", json={
+        "session_id": session.id, "key": "raw-uploads/some-other-session/Alice/audio_ep1.wav", "upload_id": "u",
+    })
+    assert r.status_code == 403
 
 
 # ── /cloud/complete ──────────────────────────────────────────────────────────
@@ -133,19 +167,20 @@ def test_cloud_complete_downloads_source_deletes_bucket_object_and_triggers_asse
 
     monkeypatch.setattr(upload, "assemble_from_source", _fake_assemble_from_source)
 
+    key = f"raw-uploads/{session.id}/Alice/video_ep1.webm"
     r = client.post("/api/upload/cloud/complete", json={
         "session_id": session.id, "participant": "Alice", "identity": "id-1",
         "track_type": "video", "epoch": "ep1", "ext": "webm",
-        "key": "raw-uploads/x/video_ep1.webm", "upload_id": "fake-upload-id",
+        "key": key, "upload_id": "fake-upload-id",
         "parts": [{"part_number": 1, "etag": '"a"'}, {"part_number": 2, "etag": '"b"'}],
     })
     assert r.status_code == 200
     assert r.json()["assembling"] is True
 
-    assert downloaded["key"] == "raw-uploads/x/video_ep1.webm"
+    assert downloaded["key"] == key
     assert downloaded["dest"].name == "video_ep1_source.webm"
     assert downloaded["dest"].read_bytes() == b"fake video bytes"
-    assert deleted == ["raw-uploads/x/video_ep1.webm"]
+    assert deleted == [key]
 
     # assemble_from_source runs as a background asyncio task — give it a beat
     # to actually run before asserting on it.
@@ -173,8 +208,46 @@ def test_cloud_complete_keeps_bucket_object_if_download_fails(client, session, r
     r = client.post("/api/upload/cloud/complete", json={
         "session_id": session.id, "participant": "Alice", "identity": "id-1",
         "track_type": "video", "epoch": "ep1", "ext": "webm",
-        "key": "raw-uploads/x/video_ep1.webm", "upload_id": "fake-upload-id",
+        "key": f"raw-uploads/{session.id}/Alice/video_ep1.webm", "upload_id": "fake-upload-id",
         "parts": [{"part_number": 1, "etag": '"a"'}],
     })
     assert r.status_code == 503
     assert deleted == []
+
+
+def test_cloud_complete_keeps_bucket_object_if_download_is_empty(client, session, recordings_dir, monkeypatch):
+    # A zero-byte download isn't usable as a source file, and it isn't a
+    # "the download failed" exception either — the bucket copy must still
+    # survive so a retry has something to re-download.
+    _stub_cloud_backend(monkeypatch)
+
+    def _empty_download(key, dest):
+        dest.write_bytes(b"")
+        return 0
+
+    monkeypatch.setattr(upload.s3, "download_object_to_path", _empty_download)
+    deleted = []
+    monkeypatch.setattr(upload.s3, "delete_object", lambda key: deleted.append(key))
+    assembled = []
+    monkeypatch.setattr(upload, "assemble_from_source", lambda *a, **k: assembled.append(1))
+
+    r = client.post("/api/upload/cloud/complete", json={
+        "session_id": session.id, "participant": "Alice", "identity": "id-1",
+        "track_type": "video", "epoch": "ep1", "ext": "webm",
+        "key": f"raw-uploads/{session.id}/Alice/video_ep1.webm", "upload_id": "fake-upload-id",
+        "parts": [{"part_number": 1, "etag": '"a"'}],
+    })
+    assert r.status_code == 503
+    assert deleted == []
+    assert assembled == []
+
+
+def test_cloud_complete_rejects_a_key_from_another_session(client, session, recordings_dir, monkeypatch):
+    _stub_cloud_backend(monkeypatch)
+    r = client.post("/api/upload/cloud/complete", json={
+        "session_id": session.id, "participant": "Alice", "identity": "id-1",
+        "track_type": "video", "epoch": "ep1", "ext": "webm",
+        "key": "raw-uploads/some-other-session/Alice/video_ep1.webm", "upload_id": "fake-upload-id",
+        "parts": [{"part_number": 1, "etag": '"a"'}],
+    })
+    assert r.status_code == 403

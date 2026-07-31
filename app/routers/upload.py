@@ -515,6 +515,21 @@ def _cloud_raw_key(session_id: str, directory: Path, track_type: str, epoch: str
     return f"{dirpart}raw-uploads/{session_id}/{directory.name}/{track_type}_{epoch}.{ext}"
 
 
+def _require_cloud_key_in_session(key: str, session_id: str) -> None:
+    """Unlike /cloud/start and /cloud/complete, /cloud/part-url, /cloud/parts,
+    and /cloud/abort only ever took a bare key+upload_id — nothing tied the
+    request to the caller's own session, so a client that somehow learned
+    another session's key+upload_id (upload_id is high-entropy so this isn't
+    trivial, but there's no reason to accept it at all) could get a presigned
+    part-upload URL, list parts, or abort someone else's upload. Require
+    session_id on those calls too and check the key was actually minted for
+    that session."""
+    prefix = s3.upload_prefix()
+    dirpart = f"{prefix}/" if prefix else ""
+    if not key.startswith(f"{dirpart}raw-uploads/{session_id}/"):
+        raise HTTPException(status_code=403, detail="Key does not belong to this session")
+
+
 @router.post("/cloud/start")
 async def cloud_upload_start(request: Request):
     """Begin a direct-to-cloud multipart upload for an FSA-backed track.
@@ -576,14 +591,18 @@ async def cloud_upload_start(request: Request):
 async def cloud_upload_part_url(request: Request):
     """Presigned PUT URL for one part of an in-progress cloud multipart upload."""
     data = await request.json()
+    session_id = data.get("session_id")
     key = data.get("key")
     upload_id = data.get("upload_id")
     try:
         part_number = int(data.get("part_number"))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid part_number")
-    if not key or not upload_id or part_number < 1:
-        raise HTTPException(status_code=400, detail="Missing key/upload_id/part_number")
+    if not session_id or not key or not upload_id or part_number < 1:
+        raise HTTPException(status_code=400, detail="Missing session_id/key/upload_id/part_number")
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_cloud_key_in_session(key, session_id)
 
     loop = asyncio.get_running_loop()
     try:
@@ -595,9 +614,12 @@ async def cloud_upload_part_url(request: Request):
 
 
 @router.get("/cloud/parts")
-async def cloud_upload_parts(key: str, upload_id: str):
+async def cloud_upload_parts(session_id: str, key: str, upload_id: str):
     """List parts already landed for a multipart upload — lets a client resuming
     after a crash/reload skip parts the bucket already has."""
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_cloud_key_in_session(key, session_id)
     loop = asyncio.get_running_loop()
     try:
         parts = await loop.run_in_executor(None, lambda: s3.list_uploaded_parts(key, upload_id))
@@ -615,10 +637,14 @@ async def cloud_upload_abort(request: Request):
     upload around indefinitely. Never raises: this is cleanup on a
     best-effort path, not something worth failing the client's cancel over."""
     data = await request.json()
+    session_id = data.get("session_id")
     key = data.get("key")
     upload_id = data.get("upload_id")
-    if not key or not upload_id:
-        raise HTTPException(status_code=400, detail="Missing key/upload_id")
+    if not session_id or not key or not upload_id:
+        raise HTTPException(status_code=400, detail="Missing session_id/key/upload_id")
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_cloud_key_in_session(key, session_id)
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: s3.abort_multipart_upload(key, upload_id))
     return JSONResponse({"ok": True})
@@ -662,6 +688,7 @@ async def cloud_upload_complete(request: Request):
     _validate_epoch(epoch)
     if not key or not upload_id or not parts:
         raise HTTPException(status_code=400, detail="Missing key/upload_id/parts")
+    _require_cloud_key_in_session(key, session_id)
 
     directory = participant_dir(session, participant, identity)
 
@@ -675,7 +702,7 @@ async def cloud_upload_complete(request: Request):
     epoch_tag = f"_{epoch}" if epoch else ""
     source = directory / f"{track_type}{epoch_tag}_source.{ext}"
     try:
-        await loop.run_in_executor(None, lambda: s3.download_object_to_path(key, source))
+        downloaded_bytes = await loop.run_in_executor(None, lambda: s3.download_object_to_path(key, source))
     except Exception as e:
         logger.error("cloud_upload_complete: download failed for %s: %s", key, e)
         # The object is complete in the bucket even though the pull-back
@@ -683,12 +710,17 @@ async def cloud_upload_complete(request: Request):
         # can try the download again instead of losing the only copy.
         raise HTTPException(status_code=503, detail="Cloud upload completed but download to server failed")
 
-    # The bucket copy was only ever a relay for the slow server leg — once
-    # it's safely on local disk, there's no reason to keep paying for it.
-    await loop.run_in_executor(None, lambda: s3.delete_object(key))
+    if downloaded_bytes <= 0:
+        # A zero-byte download isn't a real source file, and the client's
+        # only copy is the (already-completed-in-the-bucket) multipart
+        # object — don't delete it, so a retry can try downloading again
+        # instead of leaving both copies gone.
+        logger.error("cloud_upload_complete: downloaded 0 bytes for %s — leaving bucket object for retry", key)
+        source.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="Cloud upload completed but downloaded file was empty")
 
     logger.info("cloud_upload_complete: %s/%s epoch=%r downloaded %s size=%d",
-                track_type, participant, epoch, source.name, source.stat().st_size)
+                track_type, participant, epoch, source.name, downloaded_bytes)
 
     in_progress_key = (str(directory), track_type, epoch)
     if in_progress_key not in _assembly_in_progress:
@@ -700,6 +732,18 @@ async def cloud_upload_complete(request: Request):
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)
         task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
+
+    # Only drop the bucket copy once assembly has actually been queued
+    # against the local file — if anything above this point had failed
+    # (including a bug in the queuing itself), the object needs to still be
+    # in the bucket for a retried /cloud/complete to fall back on. Best
+    # effort: a failure here just means the bucket keeps paying for an
+    # object that's now redundant, not that the recording is lost — nowhere
+    # near as bad as deleting it before assembly was ever queued.
+    try:
+        await loop.run_in_executor(None, lambda: s3.delete_object(key))
+    except Exception as e:
+        logger.warning("cloud_upload_complete: could not delete bucket object %s after successful download: %s", key, e)
 
     return JSONResponse({"ok": True, "assembling": True})
 

@@ -143,7 +143,7 @@ describe('_uploadOneTrack (direct-to-cloud FSA path)', () => {
 
     await _uploadOneTrack('audio', fsaOpenPromises, {}, [], abortController, 'epoch1');
 
-    expect(abortCalled).toEqual({ key: 'k', upload_id: 'up-cancel' });
+    expect(abortCalled).toEqual({ session_id: 'sess-1', key: 'k', upload_id: 'up-cancel' });
     expect(localStorage.getItem('podbooth:cloud:sess-1:identity-1:audio:epoch1')).toBeNull();
   });
 

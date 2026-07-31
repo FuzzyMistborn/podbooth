@@ -297,6 +297,35 @@ async function recoverOrphanedChunks() {
 // ask the bucket which parts already landed (GET /cloud/parts), reopen the
 // same local file via the persisted FSA directory grant, and upload only
 // what's still missing.
+async function _resumeCloudUpload(markerKey, parsed, sessionId, forIdentity, trackType, epoch, dirHandle) {
+  const fileHandle = await dirHandle.getFileHandle(parsed.fileName);
+  const file = await fileHandle.getFile();
+
+  let alreadyUploaded = [];
+  try {
+    const r = await fetch('/api/upload/cloud/parts?' + new URLSearchParams({ session_id: sessionId, key: parsed.key, upload_id: parsed.uploadId }));
+    ({ parts: alreadyUploaded } = await r.json());
+  } catch (e) {
+    console.warn(`recoverCloudUploads: could not list existing parts for ${markerKey}:`, e);
+  }
+
+  const abortController = new AbortController();
+  const uploaded = await _uploadCloudParts(sessionId, file, parsed.key, parsed.uploadId, parsed.partSize, alreadyUploaded, abortController);
+  if (!uploaded) {
+    console.warn(`recoverCloudUploads: could not finish resuming ${markerKey}`);
+    return;
+  }
+
+  await _postJson('/api/upload/cloud/complete', {
+    session_id: sessionId, participant: parsed.participant || '', identity: forIdentity,
+    track_type: trackType, epoch: epoch || '', ext: parsed.ext,
+    key: parsed.key, upload_id: parsed.uploadId, parts: uploaded,
+    ...(parsed.meta || {}),
+  });
+  try { localStorage.removeItem(markerKey); } catch (e) {}
+  recLog('recoverCloudUploads: resumed and completed %s', markerKey);
+}
+
 async function recoverCloudUploads() {
   let markers;
   try {
@@ -333,33 +362,22 @@ async function recoverCloudUploads() {
       recLog('recoverCloudUploads: no FSA directory access, cannot resume %s', markerKey);
       continue;
     }
+    // Two tabs on the same session (or a tab left open across a reload)
+    // could otherwise both see the same "missing" parts from /cloud/parts,
+    // both upload them, and both call /cloud/complete — the second
+    // complete_multipart_upload would just fail server-side. Same Web Locks
+    // exclusivity pattern as recoverOrphanedChunks's group lock.
+    const resumeOne = () => _resumeCloudUpload(markerKey, parsed, sessionId, forIdentity, trackType, epoch, dirHandle);
+    const lockName = `podbooth-recover-cloud:${sessionId}:${forIdentity}:${trackType}:${epoch}`;
     try {
-      const fileHandle = await dirHandle.getFileHandle(parsed.fileName);
-      const file = await fileHandle.getFile();
-
-      let alreadyUploaded = [];
-      try {
-        const r = await fetch('/api/upload/cloud/parts?' + new URLSearchParams({ key: parsed.key, upload_id: parsed.uploadId }));
-        ({ parts: alreadyUploaded } = await r.json());
-      } catch (e) {
-        console.warn(`recoverCloudUploads: could not list existing parts for ${markerKey}:`, e);
+      if (navigator.locks && navigator.locks.request) {
+        await navigator.locks.request(lockName, { ifAvailable: true }, async (lock) => {
+          if (!lock) { recLog('recoverCloudUploads: %s held by another tab, skipping', lockName); return; }
+          await resumeOne();
+        });
+      } else {
+        await resumeOne();
       }
-
-      const abortController = new AbortController();
-      const uploaded = await _uploadCloudParts(file, parsed.key, parsed.uploadId, parsed.partSize, alreadyUploaded, abortController);
-      if (!uploaded) {
-        console.warn(`recoverCloudUploads: could not finish resuming ${markerKey}`);
-        continue;
-      }
-
-      await _postJson('/api/upload/cloud/complete', {
-        session_id: sessionId, participant: parsed.participant || '', identity: forIdentity,
-        track_type: trackType, epoch: epoch || '', ext: parsed.ext,
-        key: parsed.key, upload_id: parsed.uploadId, parts: uploaded,
-        ...(parsed.meta || {}),
-      });
-      try { localStorage.removeItem(markerKey); } catch (e) {}
-      recLog('recoverCloudUploads: resumed and completed %s', markerKey);
     } catch (e) {
       console.warn(`recoverCloudUploads: resume failed for ${markerKey}:`, e);
     }
@@ -873,7 +891,7 @@ async function _uploadCloudPartWithRetry(url, piece, cancelSignal) {
 // recoverCloudUploads), and PUTs them directly to the bucket with bounded
 // concurrency. Returns the full sorted parts list (already-uploaded +
 // newly-uploaded) on success, or null if any part is unrecoverable.
-async function _uploadCloudParts(file, key, uploadId, partSize, alreadyUploaded, abortController) {
+async function _uploadCloudParts(sessionId, file, key, uploadId, partSize, alreadyUploaded, abortController) {
   const totalParts = Math.max(1, Math.ceil(file.size / partSize));
   const parts = alreadyUploaded.map(p => ({ part_number: p.part_number, etag: p.etag }));
   const alreadyDone = new Set(alreadyUploaded.map(p => p.part_number));
@@ -881,7 +899,11 @@ async function _uploadCloudParts(file, key, uploadId, partSize, alreadyUploaded,
   for (let i = 1; i <= totalParts; i++) {
     if (!alreadyDone.has(i)) remaining.push(i);
   }
-  uploadStats.queued += remaining.length;
+  // Count every part (not just the ones still to upload) so a resume that
+  // skips already-landed parts shows e.g. "1/3 done" instead of a banner
+  // that looks like it restarted from scratch at "0/2".
+  uploadStats.queued += totalParts;
+  uploadStats.completed += alreadyDone.size;
   refreshUploadBanner();
   const ok = await _uploadPoolRun(remaining, async (partNumber) => {
     if (abortController.signal.aborted) return false;
@@ -889,7 +911,7 @@ async function _uploadCloudParts(file, key, uploadId, partSize, alreadyUploaded,
     const piece = file.slice(start, start + partSize);
     let url;
     try {
-      ({ url } = await _postJson('/api/upload/cloud/part-url', { key, upload_id: uploadId, part_number: partNumber }));
+      ({ url } = await _postJson('/api/upload/cloud/part-url', { session_id: sessionId, key, upload_id: uploadId, part_number: partNumber }));
     } catch (e) {
       console.error(`_uploadCloudParts: could not get part-url for part ${partNumber}:`, e);
       uploadHasError = true;
@@ -933,7 +955,7 @@ async function _uploadFsaTrackDirectToCloud(trackType, file, epoch, ext, abortCo
     localStorage.setItem(markerKey, JSON.stringify({ key, uploadId, ext, partSize, fileName: file.name, participant: displayName, meta }));
   } catch (e) {}
 
-  const parts = await _uploadCloudParts(file, key, uploadId, partSize, [], abortController);
+  const parts = await _uploadCloudParts(SESSION_ID, file, key, uploadId, partSize, [], abortController);
   if (!parts) {
     if (abortController.signal.aborted) {
       // Explicit user cancel — abort the multipart upload so the bucket
@@ -941,7 +963,7 @@ async function _uploadFsaTrackDirectToCloud(trackType, file, epoch, ext, abortCo
       // the resume marker since a cancelled recording isn't retried
       // automatically (resuming it would just fail against the now-aborted
       // upload_id).
-      try { await _postJson('/api/upload/cloud/abort', { key, upload_id: uploadId }); } catch (e) {}
+      try { await _postJson('/api/upload/cloud/abort', { session_id: SESSION_ID, key, upload_id: uploadId }); } catch (e) {}
       try { localStorage.removeItem(markerKey); } catch (e) {}
     }
     return false;
