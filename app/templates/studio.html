@@ -485,6 +485,8 @@
 
   const OUTLINE_ENABLED = {{ "true" if outline_enabled else "false" }};
   const OUTLINE_DOC_ID_INITIAL = "{{ outline_doc_id | e }}";
+
+  const DIRECT_CLOUD_UPLOAD_ENABLED = {{ "true" if direct_cloud_upload_enabled else "false" }};
 </script>
 <script src="/static/js/idb-store.js?v={{ asset_v }}" defer></script>
 <script src="/static/js/fsa-store.js?v={{ asset_v }}" defer></script>
