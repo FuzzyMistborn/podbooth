@@ -76,6 +76,7 @@ def test_aggregate_cap_disabled_when_zero(client, session, recordings_dir, monke
 def test_two_guests_with_same_display_name_get_separate_directories(client, session, recordings_dir):
     # L1 fix: participant_dir used to key purely by display-name slug, so two
     # different guests both named "Bob" would interleave takes in one folder.
+    session.participants["Bob"] = "2024-01-01T00:00:00+00:00"
     r1 = client.post(
         "/api/upload/chunk",
         data={

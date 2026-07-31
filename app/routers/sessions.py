@@ -154,8 +154,8 @@ async def delete_session_api_route(session_id: str, _: None = Depends(require_ap
     if session.editor_token_hash or session.r2_files:
         try:
             from app import s3
-            from app.routers.s3upload import _cloudsync_prefixes
-            extra_pfx = _cloudsync_prefixes(session.title)
+            from app.routers.s3upload import _cloudsync_prefixes_for_deletion
+            extra_pfx = _cloudsync_prefixes_for_deletion(session)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
         except Exception as e:
@@ -191,7 +191,7 @@ async def join_page(request: Request, session_id: str, host_token: str = ""):
 
 
 @router.get("/studio/{session_id}", response_class=HTMLResponse)
-async def studio(request: Request, session_id: str, host_token: str = ""):
+async def studio(request: Request, session_id: str, host_token: str = "", identity: str = ""):
     session = get_session(session_id)
     if not session:
         return templates.TemplateResponse(
@@ -204,6 +204,12 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
     if not host_token:
         host_token = cookie_token
     is_host = _is_host(host_token, session)
+    # upload_token is a bearer credential for the separate local-upload page
+    # (see localupload.py) — only hand it to the host or a guest who's
+    # actually been admitted through the lobby, not to anyone who merely
+    # loaded this URL (studio.html itself isn't admission-gated, since the
+    # real room-join gate is /api/token).
+    is_admitted_guest = bool(identity) and identity in session.admitted_guests
     resp = templates.TemplateResponse(
         request, "studio.html",
         {
@@ -220,7 +226,7 @@ async def studio(request: Request, session_id: str, host_token: str = ""):
             "direct_cloud_upload_enabled": s3.s3_upload_configured(),
             "outline_enabled": bool(settings.outline_api_url and settings.outline_api_key),
             "outline_doc_id": session.outline_doc_id,
-            "upload_token": session.upload_token,
+            "upload_token": session.upload_token if (is_host or is_admitted_guest) else "",
         },
     )
     if is_host:
@@ -306,6 +312,8 @@ async def get_token(request: Request):
         raise HTTPException(status_code=404, detail="Session not found or ended")
 
     is_host = _is_host(host_token, session)
+    if not is_host and identity not in session.admitted_guests:
+        raise HTTPException(status_code=403, detail="Not admitted to this session")
     if not is_host and len(session.participants) >= 50 and display_name not in session.participants:
         raise HTTPException(status_code=429, detail="Session is full")
 
@@ -391,8 +399,8 @@ async def delete_session_route(session_id: str, request: Request):
     if session.editor_token_hash or session.r2_files:
         try:
             from app import s3
-            from app.routers.s3upload import _cloudsync_prefixes
-            extra_pfx = _cloudsync_prefixes(session.title)
+            from app.routers.s3upload import _cloudsync_prefixes_for_deletion
+            extra_pfx = _cloudsync_prefixes_for_deletion(session)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
         except Exception as e:

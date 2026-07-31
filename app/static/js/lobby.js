@@ -19,7 +19,7 @@ async function checkAdmission() {
     if (data.admitted && !wasAdmitted) {
       wasAdmitted = true;
       document.getElementById('lobby-status').textContent = 'Joining session…';
-      let url = `/studio/${SESSION_ID}?participant_name=${encodeURIComponent(DISPLAY_NAME)}`;
+      let url = `/studio/${SESSION_ID}?participant_name=${encodeURIComponent(DISPLAY_NAME)}&identity=${encodeURIComponent(IDENTITY)}`;
       if (MIC_DEVICE_ID) url += `&mic_device_id=${encodeURIComponent(MIC_DEVICE_ID)}`;
       if (CAM_DEVICE_ID) url += `&cam_device_id=${encodeURIComponent(CAM_DEVICE_ID)}`;
       window.location.href = url;

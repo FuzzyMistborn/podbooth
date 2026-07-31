@@ -69,6 +69,29 @@ def _cloudsync_prefixes(session_title: str) -> list[str]:
     return prefixes
 
 
+def _cloudsync_prefixes_for_deletion(session) -> list[str]:
+    """Like _cloudsync_prefixes, but returns [] if another still-tracked
+    session shares the same title slug.
+
+    The cloudsync/local-upload path stores objects under a slug derived from
+    the session *title*, not the session id (unlike the canonical
+    sessions/{id}/ prefix). Titles aren't guaranteed unique over time — an
+    ended session's title can be reused — so a bare slug-prefix delete here
+    could sweep up another session's files. Skip the slug-scoped prefixes
+    (keeping the safe, id-scoped sessions/{id}/ delete) whenever the slug is
+    ambiguous, rather than guessing which session owns which object.
+    """
+    slug = _session_slug(session.title)
+    for other in models.list_sessions():
+        if other.id != session.id and _session_slug(other.title) == slug:
+            logger.warning(
+                "Skipping cloudsync-prefix deletion for session %s: title slug %r "
+                "also matches session %s", session.id, slug, other.id,
+            )
+            return []
+    return _cloudsync_prefixes(session.title)
+
+
 _FILENAME_RE = re.compile(r'^[A-Za-z0-9._\-]+$')
 
 

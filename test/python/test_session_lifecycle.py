@@ -187,6 +187,8 @@ def test_session_full_rejects_new_guest_past_the_cap(client, recordings_dir, mon
     session = get_session(session_id)
     # Fill the participant cap without needing 50 real token requests.
     session.participants = {f"Guest{i}": "" for i in range(50)}
+    session.admitted_guests["new-guest"] = True
+    session.admitted_guests["returning"] = True
 
     r = client.post("/api/token", json={
         "session_id": session_id, "identity": "new-guest", "display_name": "Latecomer",

@@ -18,7 +18,15 @@
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024; // 5 GB
 const ALLOWED_FOLDERS  = new Set(['full', 'speakers']);
-const MAX_PARTS        = 1000;
+// Workers are stateless per-request, so there's no cheap way to track a
+// multipart upload's running total across separate 'part' calls. Instead,
+// bound the worst case indirectly: cap each part's size and cap the part
+// count so count * per-part cap can't exceed MAX_UPLOAD_BYTES — otherwise a
+// client could drive an unbounded number of large parts through 'action=part'
+// (the single-request path below is the only one MAX_UPLOAD_BYTES itself
+// actually gates).
+const PART_MAX_BYTES   = 64 * 1024 * 1024; // 64 MB — matches the app server's own multipart part size
+const MAX_PARTS        = Math.ceil(MAX_UPLOAD_BYTES / PART_MAX_BYTES); // 80
 
 async function sha256Hex(str) {
   const buf  = new TextEncoder().encode(str);
@@ -93,6 +101,10 @@ export async function onRequestPost({ request, env, params }) {
         return err(400, 'Invalid partNumber');
       }
       if (!request.body) return err(400, 'Missing part body');
+      const contentLength = parseInt(request.headers.get('content-length') || '', 10);
+      if (!Number.isInteger(contentLength) || contentLength > PART_MAX_BYTES) {
+        return err(413, `Part too large (max ${PART_MAX_BYTES} bytes)`);
+      }
       try {
         const part = await upload.uploadPart(partNumber, request.body);
         return json({ partNumber: part.partNumber, etag: part.etag });

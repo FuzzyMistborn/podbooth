@@ -248,9 +248,18 @@ async function _recoverGroup(chunks) {
       const r = await fetch('/api/upload/finalize', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
-      if (!r.ok) console.warn(`recoverOrphanedChunks: finalize failed for ${trackType} (${sessionId}/${recIdentity}/${epoch}): HTTP ${r.status}`);
+      if (!r.ok) {
+        console.warn(`recoverOrphanedChunks: finalize failed for ${trackType} (${sessionId}/${recIdentity}/${epoch}): HTTP ${r.status}`);
+        // Chunks are already gone from IndexedDB (deleted as each one landed,
+        // above) — the only copy left is on the server. Don't clear the
+        // recovery marker below on a failed finalize: a transient failure
+        // here must not look "done", or the next join's recovery pass would
+        // never retry /finalize and the track would silently never assemble.
+        failed = true;
+      }
     } catch (e) {
       console.warn(`recoverOrphanedChunks: finalize request failed for ${trackType}:`, e);
+      failed = true;
     }
   }
 

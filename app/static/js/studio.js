@@ -323,7 +323,11 @@ async function init() {
     return;
   }
 
-  identity = `${displayName}-${Math.random().toString(36).slice(2, 7)}`;
+  // Guests arrive here from the lobby with the identity the host already
+  // admitted (see lobby.js) — reuse it so /api/token's admission check
+  // matches. The host has no lobby/admission step, so falls back to a
+  // freshly generated identity.
+  identity = params.get('identity') || `${displayName}-${Math.random().toString(36).slice(2, 7)}`;
 
   // Phase 2 crash recovery: resend anything a previous tab/crash left
   // stranded in IndexedDB (write-through copies whose upload never

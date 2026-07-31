@@ -123,8 +123,21 @@ function _stopQuotaMonitor() {
 
 async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = true;
-  await _postRecordingAction('stop');
-  await broadcastData({ type: 'recording_stopped' });
+  // Local capture must stop regardless of whether the server call or
+  // broadcast succeed — a network blip here must never leave this tab's
+  // recorder (and everyone else's, since they normally stop on receiving
+  // 'recording_stopped') running indefinitely just because the host's own
+  // "tell the server/everyone" step failed.
+  try {
+    await _postRecordingAction('stop');
+  } catch (e) {
+    console.warn('stopRecording: server stop request failed:', e);
+  }
+  try {
+    await broadcastData({ type: 'recording_stopped' });
+  } catch (e) {
+    console.warn('stopRecording: broadcast failed:', e);
+  }
   await stopLocalRecording();
   // Safe to flip the UI back to "Record" before the upload pass below
   // finishes: waitForUploads captures recordingEpoch at its own entry and
@@ -250,7 +263,11 @@ async function startLocalRecording() {
     // interrupted, the chunks it already uploaded are salvaged independently by
     // the server's orphan recovery (recover_orphaned_chunks) and assembled as
     // their own take, so nothing captured is lost.
-    recordingEpoch = Date.now().toString(36);
+    // Date.now() alone can collide on a rapid stop/start within the same
+    // millisecond (e.g. a fast retake) and reuse chunk state across takes —
+    // append a few random base36 chars so back-to-back starts always get
+    // distinct epochs.
+    recordingEpoch = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     // Marks this epoch as in-flight so a reload/crash before waitForUploads
     // clears it (see upload.js) is detectable by checkInterruptedSession on
     // the next prejoin visit, and so recoverOrphanedChunks has an IndexedDB

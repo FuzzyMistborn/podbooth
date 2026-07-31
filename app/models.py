@@ -25,6 +25,7 @@ class Session:
     dir_name: str            # filesystem directory for this session's recordings
     recording: bool = False
     ended: bool = False
+    ended_at: str = ""       # ISO timestamp; set when end_session() runs
     participants: dict = field(default_factory=dict)   # display name -> joined_at iso
     pending_guests: dict = field(default_factory=dict) # identity -> {display_name, requested_at}
     admitted_guests: dict = field(default_factory=dict) # identity -> True
@@ -115,6 +116,7 @@ def load():
                 d["editor_token_hash"] = hashlib.sha256(old_token.encode()).hexdigest()
             d.setdefault("editor_token_hash", "")
             d.setdefault("r2_expires_at", "")
+            d.setdefault("ended_at", "")
             d.pop("participant_upload_token", None)
             d.pop("participant_token_expires_at", None)
             session = Session(**d)
@@ -171,6 +173,7 @@ async def end_session(session_id: str):
         session = _sessions.get(session_id)
         if session:
             session.ended = True
+            session.ended_at = datetime.now().isoformat()
             session.recording = False
             await _save()
 
@@ -211,7 +214,7 @@ async def purge_expired_r2() -> list[str]:
     """Delete S3 objects for sessions whose r2_expires_at is in the past."""
     from datetime import timezone
     from app import s3
-    from app.routers.s3upload import _cloudsync_prefixes
+    from app.routers.s3upload import _cloudsync_prefixes_for_deletion
     loop = asyncio.get_running_loop()
     now = datetime.now(tz=timezone.utc)
     purged = []
@@ -227,7 +230,7 @@ async def purge_expired_r2() -> list[str]:
         except Exception:
             continue
         try:
-            extra_pfx = _cloudsync_prefixes(session.title)
+            extra_pfx = _cloudsync_prefixes_for_deletion(session)
             n = await loop.run_in_executor(None, lambda: s3.delete_session_objects(session.id, extra_pfx))
             logger.info("purge_expired_r2: deleted %d S3 objects for session %s", n, session.id)
             session.r2_files = []

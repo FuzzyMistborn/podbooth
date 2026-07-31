@@ -28,6 +28,8 @@ import aiofiles
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from datetime import datetime, timedelta
+
 from app import s3
 from app.config import settings
 from app.models import get_session
@@ -36,6 +38,31 @@ from app.utils import _safe_name
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/upload")
+
+# After the host ends a session, guests still need to flush whatever's still
+# buffered locally (see handleSessionEnded in ui.js, which uploads everything
+# outstanding before redirecting) — so upload endpoints can't reject on
+# session.ended outright. This bounds how long that tail is allowed to run,
+# so a session can't be uploaded/assembled into indefinitely after it ends.
+_POST_END_UPLOAD_GRACE = timedelta(hours=2)
+
+
+def _require_joined_participant(session, participant: str) -> None:
+    """Anyone with the session ID could otherwise call the upload endpoints
+    directly, bypassing the lobby admission flow entirely — /api/token only
+    hands out a LiveKit token (and records the caller in session.participants)
+    to the host or an admitted guest, so requiring the caller's display name
+    to already be there reuses that gate instead of re-checking host_token/
+    admitted_guests independently in every upload route."""
+    if not participant or participant not in session.participants:
+        raise HTTPException(status_code=403, detail="Not a participant of this session")
+    if session.ended and session.ended_at:
+        try:
+            ended_at = datetime.fromisoformat(session.ended_at)
+        except ValueError:
+            ended_at = None
+        if ended_at and datetime.now() - ended_at > _POST_END_UPLOAD_GRACE:
+            raise HTTPException(status_code=403, detail="Session has ended")
 
 # Keep references to background tasks so they aren't garbage-collected mid-run
 _tasks: set[asyncio.Task] = set()
@@ -353,6 +380,7 @@ async def upload_chunk(
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _require_joined_participant(session, participant)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
@@ -491,6 +519,7 @@ async def finalize_track(request: Request):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _require_joined_participant(session, participant)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     _validate_epoch(epoch)
@@ -576,6 +605,7 @@ async def cloud_upload_start(request: Request):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _require_joined_participant(session, participant)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
@@ -587,10 +617,15 @@ async def cloud_upload_start(request: Request):
 
     directory = participant_dir(session, participant, identity)
 
-    if settings.max_participant_upload_gb > 0 and total_size > 0:
+    if settings.max_participant_upload_gb > 0:
         cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
         existing_bytes = sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
-        if existing_bytes + total_size > cap_bytes:
+        # total_size is 0 for the incremental-upload path (see
+        # _ensureFsaCloudStarted in upload.js), where the final size isn't
+        # known yet — still reject starting a new multipart upload once the
+        # participant is already at/over cap, rather than only checking the
+        # (unknowable) projected total.
+        if existing_bytes + max(total_size, 0) >= cap_bytes:
             raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
 
     key = _cloud_raw_key(session_id, directory, track_type, epoch, ext)
@@ -702,6 +737,7 @@ async def cloud_upload_complete(request: Request):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _require_joined_participant(session, participant)
     if track_type not in ("audio", "video", "screen"):
         raise HTTPException(status_code=400, detail="Invalid track_type")
     if ext not in ("raw", "webm", "mp4"):
