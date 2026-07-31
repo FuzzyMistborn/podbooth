@@ -956,19 +956,19 @@ body.no-mirror .participant-tile.local video { transform: none; }
 .incremental-upload-toggle {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  justify-content: center;
   color: var(--text-3);
   background: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 4px 8px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   cursor: pointer;
-  white-space: nowrap;
+  flex-shrink: 0;
   transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
-.incremental-upload-toggle svg { width: 12px; height: 12px; flex-shrink: 0; }
+.incremental-upload-toggle svg { width: 14px; height: 14px; flex-shrink: 0; }
 .incremental-upload-toggle:hover { opacity: 0.85; }
 .incremental-upload-toggle.active {
   color: var(--green);
