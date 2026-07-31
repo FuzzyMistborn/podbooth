@@ -230,6 +230,14 @@ async function fsaFlushTrackFile(track) {
   track.writable = await track.fileHandle.createWritable({ keepExistingData: true });
   await track.writable.seek(track.bytesWritten);
   track.flushedBytes = track.bytesWritten;
+  // Optional hook (set by upload.js when direct-to-cloud upload is in play):
+  // a flush is the only point at which bytes written so far are guaranteed
+  // committed to the real on-disk file and safe to read back with
+  // fileHandle.getFile(), so it's also the only safe point to hand a
+  // finished byte range off as a multipart upload part mid-recording.
+  if (track.onFlush) {
+    try { await track.onFlush(); } catch (e) { console.warn('fsaFlushTrackFile: onFlush hook failed:', e); }
+  }
 }
 
 async function fsaCloseTrackFile(track) {

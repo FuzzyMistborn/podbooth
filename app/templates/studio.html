@@ -153,6 +153,12 @@
       <div class="rec-status-row" id="rstatus-livekit" data-state="idle">
         <span class="rstatus-icon">—</span><span class="rstatus-label">LiveKit connected</span>
       </div>
+      <div class="rec-status-row rec-status-setting" id="rstatus-incremental-toggle" style="display:none">
+        <label class="rstatus-toggle-label" title="Upload your local recording to the cloud in the background as it's captured, instead of all at once when you stop — leaves less to push at the end. Only applies to local-disk recording.">
+          <input type="checkbox" id="chk-incremental-cloud-upload" checked>
+          <span class="rstatus-label">Upload while recording</span>
+        </label>
+      </div>
       {% if is_host %}
       <div class="rec-status-sep" id="rstatus-peers-wrap" style="display:none">
         <div class="rec-status-section-title">Participants</div>

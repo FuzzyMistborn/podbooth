@@ -273,6 +273,7 @@ async function startLocalRecording() {
     _fatalRecordingErrorHandled = false;
     fsaDirHandle = typeof fsaGetDirectory === 'function' ? await fsaGetDirectory() : null;
     if (fsaDirHandle) recLog('startLocalRecording: File System Access folder available — recording locally to disk');
+    if (typeof _updateIncrementalCloudToggleVisibility === 'function') _updateIncrementalCloudToggleVisibility();
 
     if (typeof indexedDB === 'undefined') {
       // Recording is write-through-only now — no in-memory fallback copy of
