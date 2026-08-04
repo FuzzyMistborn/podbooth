@@ -1,4 +1,4 @@
-fastapi==0.140.0
+fastapi==0.141.1
 uvicorn[standard]==0.52.0
 python-dotenv==1.2.2
 livekit-api==1.2.0
