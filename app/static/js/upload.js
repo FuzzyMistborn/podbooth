@@ -397,6 +397,14 @@ async function recoverCloudUploads() {
   }
   if (markers.length === 0) return;
 
+  // Standalone recovery sweep, not part of a _doUploadAllRecordedChunks pass
+  // — reset the banner counters here so _uploadCloudParts's `+=` (meant to
+  // accumulate across multiple tracks within one pass) doesn't pile on top
+  // of whatever was left over from a previous pass and push the displayed
+  // progress past 100%.
+  uploadStats.queued = 0;
+  uploadStats.completed = 0;
+
   const dirHandle = await fsaGetDirectory();
   for (const markerKey of markers) {
     let parsed;

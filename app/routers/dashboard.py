@@ -319,7 +319,9 @@ async def grid_export_progress(session_id: str, _: None = Depends(require_host))
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, _: None = Depends(require_host)):
     sessions = list_sessions()
-    session_files = {s.id: _get_session_files(s) for s in sessions}
+    session_files = await asyncio.to_thread(
+        lambda: {s.id: _get_session_files(s) for s in sessions}
+    )
     session_video_count = {
         s.id: sum(1 for f in session_files[s.id] if f["type"] == "video")
         for s in sessions

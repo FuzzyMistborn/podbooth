@@ -145,6 +145,11 @@ _EPOCH_RE = re.compile(r"^[A-Za-z0-9-]{0,64}$")
 # MediaRecorder-timeslice pieces — a long take can be several GB.
 _MAX_CHUNK_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB
 
+
+def _dir_size_bytes(directory: Path) -> int:
+    """Sum file sizes in a directory. Blocking (stat syscalls) — run via asyncio.to_thread."""
+    return sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
+
 # Matches chunk files in both epoch and no-epoch forms:
 #   audio_abc123_chunk_000000.raw   →  track=audio  epoch=abc123  ext=raw
 #   audio_chunk_000000.raw          →  track=audio  epoch=None    ext=raw
@@ -413,7 +418,7 @@ async def upload_chunk(
     max_size = _MAX_CHUNK_BYTES
     if settings.max_participant_upload_gb > 0:
         cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
-        existing_bytes = sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
+        existing_bytes = await asyncio.to_thread(_dir_size_bytes, directory)
         if existing_bytes >= cap_bytes:
             raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
         # A single chunk allowed up to _MAX_CHUNK_BYTES (20 GB, for the FSA
@@ -638,7 +643,7 @@ async def cloud_upload_start(request: Request):
 
     if settings.max_participant_upload_gb > 0:
         cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
-        existing_bytes = sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
+        existing_bytes = await asyncio.to_thread(_dir_size_bytes, directory)
         # total_size is 0 for the incremental-upload path (see
         # _ensureFsaCloudStarted in upload.js), where the final size isn't
         # known yet — still reject starting a new multipart upload once the
@@ -909,7 +914,8 @@ async def assemble_track(
     async with aiofiles.open(source, "wb") as out:
         for chunk in chunks:
             async with aiofiles.open(chunk, "rb") as f:
-                await out.write(await f.read())
+                while data := await f.read(1024 * 1024):
+                    await out.write(data)
 
     await _transcode_source(directory, track_type, fmt, sample_rate, channels, epoch, nametake, source, chunks, expected_duration_s)
 
@@ -1017,12 +1023,13 @@ async def _transcode_source(
         if ok:
             ok = await _probe_has_video(noaudio)
             if not ok:
-                logger.error("assemble: video noaudio %s exists but has no readable video stream — keeping source", noaudio.name)
-            else:
-                logger.info("assemble: video noaudio %s size=%d", noaudio.name, noaudio.stat().st_size)
-                for chunk in chunks:
-                    chunk.unlink(missing_ok=True)
-                source.unlink(missing_ok=True)
+                logger.error("assemble: video noaudio %s exists but has no readable video stream", noaudio.name)
+                noaudio.unlink(missing_ok=True)
+        if ok:
+            logger.info("assemble: video noaudio %s size=%d", noaudio.name, noaudio.stat().st_size)
+            for chunk in chunks:
+                chunk.unlink(missing_ok=True)
+            source.unlink(missing_ok=True)
             await _try_merge_av(directory, epoch, nametake)
             if epoch and nametake:
                 epoch_ms = _decode_epoch_ms(epoch)
@@ -1239,7 +1246,7 @@ async def recover_orphaned_chunks(session) -> int:
             )
             _assembly_in_progress.add(in_progress_key)
             task = asyncio.create_task(
-                assemble_track(pdir, track_type, fmt, 48000, 2, epoch, session.id, "")
+                assemble_track(pdir, track_type, fmt, 48000, 2, epoch, session.id, pdir.name)
             )
             _tasks.add(task)
             task.add_done_callback(_tasks.discard)
@@ -1263,7 +1270,13 @@ async def _probe_has_video(path: Path) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=settings.ffmpeg_timeout_s)
+        except asyncio.TimeoutError:
+            logger.error("ffprobe timed out after %.0fs (%s)", settings.ffmpeg_timeout_s, path)
+            proc.kill()
+            await proc.wait()
+            return False
         return stdout.decode().strip() == "video"
     except Exception:
         return False
@@ -1280,7 +1293,13 @@ async def _probe_video_codec(source: Path) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=settings.ffmpeg_timeout_s)
+        except asyncio.TimeoutError:
+            logger.error("ffprobe timed out after %.0fs (%s)", settings.ffmpeg_timeout_s, source)
+            proc.kill()
+            await proc.wait()
+            return ""
         return stdout.decode().strip()
     except Exception:
         return ""

@@ -177,10 +177,37 @@ export async function onRequestGet({ request, env, params }) {
     let offset    = 0;
 
     for (const file of files) {
-      const obj = await env.R2_BUCKET.get(file.key);
-      if (!obj) continue;
+      const obj  = await env.R2_BUCKET.get(file.key);
+      const name = archivePath(file.key, sessionId, file.filename);
 
-      const name         = archivePath(file.key, sessionId, file.filename);
+      if (!obj) {
+        // Object listed in the manifest but missing from R2 (deleted, sync
+        // gap, stale manifest). Drop a placeholder into the archive instead
+        // of silently omitting the file, so the user sees it's missing
+        // rather than getting a zip that looks complete but isn't.
+        console.error(`zip: missing R2 object for key=${file.key}, adding placeholder`);
+        const missingBytes = enc.encode(
+          `This file (${file.filename}) could not be found in storage and was not included in this archive.\n`
+        );
+        const nameBytes    = enc.encode(`${name}.MISSING.txt`);
+        const headerOffset = offset;
+
+        const hdr = localHeader(nameBytes);
+        yield hdr;
+        offset += hdr.length;
+
+        yield missingBytes;
+        offset += missingBytes.length;
+
+        const crc  = crcFinal(crcUpdate(crcInit(), missingBytes));
+        const desc = dataDescriptor(crc, missingBytes.length);
+        yield desc;
+        offset += desc.length;
+
+        central.push({ nameBytes, crc, size: missingBytes.length, headerOffset });
+        continue;
+      }
+
       const nameBytes    = enc.encode(name);
       const headerOffset = offset;
 

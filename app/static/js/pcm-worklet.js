@@ -32,6 +32,16 @@ class PCMCapture extends AudioWorkletProcessor {
         for (let i = 0; i < len; i++) mono[i] *= scale;
       }
       this.port.postMessage([mono], [mono.buffer]);
+    } else {
+      // A transient device/OS buffer underrun can deliver an empty render
+      // quantum (input.length 0, or a zero-length channel). Posting nothing
+      // here would let the frame count fall behind real elapsed time —
+      // video keeps pace via RAF independently, so the audio track would
+      // drift progressively shorter with no gap for anything downstream to
+      // detect. Post standard-length silence instead so frame count (and
+      // therefore chunk_offset_s/expected_duration_s) stays in sync.
+      const mono = new Float32Array(128);
+      this.port.postMessage([mono], [mono.buffer]);
     }
     return true; // keep processor alive
   }
