@@ -206,6 +206,22 @@ def complete_multipart_upload(key: str, upload_id: str, parts: list[dict]) -> No
     )
 
 
+def object_exists(key: str) -> bool:
+    """Whether `key` exists in the bucket. Used to tell a genuine
+    complete_multipart_upload failure apart from a retry landing after a
+    previous attempt already finished it (the upload_id is invalidated once
+    S3 completes it, so a retried complete_multipart_upload call fails even
+    though the object is actually sitting there ready to download)."""
+    from botocore.exceptions import BotoCoreError, ClientError
+    _validate_key(key)
+    s3 = get_client()
+    try:
+        s3.head_object(Bucket=_bucket(), Key=key)
+        return True
+    except (BotoCoreError, ClientError):
+        return False
+
+
 def abort_multipart_upload(key: str, upload_id: str) -> None:
     """Best-effort abort of an incomplete multipart upload. Logs warning on error."""
     try:

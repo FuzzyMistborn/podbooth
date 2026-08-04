@@ -786,8 +786,19 @@ async def cloud_upload_complete(request: Request):
     try:
         await loop.run_in_executor(None, lambda: s3.complete_multipart_upload(key, upload_id, parts))
     except Exception as e:
-        logger.error("cloud_upload_complete: complete_multipart_upload failed for %s: %s", key, e)
-        raise HTTPException(status_code=503, detail="Could not complete cloud upload")
+        # A retry can land here after a *previous* /cloud/complete call
+        # already finished the multipart upload in the bucket but then
+        # failed on the download-back step below — S3 invalidates upload_id
+        # once completed, so this call fails even though the object is
+        # sitting there ready to download. Tell that case apart from a
+        # genuine failure by checking whether the object now exists, and if
+        # so fall through to the download instead of erroring out and
+        # leaving the track permanently stuck.
+        exists = await loop.run_in_executor(None, lambda: s3.object_exists(key))
+        if not exists:
+            logger.error("cloud_upload_complete: complete_multipart_upload failed for %s: %s", key, e)
+            raise HTTPException(status_code=503, detail="Could not complete cloud upload")
+        logger.info("cloud_upload_complete: %s already completed by a previous attempt, retrying download", key)
 
     epoch_tag = f"_{epoch}" if epoch else ""
     source = directory / f"{track_type}{epoch_tag}_source.{ext}"

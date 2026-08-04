@@ -242,6 +242,75 @@ def test_cloud_complete_keeps_bucket_object_if_download_is_empty(client, session
     assert assembled == []
 
 
+def test_cloud_complete_retries_download_when_upload_already_completed(client, session, recordings_dir, monkeypatch):
+    # S3 invalidates upload_id once complete_multipart_upload succeeds. If a
+    # first /cloud/complete call finished the multipart upload but then died
+    # on the download-back step, a retry's complete_multipart_upload call
+    # fails (NoSuchUpload) even though the object is sitting there ready to
+    # download — the retry must fall through to the download instead of
+    # erroring out and leaving the track stuck forever.
+    _stub_cloud_backend(monkeypatch)
+
+    def _already_completed(key, uid, parts):
+        raise RuntimeError("NoSuchUpload: The specified multipart upload does not exist")
+
+    monkeypatch.setattr(upload.s3, "complete_multipart_upload", _already_completed)
+    monkeypatch.setattr(upload.s3, "object_exists", lambda key: True)
+
+    def _fake_download(key, dest):
+        dest.write_bytes(b"video-bytes")
+        return len(b"video-bytes")
+    monkeypatch.setattr(upload.s3, "download_object_to_path", _fake_download)
+    deleted = []
+    monkeypatch.setattr(upload.s3, "delete_object", lambda key: deleted.append(key))
+    assembled = []
+
+    async def _fake_assemble_from_source(*a, **k):
+        assembled.append(1)
+
+    monkeypatch.setattr(upload, "assemble_from_source", _fake_assemble_from_source)
+
+    r = client.post("/api/upload/cloud/complete", json={
+        "session_id": session.id, "participant": "Alice", "identity": "id-1",
+        "track_type": "video", "epoch": "ep1", "ext": "webm",
+        "key": f"raw-uploads/{session.id}/Alice/video_ep1.webm", "upload_id": "fake-upload-id",
+        "parts": [{"part_number": 1, "etag": '"a"'}],
+    })
+    assert r.status_code == 200
+    assert deleted == [f"raw-uploads/{session.id}/Alice/video_ep1.webm"]
+
+    import time
+    for _ in range(50):
+        if assembled:
+            break
+        time.sleep(0.02)
+    assert assembled == [1]
+
+
+def test_cloud_complete_fails_when_upload_not_actually_completed(client, session, recordings_dir, monkeypatch):
+    # A genuine complete_multipart_upload failure (object doesn't exist
+    # either) must still surface as an error, not be swallowed by the
+    # already-completed fallback above.
+    _stub_cloud_backend(monkeypatch)
+
+    def _real_failure(key, uid, parts):
+        raise RuntimeError("some other S3 error")
+
+    monkeypatch.setattr(upload.s3, "complete_multipart_upload", _real_failure)
+    monkeypatch.setattr(upload.s3, "object_exists", lambda key: False)
+    downloaded = []
+    monkeypatch.setattr(upload.s3, "download_object_to_path", lambda key, dest: downloaded.append(key))
+
+    r = client.post("/api/upload/cloud/complete", json={
+        "session_id": session.id, "participant": "Alice", "identity": "id-1",
+        "track_type": "video", "epoch": "ep1", "ext": "webm",
+        "key": f"raw-uploads/{session.id}/Alice/video_ep1.webm", "upload_id": "fake-upload-id",
+        "parts": [{"part_number": 1, "etag": '"a"'}],
+    })
+    assert r.status_code == 503
+    assert downloaded == []
+
+
 def test_cloud_complete_rejects_a_key_from_another_session(client, session, recordings_dir, monkeypatch):
     _stub_cloud_backend(monkeypatch)
     r = client.post("/api/upload/cloud/complete", json={
