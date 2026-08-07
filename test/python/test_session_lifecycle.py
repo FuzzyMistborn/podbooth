@@ -219,3 +219,38 @@ def test_delete_session_api_removes_it(client, recordings_dir):
 
     r = client.get(f"/api/session/{session_id}/status")
     assert r.status_code == 404
+
+
+def test_list_sessions_requires_api_key(client, recordings_dir):
+    _create_session(client, recordings_dir)
+    r = client.get("/api/sessions")
+    assert r.status_code == 403
+
+
+def test_list_sessions_returns_created_sessions(client, recordings_dir):
+    first = _create_session(client, recordings_dir, title="Episode One")
+    second = _create_session(client, recordings_dir, title="Episode Two")
+
+    r = client.get("/api/sessions", headers={"X-API-Key": "test-api-key"})
+    assert r.status_code == 200
+    sessions = r.json()["sessions"]
+    ids = {s["id"] for s in sessions}
+    assert {first["id"], second["id"]} <= ids
+
+    by_id = {s["id"]: s for s in sessions}
+    entry = by_id[first["id"]]
+    assert entry["title"] == "Episode One"
+    assert entry["ended"] is False
+    assert entry["recording"] is False
+    assert entry["participant_count"] == 0
+    assert "host_token" not in entry
+
+
+def test_list_sessions_does_not_include_deleted_session(client, recordings_dir):
+    created = _create_session(client, recordings_dir)
+    client.delete(f"/api/session/{created['id']}", headers={"X-API-Key": "test-api-key"})
+
+    r = client.get("/api/sessions", headers={"X-API-Key": "test-api-key"})
+    assert r.status_code == 200
+    ids = {s["id"] for s in r.json()["sessions"]}
+    assert created["id"] not in ids

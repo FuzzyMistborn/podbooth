@@ -1,6 +1,31 @@
 """Small helpers shared across routers (previously duplicated in each)."""
 
+import asyncio
+import logging
 import secrets
+
+logger = logging.getLogger(__name__)
+
+
+async def run_subprocess(cmd: list[str], timeout_s: float, label: str = "") -> tuple[int, bytes, bytes]:
+    """Run a subprocess with a hard timeout, killing it if it runs over.
+
+    Returns (returncode, stdout, stderr); returncode is -1 on timeout so
+    callers can distinguish a kill from a normal ffmpeg failure.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.error("subprocess timed out after %.0fs (%s): %s", timeout_s, label, cmd[0])
+        proc.kill()
+        await proc.wait()
+        return -1, b"", b""
+    return proc.returncode, stdout, stderr
 
 
 def _safe_name(value: str) -> str:

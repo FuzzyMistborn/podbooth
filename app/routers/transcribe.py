@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.models import get_session
-from app.utils import _is_host, _take_sort_key
+from app.utils import _is_host, _take_sort_key, run_subprocess
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -63,11 +63,8 @@ async def _concat_wavs(wav_files: list[Path], output: Path) -> bool:
     n = len(wav_files)
     fc = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[aout]"
     cmd += ["-filter_complex", fc, "-map", "[aout]", "-c:a", "pcm_s16le", str(output)]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
+    returncode, _, stderr = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "concat_wavs")
+    if returncode != 0:
         logger.error("WAV concat failed: %s", stderr.decode()[-1000:])
         return False
     return True
@@ -76,11 +73,8 @@ async def _concat_wavs(wav_files: list[Path], output: Path) -> bool:
 async def _transcode_to_mp3(src: Path, output: Path, bitrate: str = "128k") -> bool:
     """Transcode audio to MP3 to reduce upload size."""
     cmd = ["ffmpeg", "-y", "-i", str(src), "-c:a", "libmp3lame", "-b:a", bitrate, str(output)]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
+    returncode, _, stderr = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "transcode_mp3")
+    if returncode != 0:
         logger.error("MP3 transcode failed: %s", stderr.decode()[-1000:])
         return False
     logger.info("Transcoded %s → %s (%.1f MB → %.1f MB)",
@@ -138,11 +132,8 @@ async def _split_mp3_chunks(src: Path, chunk_secs: int = 600) -> list[Path] | No
         "-c", "copy", "-reset_timestamps", "1",
         out_pattern,
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
+    returncode, _, stderr = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "split_mp3_chunks")
+    if returncode != 0:
         logger.error("MP3 chunk split failed: %s", stderr.decode()[-1000:])
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return None

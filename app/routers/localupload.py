@@ -256,6 +256,8 @@ async def start_local_upload(
                                 "uploader": safe_participant or "local-upload",
                             })
                     await models.touch(session_id)
+                    from app.routers.s3upload import schedule_manifest_auto_refresh
+                    schedule_manifest_auto_refresh(session_id)
         finally:
             tmp_path.unlink(missing_ok=True)
 

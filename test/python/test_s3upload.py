@@ -10,6 +10,7 @@
   editors would get a manifest missing files with no visible error.
 - Filename/content-type validation on the presigned-upload-URL endpoint.
 """
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -182,3 +183,74 @@ def test_manifest_refresh_falls_back_to_original_listing_when_relist_fails(clien
     r = client.post(f"/api/session/{session_with_file.id}/s3/manifest-refresh")
     assert r.status_code == 200, r.text
     assert r.json()["file_count"] == 1
+
+
+# ── manifest auto-refresh (debounced, no editor link required) ──────────────
+# A new file landing in R2 (participant local-disk upload / cloudsync) should
+# eventually update an already-existing editor manifest without the host
+# manually hitting "refresh" — see schedule_manifest_auto_refresh in
+# s3upload.py. Exercises the debounce/cancel bookkeeping and the
+# no-editor-link no-op directly, without waiting out the real multi-hour
+# debounce window (sleep is monkeypatched out; _debounced_manifest_refresh's
+# post-sleep body is what actually does the work).
+
+@pytest.mark.asyncio
+async def test_auto_refresh_noop_when_no_editor_link_exists(session, recordings_dir, monkeypatch):
+    monkeypatch.setattr(s3upload.asyncio, "sleep", _noop_async)
+    put_calls = []
+    monkeypatch.setattr(s3upload.s3, "put_object", lambda *a, **k: put_calls.append(a))
+
+    def _list_should_not_be_called(*a, **k):
+        raise AssertionError("should never list — no editor link to refresh")
+    monkeypatch.setattr(s3upload.s3, "list_session_objects", _list_should_not_be_called)
+
+    await s3upload._debounced_manifest_refresh(session.id)
+
+    assert put_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_refresh_rewrites_manifest_when_editor_link_exists(session_with_file, recordings_dir, monkeypatch):
+    session_with_file.editor_token_hash = "existing-hash"
+    monkeypatch.setattr(s3upload.asyncio, "sleep", _noop_async)
+    export_calls = []
+
+    async def _track_export(*a, **k):
+        export_calls.append(a)
+
+    _stub_common(monkeypatch, list_objects=lambda *a, **k: [
+        {"key": session_with_file.r2_files[0]["key"], "size_bytes": 100,
+         "last_modified": "2026-01-01T00:00:00+00:00"}
+    ], upload_export=_track_export)
+    put_calls = []
+    monkeypatch.setattr(s3upload.s3, "put_object", lambda key, body, ct: put_calls.append(key))
+
+    await s3upload._debounced_manifest_refresh(session_with_file.id)
+
+    assert put_calls == [f"sessions/{session_with_file.id}/manifest.json"]
+    # The auto path must never touch export generation (real ffmpeg work) —
+    # only the explicit host-triggered editor-link/manifest-refresh actions do.
+    assert export_calls == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_auto_refresh_cancels_previous_pending_task_for_same_session():
+    # Real debounce window is hours long; scheduling twice back-to-back must
+    # cancel the first pending timer rather than leaving two in flight.
+    s3upload.schedule_manifest_auto_refresh("sched-test-session")
+    first_task = s3upload._pending_manifest_refresh["sched-test-session"]
+    s3upload.schedule_manifest_auto_refresh("sched-test-session")
+    second_task = s3upload._pending_manifest_refresh["sched-test-session"]
+    assert first_task is not second_task
+
+    # _debounced_manifest_refresh catches CancelledError and returns cleanly
+    # (see s3upload.py), so a cancelled task reports done rather than
+    # .cancelled() — what matters here is that the *first* timer stopped
+    # running once the second one was scheduled.
+    await asyncio.sleep(0)  # let the cancellation actually land
+    assert first_task.done()
+
+    s3upload.cancel_pending_manifest_refresh("sched-test-session")
+    assert "sched-test-session" not in s3upload._pending_manifest_refresh
+    await asyncio.sleep(0)
+    assert second_task.done()

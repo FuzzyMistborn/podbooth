@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from app.models import list_sessions, get_session
-from app.utils import _safe_name, _parse_take, _take_sort_key
+from app.utils import _safe_name, _parse_take, _take_sort_key, run_subprocess
 
 logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION, APP_VERSION
@@ -78,13 +78,8 @@ async def _concat_takes(paths: list[Path]) -> Path:
             "-c", "copy",
             out_path,
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        returncode, _, stderr = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "concat_takes")
+        if returncode != 0:
             raise RuntimeError(f"Concat failed: {stderr.decode()[-1000:]}")
         return Path(out_path)
     except Exception:
@@ -187,12 +182,11 @@ def _build_export_cmd(
 
 async def _probe_duration(path: Path) -> float:
     try:
-        proc = await asyncio.create_subprocess_exec(
+        cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(path),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
+        ]
+        _, stdout, _ = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "probe_duration")
         return float(stdout.decode().strip() or 0)
     except Exception:
         return 0.0
@@ -233,13 +227,8 @@ async def _run_grid_export(session_id: str, video_groups: list[list[Path]], outp
             "file": str(progress_file),
         }
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        returncode, _, stderr = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "grid_export")
+        if returncode != 0:
             logger.error("Grid export failed (%s): %s", session_id, stderr.decode()[-2000:])
         elif not tmp_output_path.exists() or tmp_output_path.stat().st_size == 0:
             logger.error("Grid export produced no output (%s)", session_id)
@@ -469,7 +458,7 @@ async def download_session_zip(session_id: str, _: None = Depends(require_host))
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    files = _get_session_files(session)
+    files = await asyncio.to_thread(_get_session_files, session)
     if not files:
         raise HTTPException(status_code=404, detail="No recordings available yet")
 

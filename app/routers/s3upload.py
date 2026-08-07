@@ -28,6 +28,83 @@ router = APIRouter()
 # R2/B2 hard-cap on presigned URL lifetime (7 days in seconds)
 _PRESIGNED_MAX_SECS = 604800
 
+# ── Auto-refresh ──────────────────────────────────────────────────────────────
+# Once an editor link exists, new files landing in R2 (participant local-disk
+# uploads, cloudsync) should eventually show up in the manifest without the
+# host manually hitting "refresh". Debounced per session so a burst of files
+# finishing seconds apart triggers one rebuild, not one per file. Deliberately
+# NOT regenerating NLE/DAW export files here (real ffmpeg work) — only the raw
+# file listing + manifest.json. A host wanting exports current still uses the
+# explicit manifest-refresh action.
+MANIFEST_AUTO_REFRESH_DEBOUNCE_SECS = 2 * 60 * 60  # 2 hours
+
+_pending_manifest_refresh: dict[str, asyncio.Task] = {}
+
+
+def schedule_manifest_auto_refresh(session_id: str) -> None:
+    """(Re)start the debounce timer for session_id's editor manifest. Safe to
+    call from any upload path whether or not an editor link exists yet — the
+    debounced refresh itself is a no-op if one hasn't been created."""
+    existing = _pending_manifest_refresh.get(session_id)
+    if existing and not existing.done():
+        existing.cancel()
+    _pending_manifest_refresh[session_id] = asyncio.create_task(_debounced_manifest_refresh(session_id))
+
+
+def cancel_pending_manifest_refresh(session_id: str) -> None:
+    """Called on session deletion so a deleted session's debounce timer
+    doesn't fire hours later against a session that's already gone."""
+    task = _pending_manifest_refresh.pop(session_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _debounced_manifest_refresh(session_id: str) -> None:
+    try:
+        await asyncio.sleep(MANIFEST_AUTO_REFRESH_DEBOUNCE_SECS)
+    except asyncio.CancelledError:
+        return
+    _pending_manifest_refresh.pop(session_id, None)
+    session = get_session(session_id)
+    if not session or not session.editor_token_hash:
+        return  # no editor link (or session gone) — nothing to keep in sync
+    loop = asyncio.get_running_loop()
+    try:
+        extra = [f["key"] for f in session.r2_files]
+        extra_pfx = _cloudsync_prefixes(session.title)
+        objs = await loop.run_in_executor(None, lambda: s3.list_session_objects(session_id, extra, extra_pfx))
+    except (RuntimeError, BotoCoreError, ClientError) as e:
+        logger.warning("manifest auto-refresh: listing failed for %s: %s", session_id, e)
+        return
+    if not objs:
+        return
+
+    expiry_secs = _expiry_secs()
+    expires_at = (datetime.now(tz=timezone.utc) + timedelta(seconds=expiry_secs)).isoformat()
+    r2_meta = {f["key"]: f for f in session.r2_files}
+    manifest_files = await _build_manifest_files(loop, objs, r2_meta, expiry_secs)
+    manifest = {
+        "session_id": session_id,
+        "title": session.title,
+        "episode": session.episode or "",
+        "created_at": session.created_at.isoformat(),
+        "editor_token_hash": session.editor_token_hash,
+        "expires_at": expires_at,
+        "production_prefix": _production_prefix(session.title),
+        "files": manifest_files,
+    }
+    manifest_key = f"sessions/{session_id}/manifest.json"
+    try:
+        await loop.run_in_executor(
+            None, lambda: s3.put_object(manifest_key, json.dumps(manifest), "application/json")
+        )
+    except (RuntimeError, BotoCoreError, ClientError) as e:
+        logger.warning("manifest auto-refresh: put_object failed for %s: %s", session_id, e)
+        return
+    session.r2_expires_at = expires_at
+    await models.touch(session_id)
+    logger.info("manifest auto-refresh: updated %s (%d files)", session_id, len(manifest_files))
+
 
 def _file_source(key: str) -> str:
     """Derive file source label from its storage key path."""

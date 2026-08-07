@@ -728,7 +728,10 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
         console.error(`Chunk permanently lost after ${Math.round(budget / 1000)}s of retries: ${trackType} #${index}`);
         return false; // let the queue drain so /finalize fires and the server-side gap check flags it
       }
-      await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+      await new Promise(res => {
+        const timer = setTimeout(res, Math.min(1000 * attempt, 15000));
+        if (cancelSignal) cancelSignal.addEventListener('abort', () => { clearTimeout(timer); res(); }, { once: true });
+      });
     }
   }
 }
@@ -1037,7 +1040,10 @@ async function _uploadCloudPartWithRetry(url, piece, cancelSignal) {
         console.error(`Cloud part permanently lost after ${Math.round(budget / 1000)}s of retries`);
         return null;
       }
-      await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+      await new Promise(res => {
+        const timer = setTimeout(res, Math.min(1000 * attempt, 15000));
+        if (cancelSignal) cancelSignal.addEventListener('abort', () => { clearTimeout(timer); res(); }, { once: true });
+      });
     }
   }
 }

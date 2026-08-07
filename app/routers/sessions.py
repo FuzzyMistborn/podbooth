@@ -20,7 +20,7 @@ from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host, r
 from app.limiter import limiter
 from app.routers.cloudsync import cloud_upload_enabled, delete_cloud_session, _session_slug
 from app import s3
-from app.utils import _is_host, _parse_take
+from app.utils import _is_host, _parse_take, run_subprocess
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -144,6 +144,25 @@ async def create_session_route(request: Request, _: None = Depends(require_api_k
     })
 
 
+@router.get("/api/sessions")
+async def list_sessions_route(_: None = Depends(require_api_key)):
+    """Machine-to-machine session listing, gated by X-API-Key."""
+    return JSONResponse({
+        "sessions": [
+            {
+                "id": s.id,
+                "title": s.title,
+                "created_at": s.created_at.isoformat(),
+                "ended": s.ended,
+                "ended_at": s.ended_at,
+                "recording": s.recording,
+                "participant_count": len(s.participants),
+            }
+            for s in list_sessions()
+        ]
+    })
+
+
 @router.delete("/api/session/{session_id}")
 async def delete_session_api_route(session_id: str, _: None = Depends(require_api_key)):
     """Machine-to-machine session deletion, gated by X-API-Key."""
@@ -160,6 +179,9 @@ async def delete_session_api_route(session_id: str, _: None = Depends(require_ap
             await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
         except Exception as e:
             logger.warning("delete_session_api_route: S3 cleanup failed for %s: %s", session_id, e)
+
+    from app.routers.s3upload import cancel_pending_manifest_refresh
+    cancel_pending_manifest_refresh(session_id)
 
     await delete_session(session_id)
     return JSONResponse({"deleted": True})
@@ -406,6 +428,9 @@ async def delete_session_route(session_id: str, request: Request):
             await loop.run_in_executor(None, lambda: s3.delete_session_objects(session_id, extra_pfx))
         except Exception as e:
             logger.warning("delete_session_route: S3 cleanup failed for %s: %s", session_id, e)
+
+    from app.routers.s3upload import cancel_pending_manifest_refresh
+    cancel_pending_manifest_refresh(session_id)
 
     await delete_session(session_id)
 
@@ -794,15 +819,13 @@ async def verify_recordings(session_id: str, _: None = Depends(require_host)):
             if fpath.suffix not in (".wav", ".mp4", ".webm"):
                 continue
             try:
-                proc = await asyncio.create_subprocess_exec(
+                cmd = [
                     "ffprobe", "-v", "error",
                     "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1",
                     str(fpath),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await proc.communicate()
+                ]
+                _, stdout, _ = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "verify_recordings")
                 val = stdout.decode().strip()
                 dur = float(val) if val else 0.0
             except Exception:

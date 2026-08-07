@@ -531,7 +531,7 @@ async def start_cloud_upload(session_id: str, _: None = Depends(require_host)):
         return JSONResponse({"status": "uploading"})
 
     from app.routers.dashboard import _get_session_files
-    files = _get_session_files(session)
+    files = await asyncio.to_thread(_get_session_files, session)
     uploadable = [f for f in files if f["type"] not in ("marker",)]
     if not uploadable:
         raise HTTPException(status_code=400, detail="No files to upload")
@@ -540,8 +540,20 @@ async def start_cloud_upload(session_id: str, _: None = Depends(require_host)):
     task = asyncio.create_task(run_upload(session_id, _upload_status, items, backends))
     _upload_task_refs.add(task)
     task.add_done_callback(_upload_task_refs.discard)
+    task.add_done_callback(lambda _t: _schedule_manifest_auto_refresh_if_done(session_id))
 
     return JSONResponse({"status": "uploading"})
+
+
+def _schedule_manifest_auto_refresh_if_done(session_id: str) -> None:
+    """Keep an existing editor link's manifest in sync after a cloudsync
+    upload lands new files — see schedule_manifest_auto_refresh. Imported
+    locally to avoid a circular import (s3upload.py imports from this module).
+    """
+    if _upload_status.get(session_id, {}).get("status") != "done":
+        return
+    from app.routers.s3upload import schedule_manifest_auto_refresh
+    schedule_manifest_auto_refresh(session_id)
 
 
 @router.get("/api/session/{session_id}/upload-cloud-status")
