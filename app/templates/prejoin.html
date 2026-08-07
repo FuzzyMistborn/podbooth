@@ -48,6 +48,14 @@
       <span id="fsa-status" class="fsa-status"></span>
     </div>
 
+    <div id="incremental-upload-optin" class="incremental-upload-optin" style="display:none">
+      <label>
+        <input type="checkbox" id="incremental-upload-check" />
+        Upload to the cloud while recording
+      </label>
+      <span class="incremental-upload-sub">Off means everything uploads in one batch after you stop — more to push at the end, but no bandwidth used while recording.</span>
+    </div>
+
     <div id="recovery-banner" class="recovery-banner" style="display:none">
       <span>⚡ Interrupted recording detected — your upload will resume automatically when you rejoin.</span>
     </div>
@@ -63,6 +71,7 @@
 <script>
   const SESSION_ID = "{{ session.id }}";
   const HOST_TOKEN = "{{ host_token }}";
+  const DIRECT_CLOUD_UPLOAD_ENABLED = {{ "true" if direct_cloud_upload_enabled else "false" }};
 </script>
 
 <script src="/static/js/fsa-store.js?v={{ asset_v }}"></script>

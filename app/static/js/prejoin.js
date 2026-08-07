@@ -76,6 +76,29 @@ function initFsaOptIn() {
     status.textContent = ok ? '✓ Folder selected' : 'Not enabled — recording will use browser storage instead';
     btn.disabled = false;
     btn.style.display = ok ? 'none' : '';
+    if (ok) initIncrementalUploadOptIn();
+  });
+}
+
+// Same storage key studio.js's toolbar toggle (upload.js:
+// INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY) reads/writes — this is just an
+// earlier, opt-in-time surface for the same setting, so it must stay in
+// sync with that string. Only meaningful once a local (FSA) recording
+// folder is in play, so it's only shown after a successful folder pick, and
+// only when this deployment has cloud storage configured at all.
+const INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY = 'podbooth:incrementalCloudUpload';
+
+function initIncrementalUploadOptIn() {
+  if (typeof DIRECT_CLOUD_UPLOAD_ENABLED === 'undefined' || !DIRECT_CLOUD_UPLOAD_ENABLED) return;
+  const wrap = document.getElementById('incremental-upload-optin');
+  const check = document.getElementById('incremental-upload-check');
+  if (!wrap || !check) return;
+  let on = true;
+  try { on = localStorage.getItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY) !== '0'; } catch (e) {}
+  check.checked = on;
+  wrap.style.display = 'flex';
+  check.addEventListener('change', () => {
+    try { localStorage.setItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY, check.checked ? '1' : '0'); } catch (e) {}
   });
 }
 

@@ -200,11 +200,13 @@ async def join_page(request: Request, session_id: str, host_token: str = ""):
     if not host_token:
         host_token = request.cookies.get(f"ht_{session_id}", "")
     is_host = _is_host(host_token, session)
+    from app import s3
     resp = templates.TemplateResponse(
         request, "prejoin.html",
         {
             "session": session,
             "host_token": host_token if is_host else "",
+            "direct_cloud_upload_enabled": s3.s3_upload_configured(),
         },
     )
     if is_host:
