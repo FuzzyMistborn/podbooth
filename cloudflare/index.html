@@ -912,8 +912,9 @@
 
   // Cloudflare caps request bodies at ~100 MB, so anything bigger goes up as
   // an R2 multipart upload in fixed-size chunks (all parts but the last must
-  // be the same size).
-  var CHUNK_BYTES  = 90 * 1024 * 1024;
+  // be the same size). Must not exceed PART_MAX_BYTES in
+  // functions/api/upload/[sessionId].js, which rejects any part over that size.
+  var CHUNK_BYTES  = 64 * 1024 * 1024;
   var PART_RETRIES = 3;
 
   function uploadUrl(folder, extraParams) {
