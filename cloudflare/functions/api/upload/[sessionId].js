@@ -15,9 +15,20 @@
 //
 // R2 binding "R2_BUCKET" must be configured in the Pages dashboard (same binding
 // used by functions/api/zip/[sessionId].js).
+//
+// On the first successful upload in a batch, fires a Discord notification via
+// DISCORD_UPLOAD_WEBHOOK_URL (a Pages secret, separate from PodBooth's own
+// DISCORD_WEBHOOK_URL so uploads can post to a different channel) — see
+// functions/_discord.js and shouldNotify() below for the batching.
+
+import { notifyEditorUpload } from '../../_discord.js';
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024; // 5 GB
-const ALLOWED_FOLDERS  = new Set(['full', 'speakers']);
+// Keep in sync with FOLDER_LABELS in functions/_discord.js and knownSources
+// in index.html — a folder added here needs the same addition in both, or
+// its files silently land in index.html's "other" bucket / show an
+// unlabeled Discord notification.
+const ALLOWED_FOLDERS  = new Set(['full', 'speakers', 'video']);
 // Workers are stateless per-request, so there's no cheap way to track a
 // multipart upload's running total across separate 'part' calls. Instead,
 // bound the worst case indirectly: cap each part's size and cap the part
@@ -52,7 +63,33 @@ function json(obj) {
   });
 }
 
-export async function onRequestPost({ request, env, params }) {
+// One Discord message per upload "batch" instead of one per file: an editor
+// dropping several production files in close succession (full mix + speaker
+// tracks + video) would otherwise fire a separate notification per file. A
+// small R2 marker object stands in for state that a per-request Worker can't
+// hold itself — R2 was already bound here, so this needs no new binding.
+// The first upload in a batch notifies (linking to the production folder,
+// not any single file) and stamps the marker; later uploads within
+// NOTIFY_WINDOW_MS of it are assumed to belong to the same batch and stay
+// quiet. A new notification fires again once the window lapses.
+//
+// Two uploads landing at nearly the same instant can both read "no recent
+// marker" before either writes one, producing two notifications instead of
+// one — acceptable here since this is a convenience digest, not something
+// that needs to be exactly-once.
+const NOTIFY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+async function shouldNotify(env, sessionId) {
+  const markerKey = `sessions/${sessionId}/.production_notify_marker`;
+  const marker = await env.R2_BUCKET.get(markerKey);
+  if (marker && Date.now() - marker.uploaded.getTime() < NOTIFY_WINDOW_MS) {
+    return false;
+  }
+  await env.R2_BUCKET.put(markerKey, String(Date.now()));
+  return true;
+}
+
+export async function onRequestPost({ request, env, params, waitUntil }) {
   const sessionId = params.sessionId;
   const url       = new URL(request.url);
   const token     = url.searchParams.get('token') || '';
@@ -60,7 +97,7 @@ export async function onRequestPost({ request, env, params }) {
   const action    = url.searchParams.get('action') || '';
 
   if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) return err(400, 'Invalid token format');
-  if (!ALLOWED_FOLDERS.has(folder)) return err(400, 'folder must be "full" or "speakers"');
+  if (!ALLOWED_FOLDERS.has(folder)) return err(400, 'folder must be "full", "speakers", or "video"');
 
   const manifestKey  = `sessions/${sessionId}/manifest.json`;
   const manifestObj = await env.R2_BUCKET.get(manifestKey);
@@ -121,12 +158,27 @@ export async function onRequestPost({ request, env, params }) {
           !parts.every(p => Number.isInteger(p.partNumber) && typeof p.etag === 'string')) {
         return err(400, 'Invalid parts list');
       }
+      let obj;
       try {
-        const obj = await upload.complete(parts.map(p => ({ partNumber: p.partNumber, etag: p.etag })));
-        return json({ ok: true, key, filename, size_bytes: obj.size });
+        obj = await upload.complete(parts.map(p => ({ partNumber: p.partNumber, etag: p.etag })));
       } catch (e) {
         return err(400, `Complete failed: ${e.message}`);
       }
+      // Outside the try/catch above: the upload itself already succeeded, so a
+      // problem building/dispatching the notification must not be reported to
+      // the client as a failed upload.
+      waitUntil((async () => {
+        if (await shouldNotify(env, sessionId)) {
+          await notifyEditorUpload({
+            webhookUrl: env.DISCORD_UPLOAD_WEBHOOK_URL,
+            origin: url.origin,
+            sessionId, token,
+            title: manifest.title, episode: manifest.episode,
+            folder, filename, sizeBytes: obj.size,
+          });
+        }
+      })());
+      return json({ ok: true, key, filename, size_bytes: obj.size });
     }
 
     if (action === 'abort') {
@@ -154,6 +206,18 @@ export async function onRequestPost({ request, env, params }) {
   await env.R2_BUCKET.put(key, file, {
     httpMetadata: { contentType: file.type || 'application/octet-stream' },
   });
+
+  waitUntil((async () => {
+    if (await shouldNotify(env, sessionId)) {
+      await notifyEditorUpload({
+        webhookUrl: env.DISCORD_UPLOAD_WEBHOOK_URL,
+        origin: url.origin,
+        sessionId, token,
+        title: manifest.title, episode: manifest.episode,
+        folder, filename, sizeBytes: file.size,
+      });
+    }
+  })());
 
   return new Response(JSON.stringify({
     ok: true,

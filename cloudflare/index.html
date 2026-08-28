@@ -532,6 +532,15 @@
       <div class="upload-progress-list" id="upload-progress-list-speakers"></div>
     </div>
 
+    <div class="upload-section">
+      <label class="upload-dropzone" id="upload-dropzone-video" for="upload-input-video">
+        <div>Drop the finished video here, or click to upload</div>
+        <div class="upload-hint">Uploaded to production/video for the host to pick up</div>
+        <input type="file" id="upload-input-video" multiple />
+      </label>
+      <div class="upload-progress-list" id="upload-progress-list-video"></div>
+    </div>
+
     <div class="portal-footer">
       <span class="footer-warning">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
@@ -782,9 +791,22 @@
   }
 
   // source: R2 source label used only for the group's aria-label (no longer routes through the ZIP endpoint)
+  // Tracks whether the #group-production anchor has already been placed on
+  // this render pass, so a session with multiple production-* subgroups
+  // (full/speakers/video) only tags the first one — duplicate ids aren't
+  // valid HTML and the browser only honors the first match anyway.
+  var productionAnchorPlaced = false;
+
   function makeGroupHeader(label, files, source) {
     var h = document.createElement("div");
     h.className = "file-group-header";
+    // A single Discord link (#group-production) can then land on whichever
+    // production subsection a session actually has, without knowing in
+    // advance which folders were used.
+    if (source && source.indexOf("production") === 0 && !productionAnchorPlaced) {
+      h.id = "group-production";
+      productionAnchorPlaced = true;
+    }
 
     var labelEl = document.createElement("span");
     labelEl.textContent = label;
@@ -811,18 +833,23 @@
   function renderFileList(files) {
     var list = document.getElementById("file-list");
     list.innerHTML = "";
+    productionAnchorPlaced = false;
 
     if (!files || files.length === 0) {
       list.innerHTML = '<div class="file-row" style="color:var(--muted);font-size:13px;">No files available.</div>';
       return;
     }
 
-    var knownSources     = ["podbooth", "local", "exports", "production", "production_full", "production_speakers"];
+    // Keep in sync with ALLOWED_FOLDERS in functions/api/upload/[sessionId].js
+    // and FOLDER_LABELS in functions/_discord.js (production_* entries here
+    // correspond to those folder names) — an unlisted source falls into "other".
+    var knownSources     = ["podbooth", "local", "exports", "production", "production_full", "production_speakers", "production_video"];
     var podbooth         = files.filter(function (f) { return f.source === "podbooth"; });
     var local            = files.filter(function (f) { return f.source === "local"; });
     var exports          = files.filter(function (f) { return f.source === "exports"; });
     var productionFull   = files.filter(function (f) { return f.source === "production_full"; });
     var productionTracks = files.filter(function (f) { return f.source === "production_speakers"; });
+    var productionVideo  = files.filter(function (f) { return f.source === "production_video"; });
     var production       = files.filter(function (f) { return f.source === "production"; });
     var other            = files.filter(function (f) { return knownSources.indexOf(f.source) === -1; });
 
@@ -845,6 +872,10 @@
     if (productionTracks.length > 0) {
       list.appendChild(makeGroupHeader("Production — Speaker Tracks", productionTracks, "production_speakers"));
       productionTracks.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (productionVideo.length > 0) {
+      list.appendChild(makeGroupHeader("Production — Video", productionVideo, "production_video"));
+      productionVideo.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (production.length > 0) {
       list.appendChild(makeGroupHeader("Production Files", production, "production"));
@@ -906,6 +937,13 @@
     renderFileList(manifest.files);
 
     showState("content");
+
+    // Land on a specific group (e.g. from a Discord "new production files"
+    // link with #group-production) once its row exists in the DOM.
+    if (window.location.hash) {
+      var target = document.getElementById(window.location.hash.slice(1));
+      if (target) target.scrollIntoView({ block: "start" });
+    }
   }
 
   // ── Upload (production files) ─────────────────────────────────────────────
@@ -1095,6 +1133,7 @@
   function initUpload() {
     initUploadZone("upload-dropzone-full", "upload-input-full", "upload-progress-list-full", "full");
     initUploadZone("upload-dropzone-speakers", "upload-input-speakers", "upload-progress-list-speakers", "speakers");
+    initUploadZone("upload-dropzone-video", "upload-input-video", "upload-progress-list-video", "video");
   }
 
   // ── Main ───────────────────────────────────────────────────────────────────

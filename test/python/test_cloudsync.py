@@ -7,7 +7,8 @@ of the fix itself."""
 import httpx
 import pytest
 
-from app.routers.cloudsync import NextcloudBackend, UploadItem, run_upload
+from app.config import settings
+from app.routers.cloudsync import NextcloudBackend, UploadItem, _get_backends, run_upload
 
 
 class _FakeBackend:
@@ -73,3 +74,27 @@ async def test_ensure_dir_swallows_a_connection_error_instead_of_raising():
     # Must not raise — pre-fix, this propagated straight out of upload()
     # and past run_upload's gather.
     await backend._ensure_dir(_RaisingClient(), "https://nextcloud.example/dav/x")
+
+
+def test_cloud_upload_backend_restricts_to_one_backend_when_multiple_enabled(monkeypatch):
+    """If two backends are enabled at once (e.g. R2 and FileBrowser), a slow
+    or flaky one can make the whole job look stalled even after the other
+    has finished. cloud_upload_backend lets an operator force automatic
+    upload to just one."""
+    monkeypatch.setattr(settings, "r2_account_id", "acct")
+    monkeypatch.setattr(settings, "r2_access_key_id", "key")
+    monkeypatch.setattr(settings, "r2_access_key_secret", "secret")
+    monkeypatch.setattr(settings, "r2_bucket", "bucket")
+    monkeypatch.setattr(settings, "filebrowser_url", "https://fb.example")
+    monkeypatch.setattr(settings, "filebrowser_user", "user")
+    monkeypatch.setattr(settings, "filebrowser_password", "pw")
+
+    # Unset: both backends are enabled.
+    monkeypatch.setattr(settings, "cloud_upload_backend", "")
+    names = sorted(b.name for b in _get_backends())
+    assert names == ["FileBrowser", "R2"]
+
+    # Set (case-insensitively): only the named backend runs.
+    monkeypatch.setattr(settings, "cloud_upload_backend", "r2")
+    names = [b.name for b in _get_backends()]
+    assert names == ["R2"]

@@ -107,7 +107,12 @@ async def _debounced_manifest_refresh(session_id: str) -> None:
 
 
 def _file_source(key: str) -> str:
-    """Derive file source label from its storage key path."""
+    """Derive file source label from its storage key path.
+
+    The production subfolder names here must match ALLOWED_FOLDERS in
+    cloudflare/functions/api/upload/[sessionId].js (the editor-upload
+    Function that creates these keys) — see the sync note there.
+    """
     parts = key.replace("\\", "/").lower().split("/")
     if "production" in parts:
         idx = parts.index("production")
@@ -116,6 +121,8 @@ def _file_source(key: str) -> str:
             return "production_full"
         if sub == "speakers":
             return "production_speakers"
+        if sub == "video":
+            return "production_video"
         return "production"
     if "local" in parts:
         return "local"

@@ -412,7 +412,24 @@ def _get_backends() -> list[CloudBackend]:
             region="auto",
         ),
     ]
-    return [b for b in backends if b.is_enabled()]
+    enabled = [b for b in backends if b.is_enabled()]
+
+    # Optionally restrict to a single backend (see cloud_upload_backend in
+    # config.py) so one slow/flaky backend can't stall the whole job while
+    # another has already finished.
+    forced = settings.cloud_upload_backend.strip().lower()
+    if forced:
+        restricted = [b for b in enabled if b.name.lower() == forced]
+        if not restricted:
+            logger.warning(
+                "cloud_upload_backend=%r doesn't match any enabled backend (enabled: %s) — "
+                "cloud upload will silently no-op until this is fixed",
+                settings.cloud_upload_backend,
+                ", ".join(b.name for b in enabled) or "none",
+            )
+        enabled = restricted
+
+    return enabled
 
 
 def cloud_upload_enabled() -> bool:

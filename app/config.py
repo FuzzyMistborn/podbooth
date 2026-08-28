@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     b2_bucket: str = ""
     b2_upload_path: str = "PodBooth"
 
+    # If multiple cloud backends above are configured at once, by default
+    # every recording is uploaded to all of them concurrently. Set this to
+    # one of "nextcloud", "filebrowser", "r2", "b2" (case-insensitive) to
+    # restrict automatic upload to a single backend — e.g. so a slow/flaky
+    # backend can't make the whole job appear stalled while a faster one
+    # has already finished. Empty (default) uploads to every enabled backend.
+    cloud_upload_backend: str = ""
+
     # S3-compatible object storage (for editor delivery)
     s3_endpoint_url: str = ""
     s3_region: str = "auto"
