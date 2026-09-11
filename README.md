@@ -326,7 +326,7 @@ Files are organized under the configured upload path as:
    - Click **STOP** to end recording entirely
    - Click **PAUSE** on a participant tile to force-mute them, or **KICK** to remove them
    - Click the bell icon to send a text alert to all participants
-   - Click **Topic** to stamp a named topic marker — saved as a downloadable `.txt` and listed in the Files panel
+   - Click **Topic** to stamp a named topic marker — saved as a downloadable `.txt`, listed in the Files panel, and included as chapter markers in the FCPXML/OTIO/Reaper exports. Any admitted guest can stamp one too (via the same button, or the `M` shortcut), not just the host
    - When a **timer segment** starts or advances, a topic marker is automatically stamped with the segment name (`Start: Topic` / `End: Topic`) so segment boundaries are captured in `markers.txt` without manual intervention
 7. The **Files** panel shows recordings assembling in real time and lists any topic marker files; the upload banner shows per-chunk progress once recording stops and upload begins, then an assembling state
 8. Incoming join requests play a chime and can be **Accepted** or **Denied** by the host; each participant tile shows connection latency
@@ -428,7 +428,7 @@ recordings/
       Bob_1.wav
       Bob_1_video.mp4
     video_grid.mp4          ← optional: all participants composited side-by-side
-    markers.txt             ← optional: timestamped topic markers stamped by the host
+    markers.txt             ← optional: timestamped topic markers (host or any admitted guest)
     transcript.txt          ← optional: full-session transcript (requires WhisperX)
 ```
 
@@ -452,7 +452,7 @@ The **transcript** (when `WHISPERX_API_URL` is set) is generated automatically w
 - **Resumable & crash-safe uploads**: Each recording run gets a unique epoch tag stored in `localStorage` so it survives a crashed or fully closed tab, not just a reload. On every join, the client sweeps IndexedDB for chunks left over from a run that never finished uploading (a crash, closed tab, or interrupted upload pass) and resends them — a Web Locks lock per session/identity/epoch/track keeps two tabs from racing to recover the same group. A quota check runs before recording starts and periodically during it, warning if browser storage is running low. The upload banner tracks per-chunk progress and transitions to an "assembling" state once all chunks have landed.
 - **Device persistence**: Mic and camera selections are saved to `localStorage` on the pre-join page and restored automatically on the next visit, so participants don't have to re-select their devices each session.
 - **Input level meter**: During recording, each participant tile displays a live audio level bar sourced from the same AudioWorklet stream used for capture. A clip indicator lights when the signal saturates.
-- **Topic markers**: The host can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `markers.txt` file in the session folder and shown in the Files panel for immediate download. When using the clock timer, segment transitions automatically stamp `Start:` and `End:` markers so segment boundaries are captured without manual input.
+- **Topic markers**: The host, or any admitted guest, can stamp named topic markers at any point during a session. Each stamp is appended (with a wall-clock timestamp) to a `markers.txt` file in the session folder, shown in the Files panel for immediate download, and picked up by the FCPXML/OTIO/Reaper exports as timeline chapter markers. When using the clock timer, segment transitions automatically stamp `Start:` and `End:` markers so segment boundaries are captured without manual input.
 - **Nerd stats panel**: A collapsible panel exposes live WebRTC statistics (inbound/outbound bitrate, packet loss, jitter, round-trip time) polled from `RTCPeerConnection.getStats()` every second.
 - **Host moderation**: Force-mute and kick are issued via the LiveKit server API. Force-unmute is sent as a `force_unmute` data-channel message so the guest's browser re-enables its mic track client-side.
 - **Grid export**: ffmpeg `xstack` filter composites one video per participant into a 1920×1080 grid. Progress is tracked via ffmpeg's `-progress` file and polled by the dashboard in real time. If a participant has multiple takes, they are stream-copied (no re-encode) into a single temp file before compositing.
