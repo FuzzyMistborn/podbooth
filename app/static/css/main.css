@@ -953,29 +953,6 @@ body.no-mirror .participant-tile.local video { transform: none; }
 .latency-indicator.fair { color: var(--yellow); }
 .latency-indicator.poor { color: var(--red); }
 
-.incremental-upload-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-3);
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-}
-.incremental-upload-toggle svg { width: 14px; height: 14px; flex-shrink: 0; }
-.incremental-upload-toggle:hover { opacity: 0.85; }
-.incremental-upload-toggle.active {
-  color: var(--green);
-  border-color: var(--green);
-  background: rgba(34, 197, 94, 0.08);
-}
-
 /* ── Controls bar ────────────────────────────────────────────── */
 .controls-bar {
   display: flex;
@@ -2718,31 +2695,6 @@ body.no-mirror .participant-tile.local video { transform: none; }
   font-size: 12px;
   color: var(--text-2);
   width: 100%;
-}
-
-/* ── Prejoin incremental cloud upload opt-in ──────────────────── */
-.incremental-upload-optin {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.incremental-upload-optin label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.incremental-upload-sub {
-  font-size: 12px;
-  color: var(--text-2);
-  padding-left: 24px;
 }
 
 /* ── Prejoin recovery banner ────────────────────────────────── */

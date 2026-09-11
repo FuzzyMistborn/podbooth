@@ -206,7 +206,6 @@ async def join_page(request: Request, session_id: str, host_token: str = ""):
         {
             "session": session,
             "host_token": host_token if is_host else "",
-            "direct_cloud_upload_enabled": s3.s3_upload_configured(),
         },
     )
     if is_host:
@@ -243,11 +242,6 @@ async def studio(request: Request, session_id: str, host_token: str = "", identi
             "livekit_url": settings.livekit_public_url,
             "base_url": settings.base_url,
             "cloud_upload_enabled": cloud_upload_enabled(),
-            # Distinct from cloud_upload_enabled above: that's true for ANY
-            # post-hoc sync backend (including WebDAV ones with no presigned-URL
-            # support). This gates the direct-to-cloud FSA upload path, which
-            # only works against an S3-compatible backend (S3/R2/B2).
-            "direct_cloud_upload_enabled": s3.s3_upload_configured(),
             "outline_enabled": bool(settings.outline_api_url and settings.outline_api_key),
             "outline_doc_id": session.outline_doc_id,
             "upload_token": session.upload_token if (is_host or is_admitted_guest) else "",

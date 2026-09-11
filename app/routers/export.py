@@ -57,6 +57,35 @@ def _read_metadata(session) -> list[dict]:
         return []
 
 
+# "- [h:mm:ss] label" or "- [m:ss] label" — written by create_marker in sessions.py.
+_MARKER_RE = re.compile(r'^-\s*\[(\d+):(\d{2})(?::(\d{2}))?\]\s*(.*)$')
+
+
+def _read_markers(session) -> list[dict]:
+    """Parse markers.txt (host- or guest-created chapter markers) into timeline
+    markers, sorted by time. recording_time_s is elapsed time from the client
+    that stamped it, treated here as an absolute offset from show start."""
+    path = Path(settings.recordings_dir) / session.dir_name / "markers.txt"
+    if not path.exists():
+        return []
+    markers = []
+    try:
+        for line in path.read_text().splitlines():
+            m = _MARKER_RE.match(line.strip())
+            if not m:
+                continue
+            a, b, c, label = m.groups()
+            if c is not None:
+                time_s = int(a) * 3600 + int(b) * 60 + int(c)
+            else:
+                time_s = int(a) * 60 + int(b)
+            markers.append({"time_s": float(time_s), "label": label or "marker"})
+    except Exception:
+        return []
+    markers.sort(key=lambda mk: mk["time_s"])
+    return markers
+
+
 def _extract_take(stem: str, ftype: str) -> int:
     """Return take number from slug-based or epoch-based filename stem."""
     try:
@@ -149,7 +178,7 @@ def _tr(start: int, duration: int) -> dict:
     return {"OTIO_SCHEMA": "TimeRange.1", "start_time": _rt(start), "duration": _rt(duration)}
 
 
-def _build_otio_json(title: str, runs: list[dict]) -> str:
+def _build_otio_json(title: str, runs: list[dict], markers: list[dict] | None = None) -> str:
     base_ms = min((r["start_ms"] for r in runs), default=0)
     tracks = []
 
@@ -199,6 +228,17 @@ def _build_otio_json(title: str, runs: list[dict]) -> str:
                 "children": children,
             })
 
+    otio_markers = [
+        {
+            "OTIO_SCHEMA": "Marker.2",
+            "name": mk["label"],
+            "color": "RED",
+            "marked_range": _tr(round(mk["time_s"] * RATE), 0),
+            "metadata": {},
+        }
+        for mk in (markers or [])
+    ]
+
     timeline = {
         "OTIO_SCHEMA": "Timeline.1",
         "metadata": {},
@@ -207,7 +247,7 @@ def _build_otio_json(title: str, runs: list[dict]) -> str:
         "tracks": {
             "OTIO_SCHEMA": "Stack.1",
             "metadata": {}, "name": "tracks", "source_range": None,
-            "effects": [], "markers": [], "enabled": True,
+            "effects": [], "markers": otio_markers, "enabled": True,
             "children": tracks,
         },
     }
@@ -224,7 +264,7 @@ def _fcpxml_time(seconds: float) -> str:
     return f"{frames // g}/{RATE // g}s"
 
 
-def _build_fcpxml(title: str, runs: list[dict]) -> str:
+def _build_fcpxml(title: str, runs: list[dict], markers: list[dict] | None = None) -> str:
     base_ms = min((r["start_ms"] for r in runs), default=0)
     total_s = max(
         (run["start_ms"] - base_ms) / 1000.0 + info["duration_s"]
@@ -304,6 +344,14 @@ def _build_fcpxml(title: str, runs: list[dict]) -> str:
             )
             lane -= 1
 
+    one_frame = _fcpxml_time(1.0 / 25)
+    for mk in (markers or []):
+        start_s = min(max(0.0, mk["time_s"]), total_s)
+        lines.append(
+            f'              <chapter-marker start="{_fcpxml_time(start_s)}"'
+            f' duration="{one_frame}" value="{_xml_escape(mk["label"])}"/>'
+        )
+
     lines += [
         '            </gap>',
         '          </spine>',
@@ -322,7 +370,7 @@ def _rpp_guid() -> str:
     return "{" + str(uuid.uuid4()).upper() + "}"
 
 
-def _build_reaper_rpp(title: str, runs: list[dict]) -> str:
+def _build_reaper_rpp(title: str, runs: list[dict], markers: list[dict] | None = None) -> str:
     base_ms = min((r["start_ms"] for r in runs), default=0)
 
     lines = [
@@ -332,6 +380,10 @@ def _build_reaper_rpp(title: str, runs: list[dict]) -> str:
         f'  LOCK 1',
         f'  RECMODE 1',
     ]
+
+    for i, mk in enumerate(markers or [], start=1):
+        label = mk["label"].replace('"', "'")
+        lines.append(f'  MARKER {i} {mk["time_s"]:.6f} "{label}" 0 0 1 B {_rpp_guid()} 0')
 
     iid = 1
     for run in runs:
@@ -391,7 +443,7 @@ async def export_otio(session_id: str, _: None = Depends(require_host)):
     runs = await _resolve_runs(session)
     if not runs:
         raise HTTPException(status_code=404, detail="No recordings available")
-    content = _build_otio_json(session.title, runs)
+    content = _build_otio_json(session.title, runs, _read_markers(session))
     filename = f"{_safe_name(session.title)}.otio"
     return Response(
         content=content,
@@ -408,7 +460,7 @@ async def export_fcpxml(session_id: str, _: None = Depends(require_host)):
     runs = await _resolve_runs(session)
     if not runs:
         raise HTTPException(status_code=404, detail="No recordings available")
-    content = _build_fcpxml(session.title, runs)
+    content = _build_fcpxml(session.title, runs, _read_markers(session))
     filename = f"{_safe_name(session.title)}.fcpxml"
     return Response(
         content=content,
@@ -425,7 +477,7 @@ async def export_reaper(session_id: str, _: None = Depends(require_host)):
     runs = await _resolve_runs(session)
     if not runs:
         raise HTTPException(status_code=404, detail="No recordings available")
-    content = _build_reaper_rpp(session.title, runs)
+    content = _build_reaper_rpp(session.title, runs, _read_markers(session))
     filename = f"{_safe_name(session.title)}.rpp"
     return Response(
         content=content,

@@ -333,7 +333,6 @@ async function init() {
   // stranded in IndexedDB (write-through copies whose upload never
   // completed). Fire-and-forget — never block joining on it.
   if (typeof recoverOrphanedChunks === 'function') recoverOrphanedChunks();
-  if (typeof recoverCloudUploads === 'function') recoverCloudUploads();
 
   const resp = await fetch('/api/token', {
     method: 'POST',

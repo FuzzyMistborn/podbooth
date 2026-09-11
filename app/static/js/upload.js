@@ -47,20 +47,6 @@ function _fsaTrackFor(trackType, ext, epoch) {
       .then(take => fsaOpenTrackFile(fsaDirHandle, trackType, ext, SESSION_TITLE, displayName, take, segment))
       .then(track => {
         track.ext = ext;
-        if (_incrementalCloudUploadAllowed()) {
-          track.cloudEpoch = epoch;
-          // Chained onto its own queue, separate from _persistQueues — a
-          // flush fires this without awaiting it (see fsaFlushTrackFile), so
-          // back-to-back flushes need their own serialization to keep parts
-          // uploading in order without blocking local disk writes on the
-          // network. _uploadOneTrack awaits track.cloudQueue before treating
-          // track.cloud as final, so nothing here needs to race stop().
-          track.onFlush = () => {
-            track.cloudQueue = (track.cloudQueue || Promise.resolve())
-              .then(() => _maybeStartOrContinueFsaCloudUpload(trackType, track))
-              .catch(e => console.warn(`onFlush cloud-upload queue failed for ${trackType}:`, e));
-          };
-        }
         return track;
       })
       .catch(e => {
@@ -98,14 +84,6 @@ async function _persistChunk(blob, trackType, ext, index, epoch, sessionId, uplo
       // track's fsaOpenPromises entry is cleared above.
       try {
         await fsaCloseTrackFile(track);
-        if (track.cloud) {
-          // The salvaged bytes are about to go up through the old
-          // whole-chunk-0 path instead — any multipart upload already
-          // in progress for this track is now orphaned, so abort it rather
-          // than leaving it sitting in the bucket forever.
-          try { await _postJson('/api/upload/cloud/abort', { session_id: SESSION_ID, key: track.cloud.key, upload_id: track.cloud.uploadId }); } catch (abortErr) {}
-          try { localStorage.removeItem(_cloudMarkerKey(SESSION_ID, identity, trackType, track.cloudEpoch)); } catch (e2) {}
-        }
         fsaFailedTracks[groupKey] = track;
       } catch (closeErr) {
         console.warn(`_persistChunk: could not close failed FSA file for ${trackType} — data written before the failure is lost:`, closeErr);
@@ -336,118 +314,6 @@ async function recoverOrphanedChunks() {
     }
     stale.forEach(k => localStorage.removeItem(k));
   } catch (e) {}
-}
-
-// A cloud multipart upload started by _uploadFsaTrackDirectToCloud survives
-// entirely outside this page — the bytes already in the bucket don't go away
-// if the tab crashes/closes/reloads before /cloud/complete fires — but
-// nothing would otherwise ever finish it. On every join, sweep localStorage
-// for markers an interrupted cloud upload left behind and resume each one:
-// ask the bucket which parts already landed (GET /cloud/parts), reopen the
-// same local file via the persisted FSA directory grant, and upload only
-// what's still missing.
-async function _resumeCloudUpload(markerKey, parsed, sessionId, forIdentity, trackType, epoch, dirHandle) {
-  const fileHandle = await dirHandle.getFileHandle(parsed.fileName);
-  let file = await fileHandle.getFile();
-  // The on-disk copy of a raw-PCM audio track carries a 44-byte local-only
-  // WAV header (see fsaOpenTrackFile/_fsaWavHeader in fsa-store.js) that was
-  // never part of what got uploaded — every part number/offset already in
-  // the bucket (and every part _uploadFsaTrackDirectToCloud/
-  // _maybeStartOrContinueFsaCloudUpload uploads) is relative to the
-  // header-stripped file, exactly like the whole-file upload path strips it
-  // in _uploadOneTrack. Skipping this here would re-slice from byte 0 and
-  // hand back the wrong bytes for every part number.
-  if (trackType === 'audio' && parsed.ext === 'raw') file = file.slice(44);
-
-  let alreadyUploaded = [];
-  try {
-    const r = await fetch('/api/upload/cloud/parts?' + new URLSearchParams({ session_id: sessionId, key: parsed.key, upload_id: parsed.uploadId }));
-    ({ parts: alreadyUploaded } = await r.json());
-  } catch (e) {
-    console.warn(`recoverCloudUploads: could not list existing parts for ${markerKey}:`, e);
-  }
-
-  const abortController = new AbortController();
-  const uploaded = await _uploadCloudParts(sessionId, file, parsed.key, parsed.uploadId, parsed.partSize, alreadyUploaded, abortController);
-  if (!uploaded) {
-    console.warn(`recoverCloudUploads: could not finish resuming ${markerKey}`);
-    return;
-  }
-
-  await _postJson('/api/upload/cloud/complete', {
-    session_id: sessionId, participant: parsed.participant || '', identity: forIdentity,
-    track_type: trackType, epoch: epoch || '', ext: parsed.ext,
-    key: parsed.key, upload_id: parsed.uploadId, parts: uploaded,
-    ...(parsed.meta || {}),
-  });
-  try { localStorage.removeItem(markerKey); } catch (e) {}
-  recLog('recoverCloudUploads: resumed and completed %s', markerKey);
-}
-
-async function recoverCloudUploads() {
-  let markers;
-  try {
-    markers = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith('podbooth:cloud:')) markers.push(k);
-    }
-  } catch (e) {
-    return;
-  }
-  if (markers.length === 0) return;
-
-  // Standalone recovery sweep, not part of a _doUploadAllRecordedChunks pass
-  // — reset the banner counters here so _uploadCloudParts's `+=` (meant to
-  // accumulate across multiple tracks within one pass) doesn't pile on top
-  // of whatever was left over from a previous pass and push the displayed
-  // progress past 100%.
-  uploadStats.queued = 0;
-  uploadStats.completed = 0;
-
-  const dirHandle = await fsaGetDirectory();
-  for (const markerKey of markers) {
-    let parsed;
-    try {
-      parsed = JSON.parse(localStorage.getItem(markerKey));
-    } catch (e) {
-      try { localStorage.removeItem(markerKey); } catch (e2) {}
-      continue;
-    }
-    // Format: podbooth:cloud:{sessionId}:{identity}:{trackType}:{epoch} — the
-    // trailing three parts are all validated at write time to be
-    // colon-free (session/identity are opaque IDs, epoch matches _EPOCH_RE).
-    const parts = markerKey.split(':');
-    if (parts.length < 6 || !parsed || !parsed.key || !parsed.uploadId || !parsed.fileName) {
-      try { localStorage.removeItem(markerKey); } catch (e) {}
-      continue;
-    }
-    const [, , sessionId, forIdentity, trackType, epoch] = parts;
-
-    if (!dirHandle) {
-      recLog('recoverCloudUploads: no FSA directory access, cannot resume %s', markerKey);
-      continue;
-    }
-    // Two tabs on the same session (or a tab left open across a reload)
-    // could otherwise both see the same "missing" parts from /cloud/parts,
-    // both upload them, and both call /cloud/complete — the second
-    // complete_multipart_upload would just fail server-side. Same Web Locks
-    // exclusivity pattern as recoverOrphanedChunks's group lock.
-    const resumeOne = () => _resumeCloudUpload(markerKey, parsed, sessionId, forIdentity, trackType, epoch, dirHandle);
-    const lockName = `podbooth-recover-cloud:${sessionId}:${forIdentity}:${trackType}:${epoch}`;
-    try {
-      if (navigator.locks && navigator.locks.request) {
-        await navigator.locks.request(lockName, { ifAvailable: true }, async (lock) => {
-          if (!lock) { recLog('recoverCloudUploads: %s held by another tab, skipping', lockName); return; }
-          await resumeOne();
-        });
-      } else {
-        await resumeOne();
-      }
-    } catch (e) {
-      console.warn(`recoverCloudUploads: resume failed for ${markerKey}:`, e);
-    }
-  }
 }
 
 // Keep retrying a failing chunk for this long before giving up. The per-track
@@ -900,267 +766,6 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
 // already uploads at.
 const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
 
-// ── Direct-to-cloud upload (FSA tracks only) ────────────────────────────────
-// A clean FSA track (never failed over to IndexedDB) normally slices its
-// closed local file and POSTs each slice through this server — but this
-// server's link to guests can be much slower than guests' own uplinks (see
-// the direct-cloud-upload plan). When DIRECT_CLOUD_UPLOAD_ENABLED, upload
-// straight from the browser to the configured S3-compatible backend via
-// presigned multipart URLs instead: the server never sees these bytes until
-// it pulls the finished object back down over its own link. Falls back to
-// the server-proxied slice path (return null) if anything about the cloud
-// path can't even get started.
-
-function _cloudMarkerKey(sessionId, forIdentity, trackType, epoch) {
-  return `podbooth:cloud:${sessionId}:${forIdentity}:${trackType}:${epoch}`;
-}
-
-// User-facing toggle (see the checkbox in the rec-status-popover, wired in
-// studio.html) for whether an FSA track's multipart upload should be started
-// and fed during recording, or only after stop as before. Off by request
-// still gets the whole-file-at-stop cloud upload if DIRECT_CLOUD_UPLOAD_ENABLED
-// is on — this only controls the *incremental* part of it. Defaults to on;
-// persisted per-browser since it's a bandwidth/CPU-during-recording trade-off
-// the participant is best placed to make for their own machine/connection.
-const INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY = 'podbooth:incrementalCloudUpload';
-
-function _incrementalCloudUploadAllowed() {
-  if (typeof DIRECT_CLOUD_UPLOAD_ENABLED === 'undefined' || !DIRECT_CLOUD_UPLOAD_ENABLED) return false;
-  try {
-    return localStorage.getItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY) !== '0';
-  } catch (e) {
-    return true;
-  }
-}
-
-// Lazily starts the multipart upload for a track's cloud copy the first time
-// a flush gives us anything to send, rather than waiting for record-stop —
-// see _maybeStartOrContinueFsaCloudUpload, its only caller. total_size is
-// unknown this early in the recording, so the server-side participant-cap
-// check (which only runs when total_size > 0) is skipped for this call; the
-// cap still applies at every other track's own /cloud/start.
-async function _ensureFsaCloudStarted(trackType, track) {
-  track.cloudStartAttempted = true;
-  try {
-    const started = await _postJson('/api/upload/cloud/start', {
-      session_id: SESSION_ID, participant: displayName, identity,
-      track_type: trackType, epoch: track.cloudEpoch || '', ext: track.ext, total_size: 0,
-    });
-    track.cloud = {
-      key: started.key, uploadId: started.upload_id, partSize: started.part_size,
-      uploadedBytes: track.isRawAudio ? 44 : 0, nextPartNumber: 1, parts: [], failed: false,
-    };
-    const markerKey = _cloudMarkerKey(SESSION_ID, identity, trackType, track.cloudEpoch);
-    try {
-      localStorage.setItem(markerKey, JSON.stringify({
-        key: track.cloud.key, uploadId: track.cloud.uploadId, ext: track.ext,
-        partSize: track.cloud.partSize, fileName: track.fileHandle.name,
-        participant: displayName, meta: {},
-      }));
-    } catch (e) {}
-  } catch (e) {
-    console.warn(`_ensureFsaCloudStarted: /cloud/start failed for ${trackType}, will retry once with the whole file at stop:`, e);
-    track.cloud = null;
-  }
-}
-
-// Called after every flush of a clean (never-failed-over) FSA track. Uploads
-// as many full-size parts as are now available on disk, so that by the time
-// recording stops most of the file is already in the bucket and only the
-// tail needs to go up (see the `existingCloud` branch of
-// _uploadFsaTrackDirectToCloud). Never touches abortController/cancellation —
-// there's no user-facing cancel button until the post-stop upload phase, so a
-// permanently-failed part here just gives up on the cloud path for this
-// track (track.cloud.failed) and leaves the whole file to the server-proxied
-// slice fallback at stop instead of half-uploading it twice.
-async function _maybeStartOrContinueFsaCloudUpload(trackType, track) {
-  if (!track.cloudStartAttempted) await _ensureFsaCloudStarted(trackType, track);
-  if (!track.cloud || track.cloud.failed) return;
-  const headerOffset = track.isRawAudio ? 44 : 0;
-  const { partSize } = track.cloud;
-  while (track.flushedBytes - headerOffset - track.cloud.uploadedBytes >= partSize) {
-    const partNumber = track.cloud.nextPartNumber;
-    const physicalStart = headerOffset + track.cloud.uploadedBytes;
-    let url;
-    try {
-      ({ url } = await _postJson('/api/upload/cloud/part-url', {
-        session_id: SESSION_ID, key: track.cloud.key, upload_id: track.cloud.uploadId, part_number: partNumber,
-      }));
-    } catch (e) {
-      console.warn(`_maybeStartOrContinueFsaCloudUpload: could not get part-url for ${trackType} part ${partNumber}, falling back to a whole-file upload at stop:`, e);
-      track.cloud.failed = true;
-      return;
-    }
-    const file = await track.fileHandle.getFile();
-    const piece = file.slice(physicalStart, physicalStart + partSize);
-    const etag = await _uploadCloudPartWithRetry(url, piece, null);
-    if (!etag) {
-      console.warn(`_maybeStartOrContinueFsaCloudUpload: part ${partNumber} for ${trackType} permanently failed mid-recording, falling back to a whole-file upload at stop`);
-      track.cloud.failed = true;
-      return;
-    }
-    track.cloud.parts.push({ part_number: partNumber, etag });
-    track.cloud.uploadedBytes += partSize;
-    track.cloud.nextPartNumber++;
-  }
-}
-
-async function _postJson(url, body) {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-
-// Uploads one part to a presigned URL, retrying on transient failure with the
-// same budget/backoff shape as uploadChunkWithRetry. Returns the part's ETag
-// on success, or null if cancelled/permanently failed.
-async function _uploadCloudPartWithRetry(url, piece, cancelSignal) {
-  const budget = Math.max(CHUNK_RETRY_BUDGET_MS, _uploadTimeoutForSize(piece.size) * 2);
-  const deadline = Date.now() + budget;
-  let attempt = 0;
-  while (true) {
-    if (cancelSignal?.aborted) return null;
-    attempt++;
-    try {
-      const r = await fetch(url, { method: 'PUT', body: piece, signal: cancelSignal || undefined });
-      if (r.ok) {
-        const etag = r.headers.get('ETag') || r.headers.get('etag');
-        if (!etag) throw new Error('part upload response missing ETag');
-        return etag;
-      }
-      throw new Error(`HTTP ${r.status}`);
-    } catch (err) {
-      if (cancelSignal?.aborted) return null;
-      console.warn(`Cloud part upload failing, attempt ${attempt}:`, err);
-      if (Date.now() >= deadline) {
-        console.error(`Cloud part permanently lost after ${Math.round(budget / 1000)}s of retries`);
-        return null;
-      }
-      await new Promise(res => {
-        const timer = setTimeout(res, Math.min(1000 * attempt, 15000));
-        if (cancelSignal) cancelSignal.addEventListener('abort', () => { clearTimeout(timer); res(); }, { once: true });
-      });
-    }
-  }
-}
-
-// Slices `file` into partSize pieces, requests a presigned URL per part not
-// already in `alreadyUploaded` (used by the resume sweep — see
-// recoverCloudUploads), and PUTs them directly to the bucket with bounded
-// concurrency. Returns the full sorted parts list (already-uploaded +
-// newly-uploaded) on success, or null if any part is unrecoverable.
-async function _uploadCloudParts(sessionId, file, key, uploadId, partSize, alreadyUploaded, abortController) {
-  const totalParts = Math.max(1, Math.ceil(file.size / partSize));
-  const parts = alreadyUploaded.map(p => ({ part_number: p.part_number, etag: p.etag }));
-  const alreadyDone = new Set(alreadyUploaded.map(p => p.part_number));
-  const remaining = [];
-  for (let i = 1; i <= totalParts; i++) {
-    if (!alreadyDone.has(i)) remaining.push(i);
-  }
-  // Count every part (not just the ones still to upload) so a resume that
-  // skips already-landed parts shows e.g. "1/3 done" instead of a banner
-  // that looks like it restarted from scratch at "0/2".
-  uploadStats.queued += totalParts;
-  uploadStats.completed += alreadyDone.size;
-  refreshUploadBanner();
-  const ok = await _uploadPoolRun(remaining, async (partNumber) => {
-    if (abortController.signal.aborted) return false;
-    const start = (partNumber - 1) * partSize;
-    const piece = file.slice(start, start + partSize);
-    let url;
-    try {
-      ({ url } = await _postJson('/api/upload/cloud/part-url', { session_id: sessionId, key, upload_id: uploadId, part_number: partNumber }));
-    } catch (e) {
-      console.error(`_uploadCloudParts: could not get part-url for part ${partNumber}:`, e);
-      uploadHasError = true;
-      return false;
-    }
-    const etag = await _uploadCloudPartWithRetry(url, piece, abortController.signal);
-    if (!etag) {
-      if (abortController.signal.aborted) uploadCancelled = true;
-      else uploadHasError = true;
-      return false;
-    }
-    parts.push({ part_number: partNumber, etag });
-    uploadStats.completed++;
-    refreshUploadBanner();
-    return true;
-  });
-  return ok ? parts : null;
-}
-
-// `existingCloud` (from _ensureFsaCloudStarted/_maybeStartOrContinueFsaCloudUpload)
-// lets a track that already started its multipart upload — and possibly
-// uploaded some parts — mid-recording pick up where it left off instead of
-// starting a second, competing multipart upload for the same file. null/
-// undefined means no incremental upload happened for this track (feature
-// off, or the track never flushed enough to trigger it, or the file is small
-// enough it never crossed one part size) — start fresh here exactly as
-// before, now that the real total size is known.
-async function _uploadFsaTrackDirectToCloud(trackType, file, epoch, ext, abortController, fileNameHint, existingCloud) {
-  const markerKey = _cloudMarkerKey(SESSION_ID, identity, trackType, epoch);
-  let key, uploadId, partSize, alreadyUploaded;
-  if (existingCloud) {
-    ({ key, uploadId, partSize } = existingCloud);
-    alreadyUploaded = existingCloud.parts;
-  } else {
-    try {
-      const started = await _postJson('/api/upload/cloud/start', {
-        session_id: SESSION_ID, participant: displayName, identity,
-        track_type: trackType, epoch: epoch || '', ext, total_size: file.size,
-      });
-      ({ key, upload_id: uploadId, part_size: partSize } = started);
-    } catch (e) {
-      console.warn('_uploadFsaTrackDirectToCloud: /cloud/start failed, falling back to server-proxied upload:', e);
-      return null;
-    }
-    alreadyUploaded = [];
-  }
-  // Snapshot the finalize meta (format/sample_rate/channels/expected_duration_s)
-  // now, while it's still in memory, and persist it alongside the marker. If
-  // the tab dies before /cloud/complete fires, pendingFinalizeMeta is gone on
-  // reload — without this, a resumed upload would transcode with server
-  // defaults (48kHz/1ch/"container") instead of the track's real parameters.
-  const metaKey = `${trackType}::${epoch}`;
-  const meta = pendingFinalizeMeta[metaKey] || {};
-  try {
-    localStorage.setItem(markerKey, JSON.stringify({ key, uploadId, ext, partSize, fileName: fileNameHint, participant: displayName, meta }));
-  } catch (e) {}
-
-  const parts = await _uploadCloudParts(SESSION_ID, file, key, uploadId, partSize, alreadyUploaded, abortController);
-  if (!parts) {
-    if (abortController.signal.aborted) {
-      // Explicit user cancel — abort the multipart upload so the bucket
-      // doesn't keep an orphaned incomplete upload around forever, and drop
-      // the resume marker since a cancelled recording isn't retried
-      // automatically (resuming it would just fail against the now-aborted
-      // upload_id).
-      try { await _postJson('/api/upload/cloud/abort', { session_id: SESSION_ID, key, upload_id: uploadId }); } catch (e) {}
-      try { localStorage.removeItem(markerKey); } catch (e) {}
-    }
-    return false;
-  }
-
-  try {
-    await _postJson('/api/upload/cloud/complete', {
-      session_id: SESSION_ID, participant: displayName, identity,
-      track_type: trackType, epoch: epoch || '', ext, key, upload_id: uploadId, parts,
-      ...meta,
-    });
-  } catch (e) {
-    console.error(`_uploadFsaTrackDirectToCloud: /cloud/complete failed for ${trackType}:`, e);
-    uploadHasError = true;
-    return false;
-  }
-  delete pendingFinalizeMeta[metaKey];
-  try { if (localStorage.getItem(markerKey)) localStorage.removeItem(markerKey); } catch (e) {}
-  return true;
-}
-
 async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, groupChunks, abortController, epoch) {
   // enqueueChunk's writes are chained onto _persistQueues[trackType] but not
   // awaited by the caller (MediaRecorder's onstop isn't async-aware), so the
@@ -1180,13 +785,6 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
   // local whole-file upload and IndexedDB chunk uploads can both apply to
   // the same track.
   const localTrack = fsaTrack || failedTrack;
-  // The last flush's cloud-part upload (see onFlush in _fsaTrackFor) runs in
-  // the background and may still be in flight here — closing the file and
-  // snapshotting track.cloud.parts/uploadedBytes before it settles would let
-  // the tail upload below re-cover byte ranges that part is still in the
-  // middle of sending under a different part number, corrupting the
-  // assembled object with overlapping/duplicated ranges.
-  if (localTrack && localTrack.cloudQueue) await localTrack.cloudQueue;
   if (localTrack) {
     recLog('_uploadAllRecordedChunks: closing local file and uploading %s whole (%d bytes)', trackType, localTrack.bytesWritten);
     let file = await fsaCloseTrackFile(localTrack);
@@ -1222,41 +820,18 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
       if (ok) uploadStats.completed++;
       refreshUploadBanner();
     } else {
-      let cloudResult = null;
-      if (typeof DIRECT_CLOUD_UPLOAD_ENABLED !== 'undefined' && DIRECT_CLOUD_UPLOAD_ENABLED) {
-        if (localTrack.cloud && localTrack.cloud.failed) {
-          // A part upload permanently failed mid-recording — don't retry the
-          // same multipart upload with a fresh whole-file attempt (that would
-          // re-upload bytes already sitting in the bucket under a different
-          // part numbering). Abort it so the bucket doesn't keep an orphaned
-          // incomplete upload, and fall through to the server-proxied slice
-          // path below exactly as if cloud upload had never been available.
-          try { await _postJson('/api/upload/cloud/abort', { session_id: SESSION_ID, key: localTrack.cloud.key, upload_id: localTrack.cloud.uploadId }); } catch (e) {}
-          try { localStorage.removeItem(_cloudMarkerKey(SESSION_ID, identity, trackType, localTrack.cloudEpoch)); } catch (e) {}
-        } else {
-          const fileNameHint = file.name || (localTrack.fileHandle && localTrack.fileHandle.name) || undefined;
-          cloudResult = await _uploadFsaTrackDirectToCloud(trackType, file, epoch, localTrack.ext, abortController, fileNameHint, localTrack.cloud || null);
-        }
-      }
-      if (cloudResult !== null) {
-        // true: uploaded + /cloud/complete already sent (which also cleared
-        // pendingFinalizeMeta) — nothing more to do for this track. false:
-        // cancelled or permanently failed, same as the server-proxied path.
-        ok = cloudResult;
-      } else {
-        const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
-        uploadStats.queued += totalSlices;
+      const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
+      uploadStats.queued += totalSlices;
+      refreshUploadBanner();
+      const sliceIndices = Array.from({ length: totalSlices }, (_, i) => i);
+      ok = await _uploadPoolRun(sliceIndices, async (i) => {
+        const start = i * FSA_UPLOAD_SLICE_BYTES;
+        const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
+        const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, epoch, {}, SESSION_ID, identity, displayName, abortController.signal);
+        if (sliceOk) uploadStats.completed++;
         refreshUploadBanner();
-        const sliceIndices = Array.from({ length: totalSlices }, (_, i) => i);
-        ok = await _uploadPoolRun(sliceIndices, async (i) => {
-          const start = i * FSA_UPLOAD_SLICE_BYTES;
-          const piece = file.slice(start, start + FSA_UPLOAD_SLICE_BYTES);
-          const sliceOk = await uploadChunkWithRetry(piece, trackType, i, localTrack.ext, epoch, {}, SESSION_ID, identity, displayName, abortController.signal);
-          if (sliceOk) uploadStats.completed++;
-          refreshUploadBanner();
-          return sliceOk;
-        });
-      }
+        return sliceOk;
+      });
     }
     const wasCancelled = abortController.signal.aborted;
     delete fsaFailedTracks[groupKey];
@@ -1614,45 +1189,3 @@ function stopFilesPoll() {
   filesPollTimer = null;
 }
 
-// ── Studio-page toggle for incremental cloud upload ─────────────────────────
-// A toolbar button (not buried in a hover popover — a participant deciding
-// they want to stop background-uploading mid-recording needs to find this
-// fast) next to the screen-share button. "active" (the same highlighted
-// state btn-mic/btn-screen use) means on. document is undefined in the
-// vitest harness (plain node, no DOM), so every DOM touch here is guarded.
-function _incrementalUploadToggleBtn() {
-  return typeof document === 'undefined' ? null : document.getElementById('btn-incremental-upload');
-}
-
-function _initIncrementalCloudUploadToggle() {
-  const btn = _incrementalUploadToggleBtn();
-  if (!btn) return;
-  const on = _incrementalCloudUploadAllowed();
-  btn.classList.toggle('active', on);
-  btn.addEventListener('click', () => {
-    const nowOn = !btn.classList.contains('active');
-    btn.classList.toggle('active', nowOn);
-    try { localStorage.setItem(INCREMENTAL_CLOUD_UPLOAD_STORAGE_KEY, nowOn ? '1' : '0'); } catch (e) {}
-    btn.title = nowOn
-      ? "Upload while recording: ON — your local recording uploads to the cloud in the background as it's captured, so there's less to push when you stop. Click to turn off."
-      : 'Upload while recording: OFF — the whole recording uploads at once when you stop, as before. Click to turn back on.';
-  });
-}
-
-// The button is only meaningful once we know both that direct-to-cloud
-// upload is configured at all and that this participant actually has a
-// local (FSA) recording folder in play for the upcoming take — called from
-// startLocalRecording right after fsaDirHandle is (re)resolved, since that's
-// the only point either of those can change. Turning it off mid-recording
-// (_incrementalCloudUploadAllowed is read live, not cached) only stops any
-// *new* part uploads from being kicked off — an already-started multipart
-// upload for a track just keeps being fed by its own onFlush hook, since
-// half-abandoning it would waste the parts already sent.
-function _updateIncrementalCloudToggleVisibility() {
-  const btn = _incrementalUploadToggleBtn();
-  if (!btn) return;
-  const show = typeof DIRECT_CLOUD_UPLOAD_ENABLED !== 'undefined' && DIRECT_CLOUD_UPLOAD_ENABLED && !!fsaDirHandle;
-  btn.style.display = show ? '' : 'none';
-}
-
-_initIncrementalCloudUploadToggle();

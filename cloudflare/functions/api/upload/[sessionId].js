@@ -23,7 +23,7 @@
 
 import { notifyEditorUpload } from '../../_discord.js';
 
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024; // 5 GB
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // Keep in sync with FOLDER_LABELS in functions/_discord.js and knownSources
 // in index.html — a folder added here needs the same addition in both, or
 // its files silently land in index.html's "other" bucket / show an
@@ -37,7 +37,7 @@ const ALLOWED_FOLDERS  = new Set(['full', 'speakers', 'video']);
 // (the single-request path below is the only one MAX_UPLOAD_BYTES itself
 // actually gates).
 const PART_MAX_BYTES   = 64 * 1024 * 1024; // 64 MB — matches the app server's own multipart part size
-const MAX_PARTS        = Math.ceil(MAX_UPLOAD_BYTES / PART_MAX_BYTES); // 80
+const MAX_PARTS        = Math.ceil(MAX_UPLOAD_BYTES / PART_MAX_BYTES); // 160
 
 async function sha256Hex(str) {
   const buf  = new TextEncoder().encode(str);
@@ -196,7 +196,7 @@ export async function onRequestPost({ request, env, params, waitUntil }) {
 
   const file = form.get('file');
   if (!file || typeof file.arrayBuffer !== 'function') return err(400, 'Missing file field');
-  if (file.size > MAX_UPLOAD_BYTES) return err(413, 'File too large (max 5 GB)');
+  if (file.size > MAX_UPLOAD_BYTES) return err(413, 'File too large (max 10 GB)');
 
   const filename = safeFilename(file.name);
   if (!filename) return err(400, 'Invalid filename');

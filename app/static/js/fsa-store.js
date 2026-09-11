@@ -235,21 +235,6 @@ async function fsaFlushTrackFile(track) {
   track.writable = await track.fileHandle.createWritable({ keepExistingData: true });
   await track.writable.seek(track.bytesWritten);
   track.flushedBytes = track.bytesWritten;
-  // Optional hook (set by upload.js when direct-to-cloud upload is in play):
-  // a flush is the only point at which bytes written so far are guaranteed
-  // committed to the real on-disk file and safe to read back with
-  // fileHandle.getFile(), so it's also the only safe point to hand a
-  // finished byte range off as a multipart upload part mid-recording.
-  // Deliberately NOT awaited: this hook PUTs the part straight to the
-  // bucket over the network, which can take far longer than a local disk
-  // write — awaiting it here would stall every subsequent chunk write for
-  // this track (they're all serialized behind this same flush call) until
-  // that PUT finishes, backing up MediaRecorder/PCM chunks in memory for as
-  // long as the upload takes. The hook is responsible for its own ordering
-  // (see the per-track cloud queue in upload.js's _fsaTrackFor).
-  if (track.onFlush) {
-    try { track.onFlush(); } catch (e) { console.warn('fsaFlushTrackFile: onFlush hook failed:', e); }
-  }
 }
 
 async function fsaCloseTrackFile(track) {

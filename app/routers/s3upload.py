@@ -220,7 +220,9 @@ async def _build_manifest_files(loop, objs: list[dict], r2_meta: dict, expiry_se
 
 async def _upload_export_files(session_id: str, session) -> None:
     """Generate OTIO/FCPXML/Reaper project files and upload to sessions/{id}/exports/."""
-    from app.routers.export import _resolve_runs, _build_otio_json, _build_fcpxml, _build_reaper_rpp, _safe_name
+    from app.routers.export import (
+        _resolve_runs, _read_markers, _build_otio_json, _build_fcpxml, _build_reaper_rpp, _safe_name,
+    )
 
     try:
         runs = await _resolve_runs(session)
@@ -231,11 +233,12 @@ async def _upload_export_files(session_id: str, session) -> None:
     if not runs:
         return
 
+    markers = _read_markers(session)
     safe = _safe_name(session.title)
     exports = {
-        f"{safe}.otio":   ("application/json", _build_otio_json(session.title, runs)),
-        f"{safe}.fcpxml": ("application/xml",  _build_fcpxml(session.title, runs)),
-        f"{safe}.rpp":    ("text/plain",        _build_reaper_rpp(session.title, runs)),
+        f"{safe}.otio":   ("application/json", _build_otio_json(session.title, runs, markers)),
+        f"{safe}.fcpxml": ("application/xml",  _build_fcpxml(session.title, runs, markers)),
+        f"{safe}.rpp":    ("text/plain",        _build_reaper_rpp(session.title, runs, markers)),
     }
 
     loop = asyncio.get_running_loop()
