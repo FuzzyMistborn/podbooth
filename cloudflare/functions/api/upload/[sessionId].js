@@ -20,6 +20,13 @@
 // DISCORD_UPLOAD_WEBHOOK_URL (a Pages secret, separate from PodBooth's own
 // DISCORD_WEBHOOK_URL so uploads can post to a different channel) — see
 // functions/_discord.js and shouldNotify() below for the batching.
+//
+// Every successful upload also patches sessions/{sessionId}/manifest.json in
+// R2 to add (or replace, on re-upload of the same filename) the new file's
+// entry — otherwise it would only ever show up in the portal's file list once
+// the PodBooth backend happens to rebuild the manifest for some other reason
+// (a participant upload, cloudsync, or the host hitting "refresh"), which
+// this edge-only upload path never triggers. See addFileToManifest() below.
 
 import { notifyEditorUpload } from '../../_discord.js';
 
@@ -87,6 +94,43 @@ async function shouldNotify(env, sessionId) {
   }
   await env.R2_BUCKET.put(markerKey, String(Date.now()));
   return true;
+}
+
+// Keep in sync with _file_source in app/routers/s3upload.py, which derives
+// the same "production_*" source labels from an object's key path once the
+// PodBooth backend rebuilds the manifest itself.
+const FOLDER_SOURCES = {
+  full: 'production_full',
+  speakers: 'production_speakers',
+  video: 'production_video',
+};
+
+// Adds (or replaces, keyed on R2 object key) this upload's entry in the
+// session's manifest.json so it shows up in the portal's file list without
+// waiting on the PodBooth backend to rebuild the manifest for an unrelated
+// reason. download_url points at this Function's own /api/download route
+// rather than an S3 presigned URL, since presigning needs the backend's S3
+// credentials, which aren't available here.
+//
+// Read-modify-write against a per-request Worker with no locking: two
+// uploads completing at nearly the same instant can race and one file's
+// entry can be lost. Acceptable for now — a host "refresh" or the next
+// upload's own read will reconcile it — but note this if it turns out to
+// bite in practice.
+async function addFileToManifest(env, { sessionId, manifestKey, manifest, origin, token, folder, filename, key, sizeBytes }) {
+  const entry = {
+    key,
+    filename,
+    size_bytes: sizeBytes,
+    download_url: `${origin}/api/download/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}&key=${encodeURIComponent(key)}`,
+    uploader: 'Editor',
+    uploaded_at: new Date().toISOString(),
+    source: FOLDER_SOURCES[folder] || 'production',
+  };
+  const files = Array.isArray(manifest.files) ? manifest.files.filter(f => f.key !== key) : [];
+  files.push(entry);
+  const updated = { ...manifest, files };
+  await env.R2_BUCKET.put(manifestKey, JSON.stringify(updated));
 }
 
 export async function onRequestPost({ request, env, params, waitUntil }) {
@@ -165,9 +209,17 @@ export async function onRequestPost({ request, env, params, waitUntil }) {
         return err(400, `Complete failed: ${e.message}`);
       }
       // Outside the try/catch above: the upload itself already succeeded, so a
-      // problem building/dispatching the notification must not be reported to
-      // the client as a failed upload.
+      // problem building/dispatching the notification (or the manifest patch)
+      // must not be reported to the client as a failed upload.
       waitUntil((async () => {
+        try {
+          await addFileToManifest(env, {
+            sessionId, manifestKey, manifest, origin: url.origin, token,
+            folder, filename, key, sizeBytes: obj.size,
+          });
+        } catch (e) {
+          console.warn(`Failed to patch manifest for ${key}: ${e && e.message}`);
+        }
         if (await shouldNotify(env, sessionId)) {
           await notifyEditorUpload({
             webhookUrl: env.DISCORD_UPLOAD_WEBHOOK_URL,
@@ -208,6 +260,14 @@ export async function onRequestPost({ request, env, params, waitUntil }) {
   });
 
   waitUntil((async () => {
+    try {
+      await addFileToManifest(env, {
+        sessionId, manifestKey, manifest, origin: url.origin, token,
+        folder, filename, key, sizeBytes: file.size,
+      });
+    } catch (e) {
+      console.warn(`Failed to patch manifest for ${key}: ${e && e.message}`);
+    }
     if (await shouldNotify(env, sessionId)) {
       await notifyEditorUpload({
         webhookUrl: env.DISCORD_UPLOAD_WEBHOOK_URL,
