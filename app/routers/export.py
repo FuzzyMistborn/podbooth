@@ -157,6 +157,18 @@ async def _resolve_runs(session) -> list[dict]:
                         "filename": filename,
                         "duration_s": dur,
                     }
+                    continue
+            # Cloud-only tracks (e.g. the participant local-recording-upload
+            # endpoint, which never writes a local copy) still carry a known
+            # duration recorded at upload time — use that instead of skipping
+            # the track entirely.
+            known_dur = run.get("durations", {}).get(filename)
+            if known_dur:
+                resolved_tracks[track_type] = {
+                    "path": path,
+                    "filename": filename,
+                    "duration_s": known_dur,
+                }
         if resolved_tracks:
             result.append({
                 "participant": run["participant"],

@@ -21,6 +21,7 @@ Files land under:
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import re
@@ -45,6 +46,8 @@ from app.routers.cloudsync import (
     cloud_upload_enabled,
     run_upload,
 )
+from app.routers.export import _probe_duration_s
+from app.routers.upload import _metadata_lock, _save_run_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +137,35 @@ def _validate_content_type(content_type: str | None, filename: str) -> None:
     raise HTTPException(
         status_code=415,
         detail=f"Content-Type '{mime}' is not allowed. File must be audio or video.",
+    )
+
+
+async def _register_local_upload_run(
+    session, slug: str, track_type: str, filename: str, duration_s: float,
+) -> None:
+    """Record a whole-file local upload in recording_metadata.json so export
+    generation (_resolve_runs) can find it, reusing the same take for an
+    existing run missing this track, or starting a new take otherwise."""
+    session_dir = Path(settings.recordings_dir) / session.dir_name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = session_dir / "recording_metadata.json"
+
+    async with _metadata_lock:
+        data: dict = {}
+        if metadata_path.exists():
+            try:
+                data = json.loads(metadata_path.read_text())
+            except Exception:
+                data = {}
+        matching = [r for r in data.get("runs", []) if r.get("slug") == slug]
+        take = next((r["take"] for r in matching if track_type not in r.get("tracks", {})), None)
+        if take is None:
+            take = max((r["take"] for r in matching), default=0) + 1
+
+    part_dir = session_dir / slug
+    await _save_run_metadata(
+        part_dir, epoch_ms=0, nametake=(slug, take),
+        track_type=track_type, filename=filename, expected_duration_s=duration_s,
     )
 
 
@@ -238,6 +270,12 @@ async def start_local_upload(
 
     file_size = tmp_path.stat().st_size
 
+    # Probe duration while the temp file still exists — it's deleted right
+    # after upload, and this is the only local copy that will ever exist, so
+    # export generation (_resolve_runs) has no other way to learn it.
+    duration_s = await _probe_duration_s(tmp_path)
+    track_type = "video" if (file.content_type or "").startswith("video/") else "audio"
+
     async def _run_and_cleanup():
         try:
             await run_upload(upload_id, _local_upload_status, [item], backends)
@@ -256,6 +294,10 @@ async def start_local_upload(
                                 "uploader": safe_participant or "local-upload",
                             })
                     await models.touch(session_id)
+                    if duration_s > 0:
+                        await _register_local_upload_run(
+                            session, safe_participant or "guest", track_type, filename, duration_s,
+                        )
                     from app.routers.s3upload import schedule_manifest_auto_refresh
                     schedule_manifest_auto_refresh(session_id)
         finally:

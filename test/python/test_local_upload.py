@@ -199,3 +199,68 @@ def test_status_endpoint_rejects_non_uuid_upload_id(client, session, recordings_
         headers={"X-Upload-Token": session.upload_token},
     )
     assert r.status_code == 400
+
+
+def test_successful_upload_is_visible_to_export_generation(client, session, recordings_dir, one_backend, monkeypatch):
+    # A file uploaded through this endpoint never touches recordings_dir (it's
+    # streamed straight to cloud storage from a tempfile that's deleted right
+    # after), so unlike the WebRTC chunk-merge path, recording_metadata.json
+    # must be updated by this endpoint itself, or _resolve_runs (export.py)
+    # silently finds nothing and the editor-link/export-* endpoints produce
+    # empty OTIO/FCPXML/Reaper files with no error surfaced anywhere.
+    import asyncio
+
+    async def _fake_probe(_path):
+        return 12.5
+
+    async def _fake_touch(_session_id):
+        pass
+
+    monkeypatch.setattr(localupload, "_probe_duration_s", _fake_probe)
+    # models.touch() persists all sessions to disk under its own global lock,
+    # shared across every test in the process. Under TestClient's per-test
+    # event loop, a prior test's background task can leave that lock held
+    # forever (the loop it was awaiting on is gone), wedging this one — not a
+    # scenario the real long-lived server loop hits. Stub it out here since
+    # session persistence timing isn't what this test is about.
+    monkeypatch.setattr(localupload.models, "touch", _fake_touch)
+
+    r = _upload(client, session, filename="clip.wav", content_type="audio/wav", participant="Alice")
+    assert r.status_code == 200
+    upload_id = r.json()["upload_id"]
+
+    import time
+    status = {}
+    for _ in range(50):
+        sr = client.get(
+            f"/api/session/{session.id}/local-upload/{upload_id}/status",
+            headers={"X-Upload-Token": session.upload_token},
+        )
+        status = sr.json()
+        if status.get("status") == "done":
+            break
+        time.sleep(0.02)
+    assert status.get("status") == "done"
+
+    # The metadata write happens in the same background task, after the
+    # "done" status flag, via a further await — TestClient's background
+    # event loop only makes progress on pending tasks while a request is in
+    # flight, so keep polling the status endpoint (any request will do) to
+    # give it more turns.
+    metadata_path = recordings_dir / "test-session" / "recording_metadata.json"
+    for _ in range(50):
+        if metadata_path.exists():
+            break
+        client.get(
+            f"/api/session/{session.id}/local-upload/{upload_id}/status",
+            headers={"X-Upload-Token": session.upload_token},
+        )
+        time.sleep(0.02)
+    assert metadata_path.exists()
+
+    from app.routers import export
+    runs = asyncio.run(export._resolve_runs(session))
+    assert len(runs) == 1
+    assert runs[0]["participant"] == "Alice"
+    assert runs[0]["tracks"]["audio"]["filename"] == "clip.wav"
+    assert runs[0]["tracks"]["audio"]["duration_s"] == 12.5
