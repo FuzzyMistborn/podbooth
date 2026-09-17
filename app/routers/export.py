@@ -30,6 +30,9 @@ def _xml_escape(value: str) -> str:
             .replace(">", "&gt;"))
 
 
+_FFMPEG_TIME_RE = re.compile(r'time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)')
+
+
 async def _probe_duration_s(path: Path) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -42,7 +45,33 @@ async def _probe_duration_s(path: Path) -> float:
         )
         stdout, _ = await proc.communicate()
         val = stdout.decode().strip()
-        return float(val) if val else 0.0
+        dur = float(val) if val else 0.0
+    except Exception:
+        dur = 0.0
+    if dur > 0:
+        return dur
+    return await _probe_duration_slow(path)
+
+
+async def _probe_duration_slow(path: Path) -> float:
+    """Fallback for containers with no duration in the header — e.g. raw
+    MediaRecorder WebM output uploaded via the participant local-upload
+    endpoint, which is never server-side remuxed the way the WebRTC
+    chunk-merge pipeline's output is. Decodes the whole file and reads the
+    last "time=" progress line ffmpeg prints, which reflects what was
+    actually decoded regardless of container metadata."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-i", str(path), "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        matches = _FFMPEG_TIME_RE.findall(stderr.decode(errors="replace"))
+        if not matches:
+            return 0.0
+        h, m, s = matches[-1]
+        return int(h) * 3600 + int(m) * 60 + float(s)
     except Exception:
         return 0.0
 
