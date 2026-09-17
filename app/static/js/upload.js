@@ -894,6 +894,13 @@ function _clearEpochMarker(forIdentity, epoch) {
 
 async function waitForUploads() {
   const epoch = recordingEpoch;
+  // uploadStats was tracking local chunk *persistence* for the whole
+  // recording that just ended (see enqueueChunk) — reset it before the
+  // banner's first paint, or "Uploading N/M chunks" flashes that leftover
+  // write-through count for a frame before _doUploadAllRecordedChunks
+  // overwrites it with the real (much smaller) upload count moments later.
+  uploadStats.queued = 0;
+  uploadStats.completed = 0;
   showUploadBanner('uploading');
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
