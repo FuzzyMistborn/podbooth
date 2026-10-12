@@ -1112,19 +1112,11 @@ function showAlertBanner(text) {
 
 // ── Session end ──────────────────────────────────────────────────────────────
 
-// A recording kept on local disk (see _pendingLocalUploads in upload.js)
-// isn't lost by leaving — it's still in the participant's folder — but the
-// host won't get it unless it's uploaded, so say so before they go.
-const LOCAL_NOT_UPLOADED_MSG =
-  'Your recording is saved on this computer but hasn\'t been uploaded to PodBooth yet.';
-
 async function leaveSession() {
   const busy = uploadPending || isRecording;
   const msg = busy
     ? 'Recordings are still uploading — leaving now may lose data.\n\nLeave anyway?'
-    : hasPendingLocalUploads()
-      ? `${LOCAL_NOT_UPLOADED_MSG}\n\nLeave anyway?`
-      : 'Leave this session?';
+    : 'Leave this session?';
   if (!confirm(msg)) return;
 
   if (isRecording) {
@@ -1147,9 +1139,7 @@ async function endSession() {
   const busy = uploadPending || isRecording;
   const msg = busy
     ? 'End this session for everyone? Recordings will finish uploading before you are redirected.'
-    : hasPendingLocalUploads()
-      ? `${LOCAL_NOT_UPLOADED_MSG}\n\nEnd this session for everyone anyway?`
-      : 'End this session for everyone?';
+    : 'End this session for everyone?';
   if (!confirm(msg)) return;
 
   if (isRecording) {
@@ -1192,22 +1182,11 @@ async function handleSessionEnded() {
   _clearEpochMarker(identity, _endedEpoch);
   window.removeEventListener('beforeunload', _unloadGuard);
 
-  // A guest whose recording stayed on local disk would never get the chance
-  // to send it if we redirected now — keep them here with the 'Upload now'
-  // banner (uploads are still accepted for a grace period after the session
-  // ends — see _POST_END_UPLOAD_GRACE in upload.py) and leave once it's up.
-  // Not to the local-upload page: that would invite uploading the same
-  // files a second time.
-  if (hasPendingLocalUploads()) {
-    showUploadBanner('local');
-    showToast?.('The host ended the session — upload your recording before you leave');
-    onLocalUploadsDrained = () => setTimeout(() => { window.location.href = '/'; }, 3000);
-    return;
-  }
-
-  // If cloud upload is configured, send guests to the local upload page so they
-  // can upload their own recordings without needing to copy a link separately.
-  if (typeof UPLOAD_TOKEN === 'string' && UPLOAD_TOKEN && typeof SESSION_ID === 'string') {
+  // Recordings upload automatically above, so a guest normally has nothing
+  // left to do. Only if that upload failed, send them to the local upload
+  // page to send their recording by hand (a successful upload sent there
+  // would just invite a duplicate).
+  if (uploadHasError && typeof UPLOAD_TOKEN === 'string' && UPLOAD_TOKEN && typeof SESSION_ID === 'string') {
     const params = new URLSearchParams({ token: UPLOAD_TOKEN });
     if (typeof displayName === 'string' && displayName) params.set('participant', displayName);
     window.location.href = `/local-upload/${SESSION_ID}?${params}`;

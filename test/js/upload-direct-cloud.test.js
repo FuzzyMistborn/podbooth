@@ -106,7 +106,7 @@ describe('direct-to-cloud upload', () => {
     const fsaOpenPromises = { [`audio::${epoch}`]: Promise.resolve({ ext: 'raw', bytesWritten: file.size, isRawAudio: true }) };
 
     const ok = await _uploadOneTrack('audio', fsaOpenPromises, {}, [], new AbortController(), epoch,
-      { forceUpload: true, finalizeMeta: { format: 'pcm', sample_rate: 48000, channels: 2 } });
+      { finalizeMeta: { format: 'pcm', sample_rate: 48000, channels: 2 } });
 
     expect(ok).toBe(true);
     expect(calls.complete[0]).toMatchObject({ total_size: 2500, part_count: 3, ext: 'raw' });
