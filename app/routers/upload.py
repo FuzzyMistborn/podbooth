@@ -720,6 +720,13 @@ async def finalize_track(request: Request):
 # but the last; 16 MB keeps a failed part cheap to resend while a 60-minute
 # 1080p video stays well under S3's 10,000-part limit.
 CLOUD_UPLOAD_PART_BYTES = 16 * 1024 * 1024
+# /cloud/start presigns every part's URL up front, so once an upload has
+# started the browser only needs this server again to finish it — a guest
+# whose route to this server is flaky (the case direct upload exists for)
+# shouldn't have the upload stall on a per-part request here. 12h covers a
+# multi-GB track on a slow link; an expired URL is refreshed via /part-url.
+CLOUD_PART_URL_EXPIRY_S = 12 * 60 * 60
+_S3_MAX_PARTS = 10000
 
 _CLOUD_CONTENT_TYPES = {"raw": "application/octet-stream", "webm": "video/webm", "mp4": "video/mp4"}
 
@@ -779,16 +786,28 @@ async def cloud_upload_start(request: Request):
         if existing_bytes + total_size > cap_bytes:
             raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
 
+    part_count = -(-total_size // CLOUD_UPLOAD_PART_BYTES)
+    if part_count > _S3_MAX_PARTS:
+        raise HTTPException(status_code=413, detail="Track too large for a cloud upload")
+
     key = _cloud_raw_key(session_id, directory, track_type, epoch, ext)
     try:
         upload_id = await asyncio.to_thread(s3.create_multipart_upload, key, _CLOUD_CONTENT_TYPES[ext])
+        # Signing is local (no request to the bucket), so this is cheap even
+        # for a thousand-part video.
+        part_urls = await asyncio.to_thread(lambda: [
+            s3.generate_part_upload_url(key, upload_id, n, CLOUD_PART_URL_EXPIRY_S)
+            for n in range(1, part_count + 1)
+        ])
     except Exception as e:
-        logger.error("cloud_upload_start: create_multipart_upload failed for %s: %s", key, e)
+        logger.error("cloud_upload_start: could not start %s: %s", key, e)
         raise HTTPException(status_code=503, detail="Could not start cloud upload")
 
-    logger.info("cloud_upload_start: %s/%s epoch=%r key=%s total_size=%d",
-                track_type, participant, epoch, key, total_size)
-    return JSONResponse({"key": key, "upload_id": upload_id, "part_size": CLOUD_UPLOAD_PART_BYTES})
+    logger.info("cloud_upload_start: %s/%s epoch=%r key=%s total_size=%d parts=%d",
+                track_type, participant, epoch, key, total_size, part_count)
+    return JSONResponse({
+        "key": key, "upload_id": upload_id, "part_size": CLOUD_UPLOAD_PART_BYTES, "part_urls": part_urls,
+    })
 
 
 @router.post("/cloud/part-url")
