@@ -251,6 +251,43 @@ When R2 is configured, hosts can generate a time-limited editor link that lets a
 
 The R2 bucket must allow public GET requests on the `sessions/` prefix (for the manifest) and have CORS configured to permit requests from the editor portal domain. Actual file downloads use presigned URLs and do not require public bucket access.
 
+### Direct-to-Cloud Recording Upload
+
+When an S3-compatible bucket is configured (R2, B2 or `S3_*`), recordings are uploaded **straight from each participant's browser to the bucket** after recording stops, instead of through the PodBooth server. The server then downloads each file over its own connection and processes it as usual, deleting the bucket copy once processing succeeds. This helps most when guests have a poor route to the PodBooth server itself: they only need a good connection to Cloudflare (or your S3 provider).
+
+If a browser can't reach the bucket, or anything in the upload fails, that recording automatically falls back to uploading through the PodBooth server, and nothing is lost.
+
+| Variable | Required | Description |
+|---|---|---|
+| `DIRECT_CLOUD_UPLOAD` | No | Set `false` to always upload through the PodBooth server. Default: `true` (takes effect only when a bucket is configured) |
+
+The bucket needs a **CORS rule allowing `PUT` from your PodBooth site**, because browsers send the files directly. In the R2 dashboard: bucket → Settings → CORS Policy, then add this rule alongside any existing ones (for example the editor portal's):
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://podbooth.example.com"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["*"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Without it, uploads still work, but every recording falls back to the slower upload through the server. Raw uploads live under `<upload path>/raw-uploads/` only until they're processed. It's also worth keeping (or adding) a lifecycle rule that aborts incomplete multipart uploads after a day or so, which cleans up after a guest who closes their browser mid-upload.
+
+### Video Processing
+
+Every participant's webcam and screen recording is re-encoded to H.264 after upload, and grid exports encode again. This is by far the heaviest work the server does, so it is limited by default:
+
+| Variable | Required | Description |
+|---|---|---|
+| `MAX_CONCURRENT_VIDEO_ENCODES` | No | How many video encodes run at once; the rest wait their turn ("Waiting to convert…"). Default: `1` |
+| `VIDEO_ENCODE_PRESET` | No | x264 speed preset. `veryfast` is roughly 2–4× faster than `medium` for somewhat larger files. Default: `veryfast` |
+| `VIDEO_ENCODE_CRF` | No | Quality (lower = better and larger). Grid exports use this + 2. Default: `18` |
+| `FFMPEG_THREADS` | No | Thread cap per ffmpeg process; `0` = all cores. Default: `0` |
+| `FFMPEG_NICE` | No | Lower CPU priority for ffmpeg so the site and live calls stay responsive; `0` disables. Default: `10` |
+
 ### Editor Portal (Cloudflare Pages)
 
 The `cloudflare/` directory in this repo is a self-contained Cloudflare Pages app implementing the editor portal referenced above — it's deployed separately from PodBooth itself (Pages doesn't run this Python app, and PodBooth's server never talks to it directly). Deploy it as its own Pages project:

@@ -23,7 +23,13 @@
 //   node scripts/soak-upload.mjs --url https://podbooth.example --api-key KEY \
 //     [--password HOST_PASSWORD] [--minutes 60] [--guests 1] [--no-video] \
 //     [--video-mbps 12] [--speed unlimited|normal|low] \
-//     [--fail-rate 0.02] [--stall-rate 0.01] [--out soak-results]
+//     [--fail-rate 0.02] [--stall-rate 0.01] [--out soak-results] [--no-direct-cloud]
+//
+// Direct-to-cloud: by default participants try the same direct-to-bucket
+// upload a browser would (falling back to the server if the instance has no
+// bucket configured); --no-direct-cloud forces the upload-through-the-server
+// path. Node doesn't enforce CORS, so this can't check the bucket's CORS
+// rule — one real browser recording still needs to confirm that.
 //
 // --url/--api-key/--password can also come from SOAK_URL, SOAK_API_KEY and
 // SOAK_PASSWORD, to keep them out of shell history.
@@ -56,7 +62,7 @@ function parseArgs(argv) {
     url: process.env.SOAK_URL || '', apiKey: process.env.SOAK_API_KEY || '',
     password: process.env.SOAK_PASSWORD || '', minutes: 60, guests: 1, video: true, videoMbps: 12,
     speed: 'unlimited', failRate: 0, stallRate: 0, out: 'soak-results', child: '',
-    assemblyTimeoutMin: 60, cleanup: false,
+    assemblyTimeoutMin: 60, cleanup: false, directCloud: true,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -75,6 +81,7 @@ function parseArgs(argv) {
       case '--out': args.out = next(); break;
       case '--assembly-timeout-min': args.assemblyTimeoutMin = Number(next()); break;
       case '--cleanup': args.cleanup = true; break;
+      case '--no-direct-cloud': args.directCloud = false; break;
       case '--child': args.child = next(); break; // internal: JSON participant spec
       case '-h': case '--help':
         console.log(fs.readFileSync(__filename, 'utf8').split('\nimport ')[0].trim());
@@ -281,7 +288,8 @@ async function orchestrate(args) {
     if (!r) continue;
     console.log(`  ${r.displayName.padEnd(14)} final banner: ${String(r.finalBanner).padEnd(10)} ` +
       `${fmtMB(r.bytesUploaded)} in ${fmtDur(r.uploadMs)} (${fmtMB(r.bytesUploaded / Math.max(1, r.uploadMs / 1000))}/s), ` +
-      `${r.chunks} chunks, ${r.retries} retried attempts, ${r.failedAttempts} failed attempts` +
+      `via ${r.cloudParts && r.serverChunks ? `cloud (${r.cloudParts} parts) + server (${r.serverChunks} chunks, fallback)` : r.cloudParts ? `cloud (${r.cloudParts} parts)` : `server (${r.serverChunks} chunks)`}, ` +
+      `${r.retries} retried attempts, ${r.failedAttempts} failed attempts` +
       (r.lostChunks.length ? `, LOST: ${r.lostChunks.join(' ')}` : '') +
       (r.uploadHasError ? ', uploadHasError=true' : ''));
     if (r.clientAssemblyWaitMs != null) {
@@ -398,6 +406,7 @@ async function participant(args, spec) {
     let fsaOpenPromises = {};
     let fsaTakeNumberPromise = null;
     let fsaFailedTracks = {};
+    let DIRECT_CLOUD_UPLOAD = ${args.directCloud};
     let _pendingLocalUploads = [];
     let _localUploadRun = null;
     let onLocalUploadsDrained = null;
@@ -417,10 +426,11 @@ async function participant(args, spec) {
   // need (and older undici rejects on bodies over 64KB anyway).
   const realFetch = globalThis.fetch;
   globalThis.fetch = (url, init = {}) => {
-    const full = typeof url === 'string' && url.startsWith('/') ? args.url + url : url;
+    const relative = typeof url === 'string' && url.startsWith('/');
+    const full = relative ? args.url + url : url;
     const { keepalive, ...rest } = init;
     const headers = { ...(rest.headers || {}) };
-    if (spec.hostCookie) headers.Cookie = spec.hostCookie;
+    if (spec.hostCookie && relative) headers.Cookie = spec.hostCookie;
     const res = realFetch(full, { ...rest, headers });
     if (typeof url === 'string' && url.includes('/assembly-status')) {
       // Mirror the processing meter the user would see, at most every 30s.
@@ -438,21 +448,21 @@ async function participant(args, spec) {
   // ── Transport: fetch-based stand-in for _xhrUploadChunk ───────────────────
   const STALL_MS = g('UPLOAD_STALL_TIMEOUT_MS');
   const HARD_CAP_MS = g('UPLOAD_STALL_HARD_CAP_MS');
-  const stats = { attempts: 0, failedAttempts: 0, bytesUploaded: 0, perChunk: new Map() };
+  const stats = { attempts: 0, failedAttempts: 0, bytesUploaded: 0, perChunk: new Map(), cloudParts: 0, serverChunks: 0 };
   const attemptsFor = (key) => stats.perChunk.get(key) || 0;
 
-  globalThis._xhrUploadChunk = async (form, cancelSignal) => {
-    const key = `${form.get('track_type')}#${form.get('chunk_index')}`;
-    const size = form.get('file')?.size ?? 0;
-    const attempt = attemptsFor(key) + 1;
-    stats.perChunk.set(key, attempt);
+  // One upload attempt over fetch, with the same fault injection and
+  // per-attempt timeline for server chunks and direct-to-bucket parts.
+  const attempt = async (kind, key, size, cancelSignal, send) => {
+    const n = attemptsFor(key) + 1;
+    stats.perChunk.set(key, n);
     stats.attempts++;
     const started = Date.now();
     const abort = new AbortController();
     const onCancel = () => abort.abort();
     cancelSignal?.addEventListener('abort', onCancel);
     const hardCap = setTimeout(() => abort.abort(), HARD_CAP_MS);
-    const record = (outcome, extra = {}) => event({ type: 'chunk', key, attempt, size, ms: Date.now() - started, outcome, ...extra });
+    const record = (outcome, extra = {}) => event({ type: kind, key, attempt: n, size, ms: Date.now() - started, outcome, ...extra });
     try {
       if (Math.random() < args.stallRate) {
         // A connection that stops making progress: the real XHR's stall
@@ -461,10 +471,11 @@ async function participant(args, spec) {
         throw new DOMException('aborted', 'AbortError');
       }
       if (Math.random() < args.failRate) throw new Error('network error (injected)');
-      const r = await realFetch(`${args.url}/api/upload/chunk`, { method: 'POST', body: form, signal: abort.signal });
+      const r = await send(abort.signal);
       const body = r.ok ? '' : (await r.text()).slice(0, 200);
       if (r.ok) {
         stats.bytesUploaded += size;
+        stats[kind === 'part' ? 'cloudParts' : 'serverChunks']++;
         _recordUploadBytes(size);
       } else {
         stats.failedAttempts++;
@@ -480,6 +491,15 @@ async function participant(args, spec) {
       cancelSignal?.removeEventListener('abort', onCancel);
     }
   };
+
+  globalThis._xhrUploadChunk = (form, cancelSignal) => attempt(
+    'chunk', `${form.get('track_type')}#${form.get('chunk_index')}`, form.get('file')?.size ?? 0, cancelSignal,
+    (signal) => realFetch(`${args.url}/api/upload/chunk`, { method: 'POST', body: form, signal }),
+  );
+  globalThis._xhrPutPart = (url, blob, cancelSignal) => attempt(
+    'part', `part#${new URL(url).searchParams.get('partNumber')}@${new URL(url).pathname.split('/').pop()}`, blob.size, cancelSignal,
+    (signal) => realFetch(url, { method: 'PUT', body: blob, signal, duplex: 'half' }),
+  );
 
   // Banner state transitions, timestamped — this is what the user would see.
   const banners = [];
@@ -596,6 +616,7 @@ async function participant(args, spec) {
   const summary = {
     displayName: spec.displayName, identity: spec.identity, epoch, chunks: totalChunks,
     bytesUploaded: stats.bytesUploaded, attempts: stats.attempts, retries, failedAttempts: stats.failedAttempts,
+    cloudParts: stats.cloudParts, serverChunks: stats.serverChunks,
     lostChunks: lost, uploadHasError: g('uploadHasError'), finalBanner, uploadMs, uploadPassMs,
     clientAssemblyWaitMs: assemblingAt && afterAssembling ? afterAssembling - assemblingAt : null,
     banners,

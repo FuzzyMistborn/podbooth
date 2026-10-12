@@ -25,6 +25,7 @@ import stat
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiofiles
@@ -612,15 +613,23 @@ async def upload_chunk(
     return JSONResponse({"ok": True, "chunk": chunk_index})
 
 
-@router.post("/finalize")
-async def finalize_track(request: Request):
-    """
-    Called by the client AFTER all chunks for a track have finished uploading.
-    Body: { session_id, participant, track_type,
-            format: "pcm" | "container",
-            epoch, ext, sample_rate?, channels? }
-    """
-    data = await request.json()
+@dataclass
+class _Finalize:
+    session_id: str
+    participant: str
+    track_type: str
+    fmt: str
+    epoch: str
+    sample_rate: int
+    channels: int
+    expected_duration_s: float | None
+    start_time_ms: float | None
+    directory: Path
+
+
+def _parse_finalize(data: dict) -> _Finalize:
+    """Validate a track's finalize payload (shared by /finalize and
+    /cloud/complete) and persist its start_time_ms sidecar."""
     session_id = data.get("session_id")
     participant = data.get("participant")
     identity = data.get("identity", "")
@@ -661,8 +670,27 @@ async def finalize_track(request: Request):
             sidecar.write_text(json.dumps({"start_time_ms": start_time_ms}))
         except (TypeError, ValueError, OSError):
             start_time_ms = None
+    else:
+        start_time_ms = None
 
-    logger.info("finalize: %s/%s epoch=%r fmt=%s start_time_ms=%s", track_type, participant, epoch, fmt, start_time_ms)
+    return _Finalize(session_id, participant, track_type, fmt, epoch, sample_rate, channels,
+                     expected_duration_s, start_time_ms, directory)
+
+
+@router.post("/finalize")
+async def finalize_track(request: Request):
+    """
+    Called by the client AFTER all chunks for a track have finished uploading.
+    Body: { session_id, participant, track_type,
+            format: "pcm" | "container",
+            epoch, ext, sample_rate?, channels? }
+    """
+    data = await request.json()
+    f = _parse_finalize(data)
+    session_id, participant, track_type, fmt, epoch = f.session_id, f.participant, f.track_type, f.fmt, f.epoch
+    sample_rate, channels, expected_duration_s, directory = f.sample_rate, f.channels, f.expected_duration_s, f.directory
+
+    logger.info("finalize: %s/%s epoch=%r fmt=%s start_time_ms=%s", track_type, participant, epoch, fmt, f.start_time_ms)
     in_progress_key = (str(directory), track_type, epoch)
     if in_progress_key not in _assembly_in_progress:
         _assembly_in_progress.add(in_progress_key)
@@ -675,6 +703,237 @@ async def finalize_track(request: Request):
         task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
 
     return JSONResponse({"ok": True, "assembling": True})
+
+
+# ── Direct-to-cloud upload ───────────────────────────────────────────────────
+# After stop, a browser uploads each raw track straight to the S3-compatible
+# bucket (R2/B2/S3) in parts via presigned URLs, instead of through this
+# server — for many guests this server's own peering is the bottleneck, and
+# Cloudflare's edge isn't. /cloud/complete then finishes the upload and
+# returns immediately; this server pulls the object down over its own link in
+# the background (shown as "Downloading" in the processing meter), hands it
+# to the normal transcode pipeline, and deletes the bucket copy once that
+# succeeds. Any track whose cloud upload can't start or fails falls back to
+# the chunked upload above (see _uploadTrackDirectToCloud in upload.js).
+
+# Part size for direct-to-cloud uploads. S3/R2 require ≥5 MB for every part
+# but the last; 16 MB keeps a failed part cheap to resend while a 60-minute
+# 1080p video stays well under S3's 10,000-part limit.
+CLOUD_UPLOAD_PART_BYTES = 16 * 1024 * 1024
+
+_CLOUD_CONTENT_TYPES = {"raw": "application/octet-stream", "webm": "video/webm", "mp4": "video/mp4"}
+
+
+def direct_cloud_upload_enabled() -> bool:
+    return settings.direct_cloud_upload and s3.s3_upload_configured()
+
+
+def _cloud_raw_key(session_id: str, directory: Path, track_type: str, epoch: str, ext: str) -> str:
+    prefix = s3.upload_prefix()
+    dirpart = f"{prefix}/" if prefix else ""
+    return f"{dirpart}raw-uploads/{session_id}/{directory.name}/{track_type}_{epoch}.{ext}"
+
+
+def _require_cloud_key_in_session(key: str, session_id: str) -> None:
+    """The part-url/abort/complete calls carry a key+upload_id the client got
+    from /cloud/start — refuse one that wasn't minted for this session."""
+    prefix = s3.upload_prefix()
+    dirpart = f"{prefix}/" if prefix else ""
+    if not isinstance(key, str) or not key.startswith(f"{dirpart}raw-uploads/{session_id}/"):
+        raise HTTPException(status_code=403, detail="Key does not belong to this session")
+
+
+@router.post("/cloud/start")
+async def cloud_upload_start(request: Request):
+    """Begin a direct-to-cloud multipart upload for one stopped track."""
+    data = await request.json()
+    session_id = data.get("session_id")
+    participant = data.get("participant")
+    identity = data.get("identity", "")
+    track_type = data.get("track_type")
+    epoch = data.get("epoch", "")
+    ext = data.get("ext")
+    try:
+        total_size = int(data.get("total_size", 0))
+    except (TypeError, ValueError):
+        total_size = 0
+
+    if not direct_cloud_upload_enabled():
+        raise HTTPException(status_code=503, detail="Direct-to-cloud upload is not configured")
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_joined_participant(session, participant, identity)
+    if track_type not in ("audio", "video", "screen"):
+        raise HTTPException(status_code=400, detail="Invalid track_type")
+    if ext not in _CLOUD_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid ext")
+    _validate_epoch(epoch)
+    if total_size <= 0:
+        raise HTTPException(status_code=400, detail="Invalid total_size")
+
+    directory = participant_dir(session, participant, identity)
+    if settings.max_participant_upload_gb > 0:
+        cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
+        existing_bytes = await asyncio.to_thread(_dir_size_bytes, directory)
+        if existing_bytes + total_size > cap_bytes:
+            raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
+
+    key = _cloud_raw_key(session_id, directory, track_type, epoch, ext)
+    try:
+        upload_id = await asyncio.to_thread(s3.create_multipart_upload, key, _CLOUD_CONTENT_TYPES[ext])
+    except Exception as e:
+        logger.error("cloud_upload_start: create_multipart_upload failed for %s: %s", key, e)
+        raise HTTPException(status_code=503, detail="Could not start cloud upload")
+
+    logger.info("cloud_upload_start: %s/%s epoch=%r key=%s total_size=%d",
+                track_type, participant, epoch, key, total_size)
+    return JSONResponse({"key": key, "upload_id": upload_id, "part_size": CLOUD_UPLOAD_PART_BYTES})
+
+
+@router.post("/cloud/part-url")
+async def cloud_upload_part_url(request: Request):
+    """Presigned PUT URL for one part of an in-progress cloud upload."""
+    data = await request.json()
+    session_id = data.get("session_id")
+    key = data.get("key")
+    upload_id = data.get("upload_id")
+    try:
+        part_number = int(data.get("part_number"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid part_number")
+    if not session_id or not key or not upload_id or not (1 <= part_number <= 10000):
+        raise HTTPException(status_code=400, detail="Missing session_id/key/upload_id/part_number")
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_cloud_key_in_session(key, session_id)
+    # The bytes go browser → bucket, so there's no on-disk total to check the
+    # way /chunk does — bound the part count by the cap instead.
+    if settings.max_participant_upload_gb > 0:
+        cap_bytes = int(settings.max_participant_upload_gb * 1024 ** 3)
+        if part_number > max(1, -(-cap_bytes // CLOUD_UPLOAD_PART_BYTES)):
+            raise HTTPException(status_code=413, detail="Participant upload storage limit reached")
+    try:
+        url = await asyncio.to_thread(s3.generate_part_upload_url, key, upload_id, part_number)
+    except Exception as e:
+        logger.error("cloud_upload_part_url: failed for %s part %d: %s", key, part_number, e)
+        raise HTTPException(status_code=503, detail="Could not generate part upload URL")
+    return JSONResponse({"url": url})
+
+
+@router.post("/cloud/abort")
+async def cloud_upload_abort(request: Request):
+    """Best-effort abort, called when a client gives up on (or cancels) a
+    cloud upload so the bucket doesn't keep the incomplete parts."""
+    data = await request.json()
+    session_id = data.get("session_id")
+    key = data.get("key")
+    upload_id = data.get("upload_id")
+    if not session_id or not key or not upload_id:
+        raise HTTPException(status_code=400, detail="Missing session_id/key/upload_id")
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_cloud_key_in_session(key, session_id)
+    await asyncio.to_thread(s3.abort_multipart_upload, key, upload_id)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/cloud/complete")
+async def cloud_upload_complete(request: Request):
+    """Finish a track's cloud upload and queue its pull + transcode.
+
+    Body: the track's normal finalize payload (see /finalize) plus key,
+    upload_id, ext, part_count and total_size. Returns as soon as the bucket
+    has the complete object — the download back to this server runs in the
+    background (the old version did it inside this request, which for an
+    hour of video could outlast any proxy or browser timeout).
+    """
+    data = await request.json()
+    key = data.get("key")
+    upload_id = data.get("upload_id")
+    ext = data.get("ext")
+    try:
+        part_count = int(data.get("part_count"))
+        total_size = int(data.get("total_size"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid part_count/total_size")
+    if ext not in _CLOUD_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid ext")
+    if not key or not upload_id:
+        raise HTTPException(status_code=400, detail="Missing key/upload_id")
+    _require_cloud_key_in_session(key, data.get("session_id") or "")
+    f = _parse_finalize(data)
+
+    completed = False
+    try:
+        parts = await asyncio.to_thread(s3.list_uploaded_parts, key, upload_id)
+    except Exception:
+        parts = None  # upload_id is gone once completed — see the retry case below
+    if parts is not None:
+        landed = sorted(p["part_number"] for p in parts)
+        landed_bytes = sum(p["size"] for p in parts)
+        if landed != list(range(1, part_count + 1)) or landed_bytes != total_size:
+            # Never complete a partial upload: the client falls back to the
+            # normal server upload, which still has every byte locally.
+            logger.error("cloud_upload_complete: %s has parts %s (%d bytes), expected 1..%d (%d bytes)",
+                         key, landed[:5] + (["..."] if len(landed) > 5 else []), landed_bytes, part_count, total_size)
+            raise HTTPException(status_code=409, detail="Uploaded parts don't match — falling back")
+        try:
+            await asyncio.to_thread(s3.complete_multipart_upload, key, upload_id, parts)
+            completed = True
+        except Exception as e:
+            logger.warning("cloud_upload_complete: complete_multipart_upload failed for %s: %s", key, e)
+    # A retry can land after a previous attempt already completed the upload
+    # (S3 then rejects the stale upload_id) — the object existing means it's
+    # fine to carry on to the pull.
+    if not completed and not await asyncio.to_thread(s3.object_exists, key):
+        raise HTTPException(status_code=503, detail="Could not complete cloud upload")
+
+    in_progress_key = (str(f.directory), f.track_type, f.epoch)
+    if in_progress_key not in _assembly_in_progress:
+        _assembly_in_progress.add(in_progress_key)
+        _report_progress(f.directory, f.track_type, f.epoch, "downloading", 0.0)
+        task = asyncio.create_task(_pull_cloud_source_and_assemble(f, key, ext))
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
+
+    logger.info("cloud_upload_complete: %s/%s epoch=%r key=%s (%d parts, %d bytes) — pulling down",
+                f.track_type, f.participant, f.epoch, key, part_count, total_size)
+    return JSONResponse({"ok": True, "assembling": True})
+
+
+async def _pull_cloud_source_and_assemble(f: _Finalize, key: str, ext: str) -> None:
+    """Download a completed cloud upload, transcode it, and delete the bucket
+    copy only once the transcode has succeeded — until then it's the only
+    complete copy anywhere but the participant's own browser."""
+    epoch_tag = f"_{f.epoch}" if f.epoch else ""
+    source = f.directory / f"{f.track_type}{epoch_tag}_source.{ext}"
+
+    def on_progress(fraction: float) -> None:
+        _report_progress(f.directory, f.track_type, f.epoch, "downloading", _COMBINE_SHARE * fraction)
+
+    started = time.monotonic()
+    try:
+        size = await asyncio.to_thread(s3.download_object_to_path, key, source, on_progress)
+    except Exception as e:
+        logger.error("cloud pull: download failed for %s (left in bucket): %s", key, e)
+        source.unlink(missing_ok=True)
+        _report_progress(f.directory, f.track_type, f.epoch, "failed", 1.0)
+        return
+    if size <= 0:
+        logger.error("cloud pull: %s downloaded empty (left in bucket)", key)
+        source.unlink(missing_ok=True)
+        _report_progress(f.directory, f.track_type, f.epoch, "failed", 1.0)
+        return
+    logger.info("cloud pull: %s → %s (%d bytes in %.1fs)", key, source.name, size, time.monotonic() - started)
+
+    ok = await assemble_from_source(f.directory, f.track_type, f.fmt, f.sample_rate, f.channels, source,
+                                    f.epoch, f.participant, f.expected_duration_s)
+    if ok:
+        await asyncio.to_thread(s3.delete_object, key)
+    else:
+        logger.error("cloud pull: transcode failed for %s — keeping the bucket copy", key)
 
 
 async def assemble_track(
@@ -774,14 +1033,14 @@ async def assemble_from_source(
     epoch: str = "",
     participant: str = "",
     expected_duration_s: float | None = None,
-):
+) -> bool:
     """Direct-to-cloud entry point: `source` is already a complete, downloaded
     file (see /api/upload/cloud/complete) — there's nothing to gap-check or
-    concatenate, so skip straight to transcoding."""
+    concatenate, so skip straight to transcoding. Returns whether it worked."""
     nametake = await _assign_take(directory, epoch, participant)
     logger.info("assemble: %s/%s epoch=%r from downloaded cloud source, size=%d",
                 track_type, directory.name, epoch, source.stat().st_size)
-    await _transcode_source(directory, track_type, fmt, sample_rate, channels, epoch, nametake, source, [], expected_duration_s)
+    return await _transcode_source(directory, track_type, fmt, sample_rate, channels, epoch, nametake, source, [], expected_duration_s)
 
 
 async def _transcode_source(
@@ -795,7 +1054,9 @@ async def _transcode_source(
     source: Path,
     chunks: list[Path],
     expected_duration_s: float | None,
-):
+) -> bool:
+    """Transcode `source` into this track's final file. Returns whether the
+    transcode succeeded (on failure the source is kept as *.failed)."""
     # The output length ffmpeg's progress is measured against. Raw PCM's is
     # exact from its size; everything else uses the client-reported capture
     # length (None — an indeterminate meter — if it never sent one).
@@ -960,6 +1221,7 @@ async def _transcode_source(
         else:
             logger.error("assemble: screen ffmpeg failed for %s/%s", directory.name, epoch)
             source.rename(source.with_suffix(source.suffix + ".failed"))
+    return ok
 
 
 async def _try_merge_av(directory: Path, epoch: str = "", nametake=None, duration_s: float | None = None):

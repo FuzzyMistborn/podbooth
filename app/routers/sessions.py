@@ -15,7 +15,7 @@ from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
 from app.routers.upload import (
-    recover_orphaned_chunks, is_merging, has_assembly_task,
+    recover_orphaned_chunks, is_merging, has_assembly_task, direct_cloud_upload_enabled,
     _session_assembly_jobs, _assembly_progress_fraction, _resolve_participant_dir,
 )
 from app.config import settings, ASSET_VERSION, APP_VERSION
@@ -245,6 +245,10 @@ async def studio(request: Request, session_id: str, host_token: str = "", identi
             "livekit_url": settings.livekit_public_url,
             "base_url": settings.base_url,
             "cloud_upload_enabled": cloud_upload_enabled(),
+            # Distinct from cloud_upload_enabled (true for any post-hoc sync
+            # backend, WebDAV included): this gates browsers uploading raw
+            # tracks straight to the S3-compatible bucket after stop.
+            "direct_cloud_upload_enabled": direct_cloud_upload_enabled(),
             "outline_enabled": bool(settings.outline_api_url and settings.outline_api_key),
             "outline_doc_id": session.outline_doc_id,
             "upload_token": session.upload_token if (is_host or is_admitted_guest) else "",

@@ -144,12 +144,137 @@ def generate_download_url(key: str, expires_in: int = 604800) -> str:
     return url
 
 
+# ── Direct-to-cloud recording upload (multipart) ────────────────────────────
+# Browsers upload a stopped recording's raw tracks straight to the bucket in
+# parts via presigned URLs (see /api/upload/cloud/* in upload.py) instead of
+# through this server, whose own peering is the bottleneck for many guests;
+# the server then pulls the finished object down over its own link.
+
+
+def create_multipart_upload(key: str, content_type: str = "application/octet-stream") -> str:
+    """Start a multipart upload, returning its UploadId.
+
+    Unlike generate_upload_url, this isn't restricted to ALLOWED_CONTENT_TYPES —
+    it's used for raw recording sources (see /api/upload/cloud/start), not the
+    final deliverable types that editor delivery validates against."""
+    _validate_key(key)
+    s3 = get_client()
+    resp = s3.create_multipart_upload(Bucket=_bucket(), Key=key, ContentType=content_type)
+    return resp["UploadId"]
+
+
+def generate_part_upload_url(key: str, upload_id: str, part_number: int, expires_in: int = 3600) -> str:
+    """Presigned PUT URL for one part of a multipart upload."""
+    _validate_key(key)
+    s3 = get_client()
+    # Never log the returned URL — it is a bearer token
+    return s3.generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": _bucket(),
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=expires_in,
+    )
+
+
+def list_uploaded_parts(key: str, upload_id: str) -> list[dict]:
+    """Parts that have landed for a multipart upload, as
+    [{"part_number", "etag", "size"}, ...]. The server completes uploads from
+    this listing rather than from client-reported ETags, so the bucket's CORS
+    rule doesn't need to expose the ETag header to browsers."""
+    _validate_key(key)
+    s3 = get_client()
+    parts = []
+    paginator = s3.get_paginator("list_parts")
+    for page in paginator.paginate(Bucket=_bucket(), Key=key, UploadId=upload_id):
+        for p in page.get("Parts", []):
+            parts.append({"part_number": p["PartNumber"], "etag": p["ETag"], "size": p["Size"]})
+    return parts
+
+
+def complete_multipart_upload(key: str, upload_id: str, parts: list[dict]) -> None:
+    """Complete a multipart upload. `parts` is [{"part_number": int, "etag": str}, ...]."""
+    _validate_key(key)
+    s3 = get_client()
+    ordered = sorted(parts, key=lambda p: p["part_number"])
+    s3.complete_multipart_upload(
+        Bucket=_bucket(),
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": p["part_number"], "ETag": p["etag"]} for p in ordered]},
+    )
+
+
+def object_exists(key: str) -> bool:
+    """Whether `key` exists in the bucket — tells a retried /cloud/complete
+    (whose upload_id S3 has already invalidated by completing it) apart from
+    a genuine completion failure."""
+    from botocore.exceptions import BotoCoreError, ClientError
+    _validate_key(key)
+    s3 = get_client()
+    try:
+        s3.head_object(Bucket=_bucket(), Key=key)
+        return True
+    except (BotoCoreError, ClientError):
+        return False
+
+
+def abort_multipart_upload(key: str, upload_id: str) -> None:
+    """Best-effort abort of an incomplete multipart upload. Logs warning on error."""
+    try:
+        _validate_key(key)
+        get_client().abort_multipart_upload(Bucket=_bucket(), Key=key, UploadId=upload_id)
+    except Exception as e:
+        logger.warning("S3 abort_multipart_upload failed for %s: %s", key, e)
+
+
+def download_object_to_path(key: str, dest, on_progress=None) -> int:
+    """Stream an object down to a local path, returning bytes written.
+    on_progress(fraction) is called as it goes (from this worker thread)."""
+    from pathlib import Path as _Path
+    _validate_key(key)
+    dest = _Path(dest)
+    s3 = get_client()
+    obj = s3.get_object(Bucket=_bucket(), Key=key)
+    total = obj.get("ContentLength") or 0
+    body = obj["Body"]
+    written = 0
+    with open(dest, "wb") as f:
+        while True:
+            piece = body.read(8 * 1024 * 1024)
+            if not piece:
+                break
+            f.write(piece)
+            written += len(piece)
+            if on_progress and total:
+                on_progress(written / total)
+    return written
+
+
+def delete_object(key: str) -> None:
+    """Delete a single object. Logs warning on error but does not raise."""
+    try:
+        _validate_key(key)
+        get_client().delete_object(Bucket=_bucket(), Key=key)
+    except Exception as e:
+        logger.warning("S3 delete_object failed for %s: %s", key, e)
+
+
 def delete_session_objects(session_id: str, extra_prefixes: list[str] | None = None) -> int:
-    """Delete all objects under sessions/{session_id}/ and any extra_prefixes. Returns count deleted."""
+    """Delete all objects under sessions/{session_id}/, the session's raw
+    direct-to-cloud uploads, and any extra_prefixes. Returns count deleted."""
     from botocore.exceptions import BotoCoreError, ClientError
     s3 = get_client()
     bucket = _bucket()
-    prefixes = [f"sessions/{session_id}/"] + (extra_prefixes or [])
+    # Raw uploads are normally deleted as soon as the server has processed
+    # them, but one whose processing failed is deliberately kept — make sure
+    # it doesn't outlive its session.
+    prefix = upload_prefix()
+    raw = f"{prefix}/raw-uploads/{session_id}/" if prefix else f"raw-uploads/{session_id}/"
+    prefixes = [f"sessions/{session_id}/", raw] + (extra_prefixes or [])
     deleted = 0
     try:
         paginator = s3.get_paginator("list_objects_v2")
