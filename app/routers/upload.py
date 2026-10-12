@@ -19,7 +19,10 @@ How assembly works:
 import asyncio
 import json
 import logging
+import os
 import re
+import stat
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -96,6 +99,15 @@ def is_merging(directory: Path) -> bool:
     return any(key.startswith(prefix) for key in _merge_in_progress)
 
 
+def has_assembly_task(directory: Path) -> bool:
+    """True while any assembly task for this directory is still running —
+    covering its whole lifetime (concatenate, transcode, the probes after,
+    and the A/V merge it hands off to), not just the windows where chunk
+    files or a merge flag happen to be visible."""
+    d = str(directory)
+    return any(key[0] == d for key in _assembly_in_progress)
+
+
 def purge_session_state(session_dir: Path) -> None:
     """Drop every _merge_locks/_epoch_take_map/_dir_take_counter entry under
     session_dir — called from delete_session once a session (and its
@@ -111,10 +123,55 @@ def purge_session_state(session_dir: Path) -> None:
     dict-key deletion doesn't invalidate the object itself.
     """
     prefix = str(session_dir) + "/"  # participant dirs live one level under the session dir
-    for d in (_merge_locks, _epoch_take_map, _dir_take_counter):
+    for d in (_merge_locks, _epoch_take_map, _dir_take_counter, _assembly_progress):
         stale = [k for k in d if str(k[0] if isinstance(k, tuple) else k).startswith(prefix)]
         for k in stale:
             del d[k]
+
+# Live progress of server-side assembly, for the meter /assembly-status
+# feeds the client's post-upload banner. Keyed (str(directory), job, epoch)
+# where job is a track type or "merge" (the audio+video mux). Each value:
+#   stage:    "combining" (concatenating chunks) | "converting" (ffmpeg
+#             transcode) | "merging" | "done" | "failed"
+#   fraction: 0..1 for this job, or None while its length isn't known
+# Finished jobs stay (at 1.0) so the session-wide meter doesn't jump
+# backwards when one participant's track finishes ahead of another's;
+# they're pruned once stale (see _session_assembly_jobs).
+_assembly_progress: dict[tuple[str, str, str], dict] = {}
+_ASSEMBLY_PROGRESS_KEEP_S = 30 * 60
+# Share of a track job's meter spent concatenating chunks vs transcoding —
+# rough, but concatenation is a plain byte copy and much faster than ffmpeg.
+_COMBINE_SHARE = 0.1
+
+
+def _report_progress(directory: Path, job: str, epoch: str, stage: str, fraction: float | None) -> None:
+    _assembly_progress[(str(directory), job, epoch)] = {
+        "participant": directory.name,
+        "job": job,
+        "stage": stage,
+        "fraction": None if fraction is None else max(0.0, min(1.0, fraction)),
+        "updated": time.monotonic(),
+    }
+
+
+def _session_assembly_jobs(session_path: Path) -> list[dict]:
+    """Progress entries for every assembly job under this session, oldest
+    finished ones pruned."""
+    now = time.monotonic()
+    # Unfinished entries go too once they're older than any ffmpeg run could
+    # be (an assembly that bailed out early never reports done/failed).
+    stale = [k for k, v in _assembly_progress.items()
+             if now - v["updated"] > (_ASSEMBLY_PROGRESS_KEEP_S if v["stage"] in ("done", "failed")
+                                      else settings.ffmpeg_timeout_s + 60)]
+    for k in stale:
+        del _assembly_progress[k]
+    prefix = str(session_path) + "/"
+    return [
+        {k: v for k, v in entry.items() if k != "updated"}
+        for key, entry in sorted(_assembly_progress.items())
+        if key[0].startswith(prefix)
+    ]
+
 
 # Tracks (str(directory), track_type, epoch) tuples currently being assembled.
 # Prevents recover_orphaned_chunks from queuing duplicate tasks while ffmpeg runs.
@@ -147,8 +204,23 @@ _MAX_CHUNK_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB
 
 
 def _dir_size_bytes(directory: Path) -> int:
-    """Sum file sizes in a directory. Blocking (stat syscalls) — run via asyncio.to_thread."""
-    return sum(f.stat().st_size for f in directory.iterdir() if f.is_file())
+    """Sum file sizes in a directory. Blocking (stat syscalls) — run via asyncio.to_thread.
+
+    Files can vanish between iterdir() and stat(): concurrent chunk uploads
+    rename their .part temp files into place, and assembly deletes chunks
+    once transcoded. A vanished file just doesn't count — letting the
+    FileNotFoundError escape turned a concurrent upload into a 500 (and a
+    client retry) for an unrelated chunk.
+    """
+    total = 0
+    for f in directory.iterdir():
+        try:
+            st = f.stat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            total += st.st_size
+    return total
 
 # Matches chunk files in both epoch and no-epoch forms:
 #   audio_abc123_chunk_000000.raw   →  track=audio  epoch=abc123  ext=raw
@@ -648,11 +720,16 @@ async def assemble_track(
     # Byte-concatenate chunks in index order into one source file.
     source_ext = chunks[0].suffix  # .raw / .webm / .mp4
     source = directory / f"{track_type}{epoch_tag}_source{source_ext}"
+    copied = 0
+    _report_progress(directory, track_type, epoch, "combining", 0.0)
     async with aiofiles.open(source, "wb") as out:
         for chunk in chunks:
             async with aiofiles.open(chunk, "rb") as f:
                 while data := await f.read(1024 * 1024):
                     await out.write(data)
+                    copied += len(data)
+            _report_progress(directory, track_type, epoch, "combining",
+                             _COMBINE_SHARE * copied / max(1, total_bytes))
 
     await _transcode_source(directory, track_type, fmt, sample_rate, channels, epoch, nametake, source, chunks, expected_duration_s)
 
@@ -689,6 +766,22 @@ async def _transcode_source(
     chunks: list[Path],
     expected_duration_s: float | None,
 ):
+    # The output length ffmpeg's progress is measured against. Raw PCM's is
+    # exact from its size; everything else uses the client-reported capture
+    # length (None — an indeterminate meter — if it never sent one).
+    duration_s = expected_duration_s
+    if track_type == "audio" and fmt == "pcm" and sample_rate and channels:
+        try:
+            duration_s = source.stat().st_size / (sample_rate * channels * 4)
+        except OSError:
+            pass
+
+    def on_progress(fraction: float | None) -> None:
+        _report_progress(directory, track_type, epoch, "converting",
+                         None if fraction is None else _COMBINE_SHARE + (1 - _COMBINE_SHARE) * fraction)
+
+    on_progress(0.0 if duration_s else None)
+
     if track_type == "audio":
         if nametake:
             output = directory / _final_name("audio", *nametake, "wav")
@@ -714,13 +807,14 @@ async def _transcode_source(
                 "-ac", "2",
                 str(output),
             ]
-        ok = await _run_ffmpeg(cmd, directory, track_type)
+        ok = await _run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+        _report_progress(directory, track_type, epoch, "done" if ok else "failed", 1.0)
         if ok:
             logger.info("assemble: audio output %s size=%d", output.name, output.stat().st_size)
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
-            await _try_merge_av(directory, epoch, nametake)
+            await _try_merge_av(directory, epoch, nametake, duration_s=duration_s)
             if epoch and nametake:
                 epoch_ms = _decode_epoch_ms(epoch)
                 if epoch_ms is not None:
@@ -756,18 +850,20 @@ async def _transcode_source(
                 "-movflags", "+faststart",
                 str(noaudio),
             ]
-        ok = await _run_ffmpeg(cmd, directory, track_type)
+        ok = await _run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+        _report_progress(directory, track_type, epoch, "done" if ok else "failed", 1.0)
         if ok:
             ok = await _probe_has_video(noaudio)
             if not ok:
                 logger.error("assemble: video noaudio %s exists but has no readable video stream", noaudio.name)
                 noaudio.unlink(missing_ok=True)
+                _report_progress(directory, track_type, epoch, "failed", 1.0)
         if ok:
             logger.info("assemble: video noaudio %s size=%d", noaudio.name, noaudio.stat().st_size)
             for chunk in chunks:
                 chunk.unlink(missing_ok=True)
             source.unlink(missing_ok=True)
-            await _try_merge_av(directory, epoch, nametake)
+            await _try_merge_av(directory, epoch, nametake, duration_s=duration_s)
             if epoch and nametake:
                 epoch_ms = _decode_epoch_ms(epoch)
                 if epoch_ms is not None:
@@ -806,7 +902,8 @@ async def _transcode_source(
                 "-movflags", "+faststart",
                 str(output),
             ]
-        ok = await _run_ffmpeg(cmd, directory, track_type)
+        ok = await _run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+        _report_progress(directory, track_type, epoch, "done" if ok else "failed", 1.0)
         if ok:
             logger.info("assemble: screen output %s size=%d", output.name, output.stat().st_size)
             for chunk in chunks:
@@ -821,8 +918,10 @@ async def _transcode_source(
             source.rename(source.with_suffix(source.suffix + ".failed"))
 
 
-async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
-    """Merge epoch-matched video_noaudio + audio → video once both are ready."""
+async def _try_merge_av(directory: Path, epoch: str = "", nametake=None, duration_s: float | None = None):
+    """Merge epoch-matched video_noaudio + audio → video once both are ready.
+    duration_s is the take's length (from whichever track's transcode
+    triggered the merge), for the progress meter only."""
     key = f"{directory}|{epoch}"
     if key not in _merge_locks:
         _merge_locks[key] = asyncio.Lock()
@@ -896,11 +995,18 @@ async def _try_merge_av(directory: Path, epoch: str = "", nametake=None):
                 "-movflags", "+faststart",
                 str(video_out),
             ]
+        merge_duration_s = duration_s if duration_s and duration_s > 0 else None
+        _report_progress(directory, "merge", epoch, "merging", 0.0 if merge_duration_s else None)
         _merge_in_progress.add(key)
         try:
-            ok = await _run_ffmpeg(cmd, directory, "merge")
+            ok = await _run_ffmpeg(
+                cmd, directory, "merge",
+                on_progress=lambda f: _report_progress(directory, "merge", epoch, "merging", f),
+                duration_s=merge_duration_s,
+            )
         finally:
             _merge_in_progress.discard(key)
+        _report_progress(directory, "merge", epoch, "done" if ok else "failed", 1.0)
         if ok:
             logger.info("merge_av: done %s size=%d", video_out.name, video_out.stat().st_size)
             video_noaudio.unlink(missing_ok=True)
@@ -1042,13 +1148,48 @@ async def _probe_video_codec(source: Path) -> str:
         return ""
 
 
-async def _run_ffmpeg(cmd: list[str], directory: Path, track_type: str) -> bool:
+_FFMPEG_PROGRESS_RE = re.compile(rb"out_time_(?:us|ms)=(\d+)")
+
+
+async def _watch_ffmpeg_progress(path: Path, duration_s: float, on_progress) -> None:
+    """Poll the file ffmpeg's -progress writes to and report how far through
+    duration_s it is. Reads only the file's tail — it grows by a few lines
+    every half second for the whole run. out_time_ms is (despite its name)
+    microseconds, same as out_time_us; older ffmpeg only writes the former."""
+    while True:
+        await asyncio.sleep(1)
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4096))
+                tail = f.read()
+        except OSError:
+            continue
+        matches = _FFMPEG_PROGRESS_RE.findall(tail)
+        if matches:
+            on_progress(min(1.0, int(matches[-1]) / 1e6 / duration_s))
+
+
+async def _run_ffmpeg(cmd: list[str], directory: Path, track_type: str,
+                      on_progress=None, duration_s: float | None = None) -> bool:
+    # Progress goes to a temp file rather than a pipe so proc.communicate()
+    # (which drains stdout/stderr without deadlocking) stays as it was. Not in
+    # the participant directory: the dashboard lists everything there.
+    progress_path = None
+    watcher = None
+    if on_progress and duration_s and duration_s > 0:
+        fd, tmp = tempfile.mkstemp(prefix="pb_ffmpeg_progress_", suffix=".txt")
+        os.close(fd)
+        progress_path = Path(tmp)
+        cmd = [cmd[0], "-progress", str(progress_path), "-nostats", *cmd[1:]]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if progress_path:
+            watcher = asyncio.create_task(_watch_ffmpeg_progress(progress_path, duration_s, on_progress))
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=settings.ffmpeg_timeout_s)
         except asyncio.TimeoutError:
@@ -1063,3 +1204,8 @@ async def _run_ffmpeg(cmd: list[str], directory: Path, track_type: str) -> bool:
     except Exception as e:
         logger.error("Assembly failed (%s/%s): %s", directory.name, track_type, e)
         return False
+    finally:
+        if watcher:
+            watcher.cancel()
+        if progress_path:
+            progress_path.unlink(missing_ok=True)

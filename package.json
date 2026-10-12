@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "soak": "node --no-warnings scripts/soak-upload.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",

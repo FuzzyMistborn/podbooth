@@ -2565,6 +2565,20 @@ body.no-mirror .participant-tile.local video { transform: none; }
   border-radius: 2px;
   transition: width 0.3s ease;
 }
+/* Length not known yet (no job started, or no duration to measure against):
+   a sliding segment instead of a bar stuck at 0%. */
+.upload-progress-fill.indeterminate {
+  width: 30%;
+  animation: upload-progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes upload-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(340%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .upload-progress-fill.indeterminate { animation: none; width: 100%; opacity: 0.4; }
+}
+.upload-banner.assembling .upload-banner-label { white-space: normal; }
 .upload-speed-readout {
   align-self: flex-start;
   font-family: var(--font-mono);
