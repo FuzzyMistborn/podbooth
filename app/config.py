@@ -116,6 +116,17 @@ class Settings(BaseSettings):
     # has already finished. Empty (default) uploads to every enabled backend.
     cloud_upload_backend: str = ""
 
+    # After a recording stops, browsers upload its raw tracks straight to the
+    # S3-compatible bucket below (R2/B2/S3) in parts, and this server pulls
+    # them down over its own link — instead of every guest uploading through
+    # this server, whose peering is the bottleneck for many of them. Needs a
+    # CORS rule on the bucket allowing PUT from this site's origin (see
+    # README). Any track whose cloud upload can't start or fails falls back
+    # to the normal upload-to-server path automatically. Opt-in, since it
+    # needs that bucket CORS rule; only takes effect when a bucket is
+    # configured.
+    direct_cloud_upload: bool = False
+
     # S3-compatible object storage (for editor delivery)
     s3_endpoint_url: str = ""
     s3_region: str = "auto"

@@ -60,6 +60,14 @@ services:
     #   # B2_ACCESS_KEY_SECRET: your-b2-application-key
     #   # B2_BUCKET: my-podbooth-bucket
     #   # B2_UPLOAD_PATH: PodBooth
+    #   # Direct-to-cloud recording upload (needs a bucket above + CORS rule, see README):
+    #   # DIRECT_CLOUD_UPLOAD: "true"
+    #   # Video processing (defaults shown):
+    #   # MAX_CONCURRENT_VIDEO_ENCODES: 1
+    #   # VIDEO_ENCODE_PRESET: veryfast
+    #   # VIDEO_ENCODE_CRF: 18
+    #   # FFMPEG_THREADS: 0
+    #   # FFMPEG_NICE: 10
 
   podbooth-coturn:
     image: coturn/coturn:latest

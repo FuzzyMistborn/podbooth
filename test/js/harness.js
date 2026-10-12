@@ -80,6 +80,7 @@ export function installGlobals(overrides = {}) {
     screenEpochHistory: [],
     pendingFinalizeMeta: {},
     fsaDirHandle: null,
+    DIRECT_CLOUD_UPLOAD: false,
     _pendingLocalUploads: [],
     _localUploadRun: null,
     onLocalUploadsDrained: null,

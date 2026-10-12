@@ -438,6 +438,19 @@ let _uploadInFlightBytes = 0;
 // request streaming has no equivalent, so there's no way to distinguish
 // "still sending, just slow" from "completely stalled" with fetch alone.
 function _xhrUploadChunk(form, cancelSignal) {
+  return _xhrSend('POST', '/api/upload/chunk', form, cancelSignal);
+}
+
+// One part of a direct-to-cloud upload, PUT straight to the bucket via a
+// presigned URL (see _uploadTrackDirectToCloud).
+function _xhrPutPart(url, blob, cancelSignal) {
+  return _xhrSend('PUT', url, blob, cancelSignal);
+}
+
+// Shared transport: stall detection (UPLOAD_STALL_TIMEOUT_MS without
+// progress), a hard cap per attempt, cancellation, and live byte counts for
+// the speed readout and progress bar.
+function _xhrSend(method, url, body, cancelSignal) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     let stallTimer = null;
@@ -480,8 +493,8 @@ function _xhrUploadChunk(form, cancelSignal) {
 
     hardCapTimer = setTimeout(() => xhr.abort(), UPLOAD_STALL_HARD_CAP_MS);
 
-    xhr.open('POST', '/api/upload/chunk');
-    xhr.send(form);
+    xhr.open(method, url);
+    xhr.send(body);
   });
 }
 
@@ -653,6 +666,189 @@ async function _sendFinalizeWithRetry(trackType, body) {
       clearTimeout(timeout);
     }
   }
+}
+
+// ── Direct-to-cloud upload ───────────────────────────────────────────────────
+// After stop, each track goes straight to the S3-compatible bucket (R2/B2/S3)
+// in parts via presigned URLs, instead of through the PodBooth server — for
+// many guests the server's own peering is the bottleneck, and Cloudflare's
+// edge isn't. The server then pulls the object down over its own link and
+// processes it (see /api/upload/cloud/* in upload.py). Anything that keeps a
+// track from going this way — not configured, the bucket unreachable from
+// this browser (e.g. no CORS rule), a part that won't upload — falls back to
+// the normal upload through the server, which still has every byte locally.
+
+function _directCloudUploadEnabled() {
+  return typeof DIRECT_CLOUD_UPLOAD !== 'undefined' && DIRECT_CLOUD_UPLOAD === true;
+}
+
+async function _postJson(url, body, signal) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
+  return r.json();
+}
+
+// A browser-storage track as one source: its chunks in order, exactly the
+// file the server would otherwise build by concatenating them. Blob
+// concatenation is by reference, so this copies nothing. null if any chunk
+// is missing — the server path's gap check and MISSING_CHUNKS marker handle
+// that case, so it shouldn't be papered over here.
+async function _blobFromChunks(groupChunks) {
+  const chunks = groupChunks.slice().sort((a, b) => a.chunkIndex - b.chunkIndex);
+  const blobs = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (c.chunkIndex !== i) return null;
+    const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+    if (!rec) return null;
+    blobs.push(rec.blob);
+  }
+  return new Blob(blobs);
+}
+
+// One part, with its own retry budget. A fresh presigned URL every attempt
+// (they expire, and a stale one's 403 is just retried). Before any part of
+// this upload has landed, two network-level failures in a row mean the
+// bucket isn't reachable from this browser at all — most often a missing
+// CORS rule — so give up fast and let the caller fall back, rather than
+// spending the whole retry budget on something that can't work.
+async function _putPartWithRetry(cloud, partNumber, piece, signal, uploadIsProven) {
+  await _throttleForUpload(piece.size, signal);
+  const budget = Math.max(CHUNK_RETRY_BUDGET_MS, _uploadTimeoutForSize(piece.size) * 2);
+  const deadline = Date.now() + budget;
+  let attempt = 0;
+  let networkFailures = 0;
+  while (true) {
+    if (signal.aborted) return false;
+    attempt++;
+    try {
+      const { url } = await _postJson('/api/upload/cloud/part-url', {
+        session_id: SESSION_ID, key: cloud.key, upload_id: cloud.uploadId, part_number: partNumber,
+      }, signal);
+      const { ok, status } = await _xhrPutPart(url, piece, signal);
+      if (ok) return true;
+      throw Object.assign(new Error(`HTTP ${status}`), { status });
+    } catch (e) {
+      if (signal.aborted) return false;
+      if (!e.status && !uploadIsProven() && ++networkFailures >= 2) {
+        console.warn(`Cloud upload: bucket unreachable from this browser (CORS rule missing?) — falling back to uploading through the server:`, e);
+        return false;
+      }
+      console.warn(`Cloud part ${partNumber} failing, attempt ${attempt}:`, e);
+      if (Date.now() >= deadline) return false;
+      await new Promise(res => {
+        const timer = setTimeout(res, Math.min(1000 * attempt, 15000));
+        signal.addEventListener('abort', () => { clearTimeout(timer); res(); }, { once: true });
+      });
+    }
+  }
+}
+
+// /cloud/complete, retried like /finalize. A 4xx won't get better by
+// retrying (409 = the parts the bucket has don't match what was sent).
+async function _completeCloudUploadWithRetry(body, signal) {
+  const deadline = Date.now() + FINALIZE_RETRY_BUDGET_MS;
+  let attempt = 0;
+  while (true) {
+    if (signal.aborted) return 'cancelled';
+    attempt++;
+    try {
+      await _postJson('/api/upload/cloud/complete', body);
+      return 'ok';
+    } catch (e) {
+      console.warn(`Cloud complete failing for ${body.track_type}, attempt ${attempt}:`, e);
+      if ((e.status >= 400 && e.status < 500) || Date.now() >= deadline) return 'failed';
+      await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 15000)));
+    }
+  }
+}
+
+// Upload one track's complete source straight to the bucket and hand it to
+// the server for processing. Returns 'ok' (uploaded, completed, and queued on
+// the server — the finalize step is done), 'cancelled', or 'fallback'
+// (nothing changed locally; upload through the server as usual).
+async function _uploadTrackDirectToCloud(trackType, epoch, source, ext, meta, abortController) {
+  const signal = abortController.signal;
+  let cloud;
+  try {
+    const started = await _postJson('/api/upload/cloud/start', {
+      session_id: SESSION_ID, participant: displayName, identity,
+      track_type: trackType, epoch: epoch || '', ext, total_size: source.size,
+    }, signal);
+    cloud = { key: started.key, uploadId: started.upload_id, partSize: started.part_size };
+  } catch (e) {
+    if (signal.aborted) return 'cancelled';
+    recLog('cloud upload: start failed for %s (%s) — uploading through the server instead', trackType, e.message);
+    return 'fallback';
+  }
+
+  const partCount = Math.max(1, Math.ceil(source.size / cloud.partSize));
+  recLog('cloud upload: %s epoch=%s %d bytes in %d parts → %s', trackType, epoch, source.size, partCount, cloud.key);
+  const added = { completed: 0, bytesDone: 0 };
+  uploadStats.queued += partCount;
+  uploadStats.bytesTotal = (uploadStats.bytesTotal || 0) + source.size;
+  refreshUploadBanner();
+  const undoStats = () => {
+    uploadStats.queued -= partCount;
+    uploadStats.bytesTotal -= source.size;
+    uploadStats.completed -= added.completed;
+    uploadStats.bytesDone -= added.bytesDone;
+    refreshUploadBanner();
+  };
+  const abortUpload = () => _postJson('/api/upload/cloud/abort', {
+    session_id: SESSION_ID, key: cloud.key, upload_id: cloud.uploadId,
+  }).catch(() => {});
+
+  let proven = false;
+  const partNumbers = Array.from({ length: partCount }, (_, i) => i + 1);
+  const allParts = await _uploadPoolRun(partNumbers, async (n) => {
+    const piece = source.slice((n - 1) * cloud.partSize, n * cloud.partSize);
+    if (!(await _putPartWithRetry(cloud, n, piece, signal, () => proven))) return false;
+    proven = true;
+    uploadStats.completed++;
+    uploadStats.bytesDone = (uploadStats.bytesDone || 0) + piece.size;
+    added.completed++;
+    added.bytesDone += piece.size;
+    refreshUploadBanner();
+    return true;
+  });
+  if (signal.aborted) { abortUpload(); return 'cancelled'; }
+  if (!allParts) {
+    abortUpload();
+    undoStats();
+    recLog('cloud upload: %s parts failed — uploading through the server instead', trackType);
+    return 'fallback';
+  }
+
+  const result = await _completeCloudUploadWithRetry({
+    session_id: SESSION_ID, participant: displayName, identity, track_type: trackType, epoch: epoch || '',
+    ...meta,
+    key: cloud.key, upload_id: cloud.uploadId, ext, part_count: partCount, total_size: source.size,
+  }, signal);
+  if (result === 'ok') return 'ok';
+  abortUpload();
+  undoStats();
+  if (result === 'cancelled') return 'cancelled';
+  recLog('cloud upload: %s complete failed — uploading through the server instead', trackType);
+  return 'fallback';
+}
+
+// Try the cloud path for one track with its finalize payload. Only for a
+// track whose finalize payload was recorded — without one there's nothing
+// to tell the server how to process it, so leave it to the server path.
+async function _tryDirectCloud(trackType, epoch, source, ext, groupKey, opts, abortController) {
+  const fromPending = opts.finalizeMeta === undefined;
+  const meta = fromPending ? pendingFinalizeMeta[groupKey] : opts.finalizeMeta;
+  if (meta === undefined) return 'fallback';
+  const result = await _uploadTrackDirectToCloud(trackType, epoch, source, ext, meta, abortController);
+  if (result === 'ok' && fromPending) delete pendingFinalizeMeta[groupKey];
+  if (result === 'cancelled') uploadCancelled = true;
+  return result;
 }
 
 function finalizeTrack(trackType, meta, epoch = recordingEpoch) {
@@ -931,6 +1127,10 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
     }
 
     _ensureUploadingBanner();
+    if (fsaTrack && _directCloudUploadEnabled()) {
+      const result = await _tryDirectCloud(trackType, epoch, file, localTrack.ext, groupKey, opts, abortController);
+      if (result !== 'fallback') return result === 'ok';
+    }
     let ok;
     if (failedTrack && failedTrack.chunksWritten === 0) {
       // Failed over before a single chunk was committed to the file — there
@@ -979,6 +1179,25 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
     }
   }
   if (!fsaTrack) {
+    if (!failedTrack && groupChunks.length > 0 && _directCloudUploadEnabled()) {
+      const source = await _blobFromChunks(groupChunks);
+      if (source) {
+        // The pass already counted these chunks for the server path; the
+        // cloud path counts its own parts instead (restored on fallback).
+        const countedBytes = groupChunks.reduce((n, c) => n + (c.size || 0), 0);
+        uploadStats.queued -= groupChunks.length;
+        uploadStats.bytesTotal -= countedBytes;
+        const result = await _tryDirectCloud(trackType, epoch, source, groupChunks[0].ext, groupKey, opts, abortController);
+        if (result === 'ok') {
+          for (const c of groupChunks) idbDeleteChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
+          return true;
+        }
+        if (result === 'cancelled') return false;
+        uploadStats.queued += groupChunks.length;
+        uploadStats.bytesTotal += countedBytes;
+        refreshUploadBanner();
+      }
+    }
     const chunks = groupChunks.slice().sort((a, b) => a.chunkIndex - b.chunkIndex);
     const allOk = await _uploadPoolRun(chunks, async (c) => {
       const rec = await idbGetChunk(c.sessionId, c.identity, c.epoch, c.trackType, c.chunkIndex);
@@ -1177,6 +1396,7 @@ function _refreshAssemblyBanner() {
 }
 
 const _ASSEMBLY_STAGE_LABELS = {
+  downloading: 'Downloading from cloud:',
   combining: 'Combining',
   queued: 'Waiting to convert', // waiting for a video encode slot (max_concurrent_video_encodes)
   converting: 'Converting',
