@@ -148,15 +148,16 @@ def _report_progress(directory: Path, job: str, epoch: str, stage: str, fraction
     _assembly_progress[(str(directory), job, epoch)] = {
         "participant": directory.name,
         "job": job,
+        "epoch": epoch,
         "stage": stage,
         "fraction": None if fraction is None else max(0.0, min(1.0, fraction)),
         "updated": time.monotonic(),
     }
 
 
-def _session_assembly_jobs(session_path: Path) -> list[dict]:
-    """Progress entries for every assembly job under this session, oldest
-    finished ones pruned."""
+def _session_assembly_jobs(session_path: Path, participant_dirs: list[Path] | None = None) -> list[dict]:
+    """Progress entries for every assembly job under this session (or just
+    these participant directories), oldest finished ones pruned."""
     now = time.monotonic()
     # Unfinished entries go too once they're older than any ffmpeg run could
     # be (an assembly that bailed out early never reports done/failed).
@@ -166,11 +167,34 @@ def _session_assembly_jobs(session_path: Path) -> list[dict]:
     for k in stale:
         del _assembly_progress[k]
     prefix = str(session_path) + "/"
+    wanted = {str(d) for d in participant_dirs} if participant_dirs is not None else None
     return [
         {k: v for k, v in entry.items() if k != "updated"}
         for key, entry in sorted(_assembly_progress.items())
-        if key[0].startswith(prefix)
+        if key[0].startswith(prefix) and (wanted is None or key[0] in wanted)
     ]
+
+
+def _assembly_progress_fraction(jobs: list[dict]) -> float | None:
+    """Overall 0..1 for these jobs, or None if any job's length is unknown.
+
+    Jobs are weighted equally, and a take with both audio and video counts
+    its A/V merge from the start (as 0 until the merge actually begins) —
+    otherwise the merge appearing as a brand-new job once both transcodes
+    finish dragged the average backwards (e.g. 95% → 81%), which reads as
+    something having gone wrong."""
+    if not jobs:
+        return None
+    fractions = [j["fraction"] for j in jobs]
+    by_take: dict[tuple[str, str], set[str]] = {}
+    for j in jobs:
+        by_take.setdefault((j["participant"], j.get("epoch", "")), set()).add(j["job"])
+    for kinds in by_take.values():
+        if {"audio", "video"} <= kinds and "merge" not in kinds:
+            fractions.append(0.0)
+    if None in fractions:
+        return None
+    return sum(fractions) / len(fractions)
 
 
 # Tracks (str(directory), track_type, epoch) tuples currently being assembled.
@@ -367,31 +391,36 @@ async def _save_run_metadata(
         metadata_path.write_text(json.dumps(data, indent=2))
 
 
-def participant_dir(session, participant: str, identity: str = "") -> Path:
+def _resolve_participant_dir(session, participant: str, identity: str = "") -> Path:
+    """Where participant_dir puts this participant's files — without creating
+    anything, so read-only callers (e.g. /assembly-status) can use it too.
+
+    Directory is keyed by display-name slug (not identity) so filenames stay
+    human-readable, but that means two different guests using the same
+    display name would otherwise interleave their takes in one directory.
+    A first-writer-wins ".identity" marker detects that and disambiguates
+    the second identity into its own directory instead."""
     name = _display_slug(participant) if participant else _safe_name(identity or "")
     if not name:
         raise HTTPException(status_code=400, detail="Invalid participant name")
     base = Path(settings.recordings_dir) / session.dir_name
     path = base / name
-
-    # Directory is keyed by display-name slug (not identity) so filenames stay
-    # human-readable, but that means two different guests using the same
-    # display name would otherwise interleave their takes in one directory.
-    # A first-writer-wins ".identity" marker detects that and disambiguates
-    # the second identity into its own directory instead.
     if identity:
         marker = path / ".identity"
         if path.is_dir() and marker.exists():
             owner = marker.read_text().strip()
             if owner and owner != identity:
-                name = f"{name}_{identity[-6:]}"
-                path = base / name
-                marker = path / ".identity"
-        path.mkdir(parents=True, exist_ok=True)
+                path = base / f"{name}_{identity[-6:]}"
+    return path
+
+
+def participant_dir(session, participant: str, identity: str = "") -> Path:
+    path = _resolve_participant_dir(session, participant, identity)
+    path.mkdir(parents=True, exist_ok=True)
+    if identity:
+        marker = path / ".identity"
         if not marker.exists():
             marker.write_text(identity)
-    else:
-        path.mkdir(parents=True, exist_ok=True)
     return path
 
 

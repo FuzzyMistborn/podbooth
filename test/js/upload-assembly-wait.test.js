@@ -170,6 +170,44 @@ describe('_awaitAssemblyAndVerify', () => {
     expect(findByClass(banner, 'upload-progress-fill').style.width).toBe('43%');
   });
 
+  it('never moves the bar backwards, and keeps the last known value when a reading is unknown', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const readings = [0.6, 0.4, null, 0.7];
+    globalThis.fetch = vi.fn(async () => {
+      const progress = readings.length > 1 ? readings.shift() : readings[0];
+      return { ok: true, json: async () => ({ assembling: true, progress, jobs: [] }) };
+    });
+
+    _awaitAssemblyAndVerify();
+    const shown = [];
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(2000);
+      shown.push(findByClass(banner, 'upload-progress-fill').style.width);
+    }
+
+    expect(shown).toEqual(['60%', '60%', '60%', '70%']);
+  });
+
+  it('a guest asks about their own recording; the host asks about the whole session', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const urls = [];
+    globalThis.fetch = vi.fn(async (url) => {
+      urls.push(String(url));
+      return { ok: true, json: async () => ({ assembling: false, issues: [] }) };
+    });
+
+    globalThis.IS_HOST = false;
+    _awaitAssemblyAndVerify();
+    await vi.advanceTimersByTimeAsync(2000);
+    globalThis.IS_HOST = true;
+    _awaitAssemblyAndVerify();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const statusUrls = urls.filter(u => u.includes('assembly-status'));
+    expect(statusUrls[0]).toBe(`/api/session/${SESSION_ID}/assembly-status?participant=Tester&identity=identity-1`);
+    expect(statusUrls[1]).toBe(`/api/session/${SESSION_ID}/assembly-status`);
+  });
+
   it('shows an indeterminate bar while the length is unknown', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     stubAssemblyStatus({ doneAfterMs: null, status: { progress: null, jobs: [] } });

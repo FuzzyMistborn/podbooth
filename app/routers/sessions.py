@@ -14,7 +14,10 @@ from fastapi.templating import Jinja2Templates
 from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
-from app.routers.upload import recover_orphaned_chunks, is_merging, has_assembly_task, _session_assembly_jobs
+from app.routers.upload import (
+    recover_orphaned_chunks, is_merging, has_assembly_task,
+    _session_assembly_jobs, _assembly_progress_fraction, _resolve_participant_dir,
+)
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host, require_api_key
 from app.limiter import limiter
@@ -848,16 +851,26 @@ async def verify_recordings(session_id: str, _: None = Depends(require_host)):
 
 
 @router.get("/api/session/{session_id}/assembly-status")
-async def assembly_status_route(session_id: str):
+async def assembly_status_route(session_id: str, participant: str = "", identity: str = ""):
+    """Whether server-side assembly is still running, with a progress meter.
+
+    With participant/identity, scoped to that one participant's recordings —
+    what a guest's post-upload banner waits on, so a guest isn't held on
+    'processing' by everyone else's (much longer) video transcodes. Without,
+    the whole session — what the host waits on before verify-recordings."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     recordings_path = Path(settings.recordings_dir)
     session_path = recordings_path / session.dir_name
     if not session_path.is_dir():
-        return JSONResponse({"assembling": False})
+        return JSONResponse({"assembling": False, "progress": None, "jobs": []})
+    if participant or identity:
+        pdirs = [_resolve_participant_dir(session, participant, identity)]
+    else:
+        pdirs = [p for p in session_path.iterdir() if p.is_dir()]
     assembling = False
-    for pdir in session_path.iterdir():
+    for pdir in pdirs:
         if not pdir.is_dir():
             continue
         if any("_chunk_" in f.name for f in pdir.iterdir() if f.is_file()):
@@ -878,10 +891,9 @@ async def assembly_status_route(session_id: str):
         if has_assembly_task(pdir):
             assembling = True
             break
-    # Per-job progress for the client's processing meter. `progress` is the
-    # mean across jobs, or None if any job's length is unknown (or none have
-    # started yet — e.g. another participant is still uploading).
-    jobs = _session_assembly_jobs(session_path)
-    fractions = [j["fraction"] for j in jobs]
-    progress = (sum(fractions) / len(fractions)) if fractions and None not in fractions else None
+    # Per-job progress for the client's processing meter — see
+    # _assembly_progress_fraction. None while any job's length is unknown or
+    # nothing has started yet (e.g. another participant is still uploading).
+    jobs = _session_assembly_jobs(session_path, pdirs if (participant or identity) else None)
+    progress = _assembly_progress_fraction(jobs)
     return JSONResponse({"assembling": assembling, "progress": progress, "jobs": jobs})

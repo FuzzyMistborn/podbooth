@@ -106,7 +106,8 @@ def test_assembly_status_reports_mean_progress_for_this_session_only(client, ses
     body = client.get(f"/api/session/{session.id}/assembly-status").json()
 
     assert body["assembling"] is True
-    assert body["progress"] == pytest.approx(0.75)
+    # audio 1.0 + video 0.5 + the take's not-yet-started A/V merge 0.0
+    assert body["progress"] == pytest.approx(0.5)
     assert {(j["participant"], j["job"], j["stage"]) for j in body["jobs"]} == {
         ("Alice", "audio", "done"), ("Alice", "video", "converting"),
     }
@@ -159,3 +160,65 @@ def test_assembly_status_stays_true_while_an_assembly_task_runs_with_no_chunks_v
         upload._assembly_in_progress.discard(key)
 
     assert client.get(f"/api/session/{session.id}/assembly-status").json()["assembling"] is False
+
+
+def test_progress_never_drops_when_the_av_merge_starts():
+    # Found on a real 15-minute two-person soak run: the meter went 95% → 81%
+    # the moment a take's merge appeared as a brand-new job at 0%. The merge
+    # is now counted from the start, so each step only ever moves it forward.
+    def jobs(audio, video, merge=None):
+        out = [
+            {"participant": "Alice", "epoch": "ep1", "job": "audio", "fraction": audio},
+            {"participant": "Alice", "epoch": "ep1", "job": "video", "fraction": video},
+        ]
+        if merge is not None:
+            out.append({"participant": "Alice", "epoch": "ep1", "job": "merge", "fraction": merge})
+        return out
+
+    sequence = [
+        jobs(1.0, 0.0), jobs(1.0, 0.5), jobs(1.0, 0.95),
+        jobs(1.0, 1.0, merge=0.0), jobs(1.0, 1.0, merge=0.6), jobs(1.0, 1.0, merge=1.0),
+    ]
+    readings = [upload._assembly_progress_fraction(j) for j in sequence]
+
+    assert readings == sorted(readings)
+    assert readings[-1] == 1.0
+
+
+def test_audio_only_take_has_no_phantom_merge():
+    jobs = [{"participant": "Alice", "epoch": "ep1", "job": "audio", "fraction": 1.0}]
+    assert upload._assembly_progress_fraction(jobs) == 1.0
+
+
+def test_assembly_status_scoped_to_one_participant(client, session, recordings_dir):
+    session_dir = recordings_dir / session.dir_name
+    # Alice is still mid video transcode; Bob's recording is finished.
+    (session_dir / "Alice").mkdir(parents=True)
+    (session_dir / "Alice" / "video_ep1_chunk_000000.webm").write_bytes(b"x")
+    _job(session_dir, "Alice", "video", "converting", 0.3)
+    _job(session_dir, "Bob", "audio", "done", 1.0)
+
+    bob = client.get(f"/api/session/{session.id}/assembly-status",
+                     params={"participant": "Bob", "identity": "bob-id"}).json()
+    whole = client.get(f"/api/session/{session.id}/assembly-status").json()
+
+    # Bob's banner can finish without waiting on Alice's video...
+    assert bob["assembling"] is False
+    assert bob["progress"] == 1.0
+    assert [j["participant"] for j in bob["jobs"]] == ["Bob"]
+    # ...while the host's session-wide view still waits for everyone.
+    assert whole["assembling"] is True
+
+
+def test_resolve_participant_dir_follows_identity_disambiguation_without_creating_anything(session, recordings_dir):
+    session_dir = recordings_dir / session.dir_name
+    (session_dir / "Alice").mkdir(parents=True)
+    (session_dir / "Alice" / ".identity").write_text("first-alice-id")
+
+    second = upload._resolve_participant_dir(session, "Alice", "second-alice-id")
+    first = upload._resolve_participant_dir(session, "Alice", "first-alice-id")
+
+    assert second == session_dir / "Alice_ice-id"  # same suffix rule participant_dir applies
+    assert first == session_dir / "Alice"
+    assert not second.exists()  # read-only: nothing created
+    assert upload.participant_dir(session, "Alice", "second-alice-id") == second

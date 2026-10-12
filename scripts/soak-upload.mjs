@@ -536,6 +536,19 @@ async function participant(args, spec) {
   }
   await Promise.all(Object.values(g('_persistQueues')));
 
+  // The placeholders are stored with size 0; report each chunk's real size
+  // so upload.js's byte-based progress (bytesTotal) matches a real browser.
+  const realGetAll = globalThis.idbGetAllChunks;
+  globalThis.idbGetAllChunks = async (...a) => (await realGetAll(...a)).map((c) => {
+    if (c.identity !== spec.identity) return c;
+    if (c.trackType === 'audio') return { ...c, size: pcm.length };
+    if (c.trackType === 'video' && videoSlices[c.chunkIndex]) {
+      const [start, end] = videoSlices[c.chunkIndex];
+      return { ...c, size: end - start };
+    }
+    return c;
+  });
+
   const realGet = globalThis.idbGetChunk;
   globalThis.idbGetChunk = async (...a) => {
     const rec = await realGet(...a);
