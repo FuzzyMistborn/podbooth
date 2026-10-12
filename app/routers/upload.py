@@ -36,7 +36,7 @@ from datetime import datetime, timedelta
 from app import s3
 from app.config import settings
 from app.models import get_session
-from app.utils import _safe_name
+from app.utils import _safe_name, niced, video_encode_slot, x264_args
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +131,9 @@ def purge_session_state(session_dir: Path) -> None:
 # Live progress of server-side assembly, for the meter /assembly-status
 # feeds the client's post-upload banner. Keyed (str(directory), job, epoch)
 # where job is a track type or "merge" (the audio+video mux). Each value:
-#   stage:    "combining" (concatenating chunks) | "converting" (ffmpeg
-#             transcode) | "merging" | "done" | "failed"
+#   stage:    "combining" (concatenating chunks) | "queued" (waiting for a
+#             video encode slot) | "converting" (ffmpeg transcode) |
+#             "merging" | "done" | "failed"
 #   fraction: 0..1 for this job, or None while its length isn't known
 # Finished jobs stay (at 1.0) so the session-wide meter doesn't jump
 # backwards when one participant's track finishes ahead of another's;
@@ -811,6 +812,18 @@ async def _transcode_source(
 
     on_progress(0.0 if duration_s else None)
 
+    async def run_encode(cmd: list[str]) -> bool:
+        # A libx264 re-encode waits for one of the shared encode slots (see
+        # max_concurrent_video_encodes) — several at once, each grabbing every
+        # core, slowed the whole container to a crawl. A stream copy (h264
+        # source) is cheap and doesn't queue.
+        slot = video_encode_slot()
+        if slot.locked():
+            _report_progress(directory, track_type, epoch, "queued", _COMBINE_SHARE)
+        async with slot:
+            on_progress(0.0 if duration_s else None)
+            return await _run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+
     if track_type == "audio":
         if nametake:
             output = directory / _final_name("audio", *nametake, "wav")
@@ -874,12 +887,13 @@ async def _transcode_source(
                 "-err_detect", "ignore_err",
                 "-i", str(source),
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                *x264_args(),
                 "-an",
                 "-movflags", "+faststart",
                 str(noaudio),
             ]
-        ok = await _run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+        ok = await (_run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+                    if codec == "h264" else run_encode(cmd))
         _report_progress(directory, track_type, epoch, "done" if ok else "failed", 1.0)
         if ok:
             ok = await _probe_has_video(noaudio)
@@ -926,12 +940,13 @@ async def _transcode_source(
                 "-err_detect", "ignore_err",
                 "-i", str(source),
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                *x264_args(),
                 "-an",
                 "-movflags", "+faststart",
                 str(output),
             ]
-        ok = await _run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+        ok = await (_run_ffmpeg(cmd, directory, track_type, on_progress=on_progress, duration_s=duration_s)
+                    if codec == "h264" else run_encode(cmd))
         _report_progress(directory, track_type, epoch, "done" if ok else "failed", 1.0)
         if ok:
             logger.info("assemble: screen output %s size=%d", output.name, output.stat().st_size)
@@ -1213,7 +1228,7 @@ async def _run_ffmpeg(cmd: list[str], directory: Path, track_type: str,
         cmd = [cmd[0], "-progress", str(progress_path), "-nostats", *cmd[1:]]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            *niced(cmd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

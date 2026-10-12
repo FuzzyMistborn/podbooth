@@ -1176,7 +1176,12 @@ function _refreshAssemblyBanner() {
   _buildUploadBanner(banner, 'assembling');
 }
 
-const _ASSEMBLY_STAGE_LABELS = { combining: 'Combining', converting: 'Converting', merging: 'Merging audio + video for' };
+const _ASSEMBLY_STAGE_LABELS = {
+  combining: 'Combining',
+  queued: 'Waiting to convert', // waiting for a video encode slot (max_concurrent_video_encodes)
+  converting: 'Converting',
+  merging: 'Merging audio + video for',
+};
 
 // "Converting video — Alice" for the first job still running, or '' if none.
 function _assemblyJobLabel(jobs) {

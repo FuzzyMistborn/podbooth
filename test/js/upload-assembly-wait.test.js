@@ -208,6 +208,13 @@ describe('_awaitAssemblyAndVerify', () => {
     expect(statusUrls[1]).toBe(`/api/session/${SESSION_ID}/assembly-status`);
   });
 
+  it('labels a job waiting for an encode slot', () => {
+    expect(_assemblyJobLabel([
+      { participant: 'Alice', job: 'video', stage: 'done', fraction: 1 },
+      { participant: 'Bob', job: 'video', stage: 'queued', fraction: 0.1 },
+    ])).toBe('Waiting to convert video — Bob');
+  });
+
   it('shows an indeterminate bar while the length is unknown', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     stubAssemblyStatus({ doneAfterMs: null, status: { progress: null, jobs: [] } });
