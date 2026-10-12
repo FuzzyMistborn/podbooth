@@ -59,6 +59,25 @@ class Settings(BaseSettings):
     # orphan-recovery for it) forever — 4 hours comfortably covers even a
     # slow VPS transcoding a multi-hour 1080p recording.
     ffmpeg_timeout_s: float = 4 * 60 * 60
+    # Video encoding (libx264) is by far the heaviest thing this server does:
+    # every participant's webcam/screen track is re-encoded to H.264 after
+    # upload, and grid exports encode again. Unbounded, several of those at
+    # once (each grabbing every core) slowed the whole container to a crawl.
+    #   max_concurrent_video_encodes: encodes run one at a time by default;
+    #     later ones queue (shown as "Waiting to convert…" in the meter).
+    #     Audio conversion and the audio+video merge are cheap and don't queue.
+    #   video_encode_preset: x264 speed/size trade-off. "veryfast" is roughly
+    #     2-4x faster than "medium" for somewhat larger files at the same CRF.
+    #   video_encode_crf: quality (lower = better/larger). Grid exports use
+    #     this + 2.
+    #   ffmpeg_threads: per-process thread cap; 0 = ffmpeg's default (all cores).
+    #   ffmpeg_nice: run ffmpeg at this lower CPU priority so the web app and
+    #     live calls stay responsive; 0 disables.
+    max_concurrent_video_encodes: int = 1
+    video_encode_preset: str = "veryfast"
+    video_encode_crf: int = 18
+    ffmpeg_threads: int = 0
+    ffmpeg_nice: int = 10
     whisperx_api_url: str = ""
     whisperx_model: str = "large-v3-turbo"
     whisperx_language: str = ""

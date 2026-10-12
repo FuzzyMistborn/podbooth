@@ -3,6 +3,9 @@
 import asyncio
 import logging
 import secrets
+import shutil
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,38 @@ async def run_subprocess(cmd: list[str], timeout_s: float, label: str = "") -> t
         await proc.wait()
         return -1, b"", b""
     return proc.returncode, stdout, stderr
+
+
+# Shared by every libx264 caller (track transcodes in upload.py, grid exports
+# in dashboard.py) so the configured limit bounds all of them together.
+# Created on first use rather than at import so settings overrides (and each
+# test's event loop) are respected.
+_video_encode_slots: asyncio.Semaphore | None = None
+
+
+def video_encode_slot() -> asyncio.Semaphore:
+    global _video_encode_slots
+    if _video_encode_slots is None:
+        _video_encode_slots = asyncio.Semaphore(max(1, settings.max_concurrent_video_encodes))
+    return _video_encode_slots
+
+
+def x264_args(crf: int | None = None) -> list[str]:
+    """libx264 encoder arguments from settings (see video_encode_* there)."""
+    args = ["-c:v", "libx264", "-preset", settings.video_encode_preset,
+            "-crf", str(settings.video_encode_crf if crf is None else crf)]
+    if settings.ffmpeg_threads > 0:
+        args += ["-threads", str(settings.ffmpeg_threads)]
+    return args
+
+
+def niced(cmd: list[str]) -> list[str]:
+    """Prefix cmd with `nice` (settings.ffmpeg_nice) so long encodes yield
+    the CPU to the web app and live calls. Unchanged if disabled or nice
+    isn't installed."""
+    if settings.ffmpeg_nice > 0 and shutil.which("nice"):
+        return ["nice", "-n", str(settings.ffmpeg_nice), *cmd]
+    return cmd
 
 
 def _safe_name(value: str) -> str:

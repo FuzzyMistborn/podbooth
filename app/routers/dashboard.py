@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from app.models import list_sessions, get_session
-from app.utils import _safe_name, _parse_take, _take_sort_key, run_subprocess
+from app.utils import _safe_name, _parse_take, _take_sort_key, run_subprocess, niced, video_encode_slot, x264_args
 
 logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION, APP_VERSION
@@ -110,7 +110,7 @@ def _build_export_cmd(
     if n == 1:
         cmd += [
             "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            *x264_args(settings.video_encode_crf + 2),
             "-c:a", "aac", "-b:a", "320k",
             "-metadata:s:a:0", f"title={speakers[0]}",
             "-movflags", "+faststart",
@@ -170,7 +170,7 @@ def _build_export_cmd(
     for i in range(n):
         cmd += ["-map", f"[a{i}]"]
 
-    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20"]
+    cmd += x264_args(settings.video_encode_crf + 2)
     cmd += ["-c:a", "aac", "-b:a", "320k"]
     cmd += ["-metadata:s:a:0", "title=Mixed"]
     for i, name in enumerate(speakers):
@@ -221,13 +221,17 @@ async def _run_grid_export(session_id: str, video_groups: list[list[Path]], outp
         # Insert -progress flag right after 'ffmpeg -y'
         cmd = [cmd[0], cmd[1], "-progress", str(progress_file)] + cmd[2:]
 
-        _export_progress[session_id] = {
-            "start": time.time(),
-            "total": total_duration,
-            "file": str(progress_file),
-        }
-
-        returncode, _, stderr = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "grid_export")
+        # Shares the video encode slots with track transcodes (see
+        # max_concurrent_video_encodes) — a grid export on top of several
+        # transcodes is exactly the pile-up that slowed the container to a
+        # crawl. Progress (and its start time) only begins once it's running.
+        async with video_encode_slot():
+            _export_progress[session_id] = {
+                "start": time.time(),
+                "total": total_duration,
+                "file": str(progress_file),
+            }
+            returncode, _, stderr = await run_subprocess(niced(cmd), settings.ffmpeg_timeout_s, "grid_export")
         if returncode != 0:
             logger.error("Grid export failed (%s): %s", session_id, stderr.decode()[-2000:])
         elif not tmp_output_path.exists() or tmp_output_path.stat().st_size == 0:
