@@ -257,6 +257,8 @@ Optionally, when an S3-compatible bucket is configured (R2, B2 or `S3_*`), recor
 
 If a browser can't reach the bucket, or anything in the upload fails, that recording automatically falls back to uploading through the PodBooth server, and nothing is lost.
 
+It uses the same bucket as editor delivery: `S3_*` if set, otherwise `R2_*`, otherwise `B2_*`. Raw uploads go under that backend's upload path (for R2, `R2_UPLOAD_PATH`, default `PodBooth`) in `raw-uploads/`.
+
 | Variable | Required | Description |
 |---|---|---|
 | `DIRECT_CLOUD_UPLOAD` | No | Set `true` to enable (requires a configured bucket and the CORS rule below). Default: `false` (upload through the PodBooth server) |
@@ -274,7 +276,7 @@ The bucket needs a **CORS rule allowing `PUT` from your PodBooth site**, because
 ]
 ```
 
-Without it, uploads still work, but every recording falls back to the slower upload through the server. Raw uploads live under `<upload path>/raw-uploads/` only until they're processed. It's also worth keeping (or adding) a lifecycle rule that aborts incomplete multipart uploads after a day or so, which cleans up after a guest who closes their browser mid-upload.
+Use your `BASE_URL` as the origin (scheme + host, no path). Without the rule, uploads still work, but every recording falls back to the slower upload through the server. Raw uploads stay in the bucket only until they're processed. It's also worth keeping (or adding) a lifecycle rule that aborts incomplete multipart uploads after a day or so, which cleans up after a guest who closes their browser mid-upload.
 
 ### Video Processing
 
