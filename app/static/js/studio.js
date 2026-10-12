@@ -172,6 +172,14 @@ let fsaTakeNumberPromise = null;
 // disk are still real data and must still be uploaded (as chunk 0) alongside
 // whatever lands in IndexedDB afterward. See _persistChunk in upload.js.
 let fsaFailedTracks = {};
+// Clean local-file tracks kept on disk at stop instead of being uploaded,
+// waiting for the 'Upload recording' button — see uploadLocalRecordings in
+// upload.js. Deliberately not reset by startLocalRecording: it spans takes.
+let _pendingLocalUploads = []; // [{ trackType, epoch, track, meta }]
+let _localUploadRun = null;
+// Called once uploadLocalRecordings empties _pendingLocalUploads — set by
+// handleSessionEnded (ui.js) to redirect a guest once their upload is done.
+let onLocalUploadsDrained = null;
 // Serializes persistence per track so writes never overlap with fsa-store.js's
 // periodic close()+reopen() flush cycle on the same track. See enqueueChunk.
 let _persistQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };

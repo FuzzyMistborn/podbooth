@@ -185,6 +185,7 @@ function setRecordingUI(recording) {
     stopRecStatus();
     startFilesPoll();
   }
+  if (typeof refreshLocalUploadButton === 'function') refreshLocalUploadButton();
 }
 
 function updateRecTimer() {

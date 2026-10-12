@@ -39,7 +39,7 @@ describe('_uploadOneTrack (FSA whole-file path)', () => {
     });
 
     const abortController = new AbortController();
-    await _uploadOneTrack('audio', fsaOpenPromises, {}, [], abortController, 'epoch1');
+    await _uploadOneTrack('audio', fsaOpenPromises, {}, [], abortController, 'epoch1', { forceUpload: true });
 
     expect(uploaded).toHaveLength(3);
     expect(uploaded.map(u => u.index)).toEqual([0, 1, 2]);
@@ -61,7 +61,7 @@ describe('_uploadOneTrack (FSA whole-file path)', () => {
       return { ok: true, status: 200 };
     });
 
-    await _uploadOneTrack('audio', fsaOpenPromises, {}, [], new AbortController(), 'epoch1');
+    await _uploadOneTrack('audio', fsaOpenPromises, {}, [], new AbortController(), 'epoch1', { forceUpload: true });
 
     expect(uploadedBlob.size).toBe(payload.length); // header (44 bytes) stripped
     const bytes = new Uint8Array(await uploadedBlob.arrayBuffer());
@@ -105,6 +105,173 @@ describe('_uploadOneTrack (FSA whole-file path)', () => {
     // The IndexedDB copies of the successfully-uploaded trailing chunks are
     // cleaned up same as the normal (non-FSA) path.
     expect(await idbGetAllChunks()).toHaveLength(0);
+  });
+});
+
+describe('local-disk recordings: kept on disk at stop, uploaded on demand', () => {
+  // A participant who opted into local-disk recording keeps their files on
+  // disk when recording stops — nothing is sent automatically. The 'Upload
+  // recording' button (uploadLocalRecordings) later sends them through the
+  // normal chunk/finalize pipeline, with the finalize payload captured at
+  // stop so the server still knows where the take sits on the timeline.
+  function localTrack(file, extra = {}) {
+    return { ext: 'webm', bytesWritten: file.size, isRawAudio: false, chunksWritten: 3, closed: false, _file: file, ...extra };
+  }
+
+  // Records every chunk upload and /finalize body; assembly/verify polling is
+  // stubbed out (it sleeps 2s per poll) and recorded as a single call.
+  function stubServer({ failFirstChunkByCancelling = false } = {}) {
+    const calls = { chunks: [], finalizes: [], assemblyWaits: 0 };
+    let cancelled = false;
+    stubXhrUpload((form) => {
+      if (failFirstChunkByCancelling && !cancelled) {
+        cancelled = true;
+        cancelUpload();
+        return { ok: false, status: 0 };
+      }
+      calls.chunks.push({ trackType: form.get('track_type'), index: Number(form.get('chunk_index')), epoch: form.get('epoch') });
+      return { ok: true, status: 200 };
+    });
+    globalThis.fetch = vi.fn(async (url, init) => {
+      if (url === '/api/upload/finalize') calls.finalizes.push(JSON.parse(init.body));
+      return { ok: true, status: 200, json: async () => ({ assembling: false, issues: [] }) };
+    });
+    globalThis._awaitAssemblyAndVerify = async () => { calls.assemblyWaits++; return true; };
+    globalThis.window = { addEventListener() {}, removeEventListener() {} };
+    return calls;
+  }
+
+  function recordBannerStates() {
+    const states = [];
+    const realShow = globalThis.showUploadBanner;
+    globalThis.showUploadBanner = (state) => { states.push(state); realShow(state); };
+    return { states, restore: () => { globalThis.showUploadBanner = realShow; } };
+  }
+
+  // Each test uses its own epoch names: _uploadAllRecordedChunks caches its
+  // pass per epoch (module-private _uploadPass), so reusing one across tests
+  // would hand back an earlier test's already-finished pass.
+  async function stopTake(epoch, tracks) {
+    globalThis.recordingEpoch = epoch;
+    globalThis.fsaOpenPromises = {};
+    globalThis.pendingFinalizeMeta = {};
+    for (const [trackType, track, meta] of tracks) {
+      fsaOpenPromises[`${trackType}::${epoch}`] = Promise.resolve(track);
+      pendingFinalizeMeta[`${trackType}::${epoch}`] = meta;
+    }
+    await waitForUploads();
+  }
+
+  beforeEach(() => {
+    const closed = [];
+    globalThis.fsaCloseTrackFile = async (track) => { closed.push(track); track.closed = true; return track._file; };
+  });
+
+  it('a stop pass closes local tracks, uploads/finalizes nothing, never shows "Uploading", and queues them', async () => {
+    const calls = stubServer();
+    const banner = recordBannerStates();
+    const audio = localTrack(makeBlob(1024), { ext: 'raw', isRawAudio: true });
+    const video = localTrack(makeBlob(1024));
+    try {
+      await stopTake('epoch1', [
+        ['audio', audio, { start_time_ms: 1000 }],
+        ['video', video, { start_time_ms: 1010 }],
+      ]);
+    } finally {
+      banner.restore();
+    }
+
+    expect(audio.closed && video.closed).toBe(true); // finished on disk (WAV header etc.)
+    expect(calls.chunks).toEqual([]);
+    expect(calls.finalizes).toEqual([]);
+    expect(calls.assemblyWaits).toBe(0);
+    expect(banner.states).toEqual(['local']);
+    expect(uploadPending).toBe(false);
+    expect(hasPendingLocalUploads()).toBe(true);
+    expect(_pendingLocalUploads.map(e => [e.trackType, e.epoch, e.meta]).sort()).toEqual([
+      ['audio', 'epoch1', { start_time_ms: 1000 }],
+      ['video', 'epoch1', { start_time_ms: 1010 }],
+    ]);
+  });
+
+  it('uploadLocalRecordings sends every queued track as slices, finalizes with the original start time, and empties the queue', async () => {
+    const calls = stubServer();
+    await stopTake('slices1', [['video', localTrack(makeBlob(12 * 1024 * 1024)), { start_time_ms: 1010 }]]);
+    let drained = 0;
+    globalThis.onLocalUploadsDrained = () => { drained++; };
+
+    const banner = recordBannerStates();
+    try {
+      await uploadLocalRecordings();
+    } finally {
+      banner.restore();
+    }
+
+    expect(calls.chunks.map(c => c.index).sort((a, b) => a - b)).toEqual([0, 1, 2]); // 12MB -> 3 x 5MB slices
+    expect(calls.chunks.every(c => c.trackType === 'video' && c.epoch === 'slices1')).toBe(true);
+    expect(calls.finalizes).toHaveLength(1);
+    expect(calls.finalizes[0]).toMatchObject({ track_type: 'video', epoch: 'slices1', start_time_ms: 1010 });
+    expect(calls.assemblyWaits).toBe(1);
+    expect(banner.states).toEqual(['uploading', 'done']);
+    expect(hasPendingLocalUploads()).toBe(false);
+    expect(drained).toBe(1);
+  });
+
+  it('queues takes across a retake and uploads both under their own epochs in one click', async () => {
+    const calls = stubServer();
+    await stopTake('take1', [['audio', localTrack(makeBlob(1024), { ext: 'raw', isRawAudio: true }), { start_time_ms: 1 }]]);
+    // The retake's startLocalRecording resets fsaOpenPromises/pendingFinalizeMeta
+    // (stopTake does the same) — the first take's queued entry must survive it.
+    await stopTake('take2', [['audio', localTrack(makeBlob(1024), { ext: 'raw', isRawAudio: true }), { start_time_ms: 2 }]]);
+
+    await uploadLocalRecordings();
+
+    expect(calls.chunks.map(c => c.epoch).sort()).toEqual(['take1', 'take2']);
+    expect(calls.finalizes.map(f => [f.epoch, f.start_time_ms]).sort()).toEqual([['take1', 1], ['take2', 2]]);
+    expect(hasPendingLocalUploads()).toBe(false);
+  });
+
+  it('a cancelled upload leaves the track queued, and the next click uploads it', async () => {
+    const calls = stubServer({ failFirstChunkByCancelling: true });
+    await stopTake('cancel1', [['video', localTrack(makeBlob(1024)), { start_time_ms: 5 }]]);
+
+    await uploadLocalRecordings();
+    expect(calls.finalizes).toEqual([]);
+    expect(hasPendingLocalUploads()).toBe(true);
+
+    await uploadLocalRecordings();
+    expect(calls.chunks).toHaveLength(1);
+    expect(calls.finalizes).toHaveLength(1);
+    expect(hasPendingLocalUploads()).toBe(false);
+  });
+
+  it('refuses to upload while recording (would compete with the live call)', async () => {
+    const calls = stubServer();
+    await stopTake('rec1', [['video', localTrack(makeBlob(1024)), {}]]);
+    globalThis.isRecording = true;
+
+    await uploadLocalRecordings();
+
+    expect(calls.chunks).toEqual([]);
+    expect(hasPendingLocalUploads()).toBe(true);
+  });
+
+  it('still uploads a failed-over track at stop — its local file is missing everything after the failure', async () => {
+    stubServer();
+    const fsaFailedTracks = { 'video::epoch1': localTrack(makeBlob(2048), { chunksWritten: 2 }) };
+    await idbPutChunk({
+      sessionId: SESSION_ID, identity, participant: displayName, epoch: 'epoch1',
+      trackType: 'video', chunkIndex: 2, ext: 'webm', meta: {}, blob: makeBlob(500),
+    });
+    const groupChunks = await idbGetAllChunks();
+
+    const uploaded = [];
+    stubXhrUpload((form) => { uploaded.push(Number(form.get('chunk_index'))); return { ok: true, status: 200 }; });
+
+    await _uploadOneTrack('video', {}, fsaFailedTracks, groupChunks, new AbortController(), 'epoch1');
+
+    expect(uploaded.sort((a, b) => a - b)).toEqual([0, 2]);
+    expect(hasPendingLocalUploads()).toBe(false);
   });
 });
 
