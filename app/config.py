@@ -122,9 +122,10 @@ class Settings(BaseSettings):
     # this server, whose peering is the bottleneck for many of them. Needs a
     # CORS rule on the bucket allowing PUT from this site's origin (see
     # README). Any track whose cloud upload can't start or fails falls back
-    # to the normal upload-to-server path automatically. Only takes effect
-    # when a bucket is configured; set false to always upload to the server.
-    direct_cloud_upload: bool = True
+    # to the normal upload-to-server path automatically. Opt-in, since it
+    # needs that bucket CORS rule; only takes effect when a bucket is
+    # configured.
+    direct_cloud_upload: bool = False
 
     # S3-compatible object storage (for editor delivery)
     s3_endpoint_url: str = ""

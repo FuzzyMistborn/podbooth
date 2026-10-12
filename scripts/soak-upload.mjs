@@ -26,9 +26,9 @@
 //     [--fail-rate 0.02] [--stall-rate 0.01] [--out soak-results] [--no-direct-cloud]
 //
 // Direct-to-cloud: by default participants try the same direct-to-bucket
-// upload a browser would (falling back to the server if the instance has no
-// bucket configured); --no-direct-cloud forces the upload-through-the-server
-// path. Node doesn't enforce CORS, so this can't check the bucket's CORS
+// upload a browser would (falling back to the server if the instance hasn't
+// enabled it with DIRECT_CLOUD_UPLOAD=true and a bucket); --no-direct-cloud
+// forces the upload-through-the-server path. Node doesn't enforce CORS, so this can't check the bucket's CORS
 // rule — one real browser recording still needs to confirm that.
 //
 // --url/--api-key/--password can also come from SOAK_URL, SOAK_API_KEY and

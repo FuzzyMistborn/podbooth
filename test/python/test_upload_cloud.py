@@ -250,3 +250,10 @@ def test_deleting_a_session_also_clears_its_leftover_raw_uploads(monkeypatch):
     s3.delete_session_objects("sess-9")
 
     assert "PodBooth/raw-uploads/sess-9/" in listed
+
+
+def test_direct_upload_is_opt_in(client, session, bucket, monkeypatch):
+    # It needs a CORS rule on the bucket, so a bucket configured only for
+    # editor delivery mustn't start sending every browser to it by default.
+    from app.config import Settings
+    assert Settings.model_fields["direct_cloud_upload"].default is False

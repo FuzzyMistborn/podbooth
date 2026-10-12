@@ -253,13 +253,13 @@ The R2 bucket must allow public GET requests on the `sessions/` prefix (for the 
 
 ### Direct-to-Cloud Recording Upload
 
-When an S3-compatible bucket is configured (R2, B2 or `S3_*`), recordings are uploaded **straight from each participant's browser to the bucket** after recording stops, instead of through the PodBooth server. The server then downloads each file over its own connection and processes it as usual, deleting the bucket copy once processing succeeds. This helps most when guests have a poor route to the PodBooth server itself: they only need a good connection to Cloudflare (or your S3 provider).
+Optionally, when an S3-compatible bucket is configured (R2, B2 or `S3_*`), recordings can be uploaded **straight from each participant's browser to the bucket** after recording stops, instead of through the PodBooth server. The server then downloads each file over its own connection and processes it as usual, deleting the bucket copy once processing succeeds. This helps most when guests have a poor route to the PodBooth server itself: they only need a good connection to Cloudflare (or your S3 provider).
 
 If a browser can't reach the bucket, or anything in the upload fails, that recording automatically falls back to uploading through the PodBooth server, and nothing is lost.
 
 | Variable | Required | Description |
 |---|---|---|
-| `DIRECT_CLOUD_UPLOAD` | No | Set `false` to always upload through the PodBooth server. Default: `true` (takes effect only when a bucket is configured) |
+| `DIRECT_CLOUD_UPLOAD` | No | Set `true` to enable (requires a configured bucket and the CORS rule below). Default: `false` (upload through the PodBooth server) |
 
 The bucket needs a **CORS rule allowing `PUT` from your PodBooth site**, because browsers send the files directly. In the R2 dashboard: bucket → Settings → CORS Policy, then add this rule alongside any existing ones (for example the editor portal's):
 
