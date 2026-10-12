@@ -62,7 +62,6 @@ async function startRecording() {
 async function stopLocalRecordingAndUpload() {
   await stopLocalRecording();
   setRecordingUI(false);
-  showLocalUploadButton();
   await waitForUploads();
 }
 
@@ -145,12 +144,6 @@ async function stopRecording() {
   // recordingEpoch here can't make this pass finalize/delete under the new
   // take's epoch. Don't reorder these without keeping that guarantee.
   setRecordingUI(false);
-  // Show the local-upload link right away, same as the guest path
-  // (stopLocalRecordingAndUpload) — it's an independent upload flow with no
-  // dependency on this recording's own upload/assembly, so it shouldn't sit
-  // hidden behind waitForUploads (chunk upload + up to ~2 minutes of
-  // assembly polling) just because this call happens to run on the host.
-  if (typeof showLocalUploadButton === 'function') showLocalUploadButton();
   await waitForUploads();
   if (btnStopRec) btnStopRec.disabled = false;
 }
@@ -185,7 +178,6 @@ function setRecordingUI(recording) {
     stopRecStatus();
     startFilesPoll();
   }
-  if (typeof refreshLocalUploadButton === 'function') refreshLocalUploadButton();
 }
 
 function updateRecTimer() {

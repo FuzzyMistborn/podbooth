@@ -2457,8 +2457,7 @@ body.no-mirror .participant-tile.local video { transform: none; }
   border: 1px solid var(--yellow);
   color: var(--yellow);
 }
-.upload-banner.done,
-.upload-banner.local {
+.upload-banner.done {
   background: var(--bg-2);
   border: 1px solid var(--green);
   color: var(--green);
@@ -2527,20 +2526,6 @@ body.no-mirror .participant-tile.local video { transform: none; }
   opacity: 0.85;
 }
 .upload-cancel-btn:hover { opacity: 1; }
-.upload-now-btn {
-  align-self: flex-start;
-  background: var(--green);
-  border: 1px solid var(--green);
-  border-radius: var(--radius);
-  color: var(--bg-2);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-.upload-now-btn:hover { opacity: 0.9; }
 .upload-banner-main {
   display: flex;
   flex-direction: column;

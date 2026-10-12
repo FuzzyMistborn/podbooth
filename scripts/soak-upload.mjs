@@ -407,9 +407,6 @@ async function participant(args, spec) {
     let fsaTakeNumberPromise = null;
     let fsaFailedTracks = {};
     let DIRECT_CLOUD_UPLOAD = ${args.directCloud};
-    let _pendingLocalUploads = [];
-    let _localUploadRun = null;
-    let onLocalUploadsDrained = null;
     let _persistQueues = { audio: Promise.resolve(), video: Promise.resolve(), screen: Promise.resolve() };
     let uploadPending = false;
     let uploadStats = { queued: 0, completed: 0 };

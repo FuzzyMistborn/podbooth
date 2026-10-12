@@ -908,104 +908,11 @@ function finalizeTrack(trackType, meta, epoch = recordingEpoch) {
 // for the same run shares one outcome instead of re-triggering it.
 let _uploadPass = { epoch: null, promise: null };
 
-// Tracks the last pass left on the local disk instead of uploading — read by
-// waitForUploads to pick the right banner.
-let _localOnlyTrackCount = 0;
-
-// A participant who chose local-disk recording on prejoin keeps their clean
-// local-file tracks on disk at stop instead of uploading them automatically;
-// they're sent later, on demand, by uploadLocalRecordings (the 'Upload
-// recording' button). Each _pendingLocalUploads entry (declared in
-// studio.js) carries everything that upload needs — the open file's track
-// wrapper and its finalize payload — rather than pointing back into
-// fsaOpenPromises/pendingFinalizeMeta, since a retake's startLocalRecording
-// resets both. Spans takes: one click uploads them all.
-
 function _resetUploadProgress() {
   uploadStats.queued = 0;
   uploadStats.completed = 0;
   uploadStats.bytesTotal = 0;
   uploadStats.bytesDone = 0;
-}
-
-function hasPendingLocalUploads() {
-  return _pendingLocalUploads.length > 0;
-}
-
-// Uploading while recording would compete with the live call for bandwidth
-// (the reason background upload during recording was removed), so the
-// button only shows between takes.
-function refreshLocalUploadButton() {
-  const btn = document.getElementById('btn-upload-recording');
-  if (!btn) return;
-  const show = hasPendingLocalUploads() && !isRecording;
-  btn.style.display = show ? '' : 'none';
-  btn.disabled = !!_localUploadRun;
-}
-
-function uploadLocalRecordings() {
-  if (_localUploadRun) return _localUploadRun;
-  if (isRecording) {
-    showToast?.('Stop recording before uploading');
-    return Promise.resolve();
-  }
-  if (!hasPendingLocalUploads()) return Promise.resolve();
-  _localUploadRun = _doUploadLocalRecordings().finally(() => {
-    _localUploadRun = null;
-    refreshLocalUploadButton();
-  });
-  refreshLocalUploadButton();
-  return _localUploadRun;
-}
-
-async function _doUploadLocalRecordings() {
-  _resetUploadProgress();
-  uploadHasError = false;
-  uploadCancelled = false;
-  showUploadBanner('uploading');
-  const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
-  window.addEventListener('beforeunload', _unloadGuard);
-  try {
-    const abortController = uploadAbortController = new AbortController();
-    const batch = _pendingLocalUploads.slice();
-    await Promise.all(batch.map(async (entry) => {
-      const key = `${entry.trackType}::${entry.epoch}`;
-      try {
-        const ok = await _uploadOneTrack(
-          entry.trackType, { [key]: Promise.resolve(entry.track) }, {}, [], abortController, entry.epoch,
-          { forceUpload: true, finalizeMeta: entry.meta },
-        );
-        // Only drop it once the server has the whole track and its finalize —
-        // a failed or cancelled upload stays queued for the next click.
-        if (ok) _pendingLocalUploads = _pendingLocalUploads.filter(e => e !== entry);
-      } catch (e) {
-        console.error(`uploadLocalRecordings: ${key} failed:`, e);
-        uploadHasError = true;
-      }
-    }));
-
-    if (uploadCancelled) { showUploadBanner('cancelled'); return; }
-    if (uploadHasError) { showUploadBanner('error'); return; }
-    // Everything's on the server — closing the tab can no longer lose
-    // anything, so stop guarding it (and let a session-ended guest go)
-    // rather than holding them through server-side processing.
-    window.removeEventListener('beforeunload', _unloadGuard);
-    if (!hasPendingLocalUploads() && typeof onLocalUploadsDrained === 'function') onLocalUploadsDrained();
-    if (await _awaitAssemblyAndVerify()) {
-      showUploadBanner('done');
-      setTimeout(() => hideUploadBanner(), 8000);
-    }
-  } catch (e) {
-    showUploadBanner('error');
-  } finally {
-    window.removeEventListener('beforeunload', _unloadGuard);
-  }
-}
-
-// The 'uploading' banner is shown lazily, the first time something actually
-// goes to the server — a pass where every track stays local never shows it.
-function _ensureUploadingBanner() {
-  if (!uploadPending) showUploadBanner('uploading');
 }
 
 // epoch defaults to a read of the module global at call time — every caller
@@ -1043,7 +950,6 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
   // resolves late can never end up checking a *different* pass's controller
   // if the module-level variable has since been reassigned by a newer pass.
   const abortController = uploadAbortController = new AbortController();
-  _localOnlyTrackCount = 0;
   // Drain every track's persist queue BEFORE snapshotting IndexedDB. The
   // final chunk(s) of a track (flushPcm(true), the last ondataavailable) are
   // enqueued but not awaited by stopLocalRecording, so they can still be
@@ -1071,7 +977,6 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
   uploadStats.queued = mine.length;
   uploadStats.bytesTotal = (uploadStats.bytesTotal || 0) + mine.reduce((n, c) => n + (c.size || 0), 0);
   uploadStats.completed = 0;
-  if (mine.length > 0) _ensureUploadingBanner();
   refreshUploadBanner();
 
   // Union of groups that have a finalize payload, an open/failed FSA file
@@ -1114,10 +1019,8 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
 const FSA_UPLOAD_SLICE_BYTES = 5 * 1024 * 1024;
 
 // Returns true once the track is fully on the server and finalized.
-// opts.forceUpload sends a clean local-file track instead of keeping it on
-// disk (uploadLocalRecordings); opts.finalizeMeta supplies its finalize
-// payload directly rather than from pendingFinalizeMeta, which a retake may
-// have reset since the track was recorded.
+// opts.finalizeMeta supplies the finalize payload directly rather than from
+// pendingFinalizeMeta.
 async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, groupChunks, abortController, epoch, opts = {}) {
   // enqueueChunk's writes are chained onto _persistQueues[trackType] but not
   // awaited by the caller (MediaRecorder's onstop isn't async-aware), so the
@@ -1147,22 +1050,6 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
     // 44-byte header back off just for the copy we upload.
     if (localTrack.isRawAudio) file = file.slice(44);
 
-    if (fsaTrack && !opts.forceUpload) {
-      // Closing above already finished the file on disk (WAV header patched
-      // for raw audio). Queue it for uploadLocalRecordings, with its
-      // finalize payload, instead of sending it now. A failed-over track
-      // (failedTrack) still uploads below: its local file is missing
-      // everything recorded after the failure, so it isn't a usable copy.
-      recLog('_uploadAllRecordedChunks: keeping %s on local disk (%d bytes) — queued for on-demand upload', trackType, file.size);
-      _localOnlyTrackCount++;
-      if (!_pendingLocalUploads.some(e => e.trackType === trackType && e.epoch === epoch)) {
-        _pendingLocalUploads.push({ trackType, epoch, track: fsaTrack, meta: pendingFinalizeMeta[groupKey] });
-      }
-      delete pendingFinalizeMeta[groupKey];
-      return false;
-    }
-
-    _ensureUploadingBanner();
     if (fsaTrack && _directCloudUploadEnabled()) {
       const result = await _tryDirectCloud(trackType, epoch, file, localTrack.ext, groupKey, opts, abortController);
       if (result !== 'fallback') return result === 'ok';
@@ -1296,9 +1183,7 @@ async function waitForUploads() {
   // write-through count for a frame before _doUploadAllRecordedChunks
   // overwrites it with the real (much smaller) upload count moments later.
   _resetUploadProgress();
-  // Local-disk recorders may not upload anything at all — let the pass
-  // decide (_ensureUploadingBanner) rather than flashing 'Uploading…'.
-  if (!fsaDirHandle) showUploadBanner('uploading');
+  showUploadBanner('uploading');
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
   try {
@@ -1322,21 +1207,10 @@ async function waitForUploads() {
     // backstop sweep in case any individual delete failed along the way.
     idbDeleteEpoch(SESSION_ID, identity, epoch);
 
-    if (_localOnlyTrackCount > 0 && !uploadPending) {
-      // Every track stayed on local disk — nothing to assemble or verify.
-      showUploadBanner('local');
-      return;
-    }
-
     // Everything's on the server — closing the tab can no longer lose
     // anything, so stop guarding it through server-side processing.
     window.removeEventListener('beforeunload', _unloadGuard);
     if (!(await _awaitAssemblyAndVerify())) return;
-
-    if (_localOnlyTrackCount > 0) {
-      showUploadBanner('local');
-      return;
-    }
 
     showUploadBanner('done');
     setTimeout(() => hideUploadBanner(), 8000);
@@ -1344,7 +1218,6 @@ async function waitForUploads() {
     showUploadBanner('error');
   } finally {
     window.removeEventListener('beforeunload', _unloadGuard);
-    refreshLocalUploadButton();
   }
 }
 
@@ -1562,15 +1435,6 @@ function _buildUploadBanner(banner, state) {
   } else if (state === 'done') {
     lbl.textContent = '✓ Recordings ready';
     main.appendChild(lbl);
-  } else if (state === 'local') {
-    lbl.textContent = '✓ Saved to your recording folder';
-    main.appendChild(lbl);
-    const uploadBtn = document.createElement('button');
-    uploadBtn.className = 'upload-now-btn';
-    uploadBtn.textContent = 'Upload now';
-    uploadBtn.title = 'Send this recording to PodBooth';
-    uploadBtn.addEventListener('click', uploadLocalRecordings);
-    main.appendChild(uploadBtn);
   } else if (state === 'cancelled') {
     lbl.textContent = 'Upload cancelled — recording not sent';
     main.appendChild(lbl);
@@ -1594,7 +1458,7 @@ function showUploadBanner(state) {
   uploadPending = (state === 'uploading');
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
-  banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying', 'local');
+  banner.classList.remove('hidden', 'uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying');
   banner.classList.add(state);
   _buildUploadBanner(banner, state);
 
@@ -1621,7 +1485,7 @@ function hideUploadBanner() {
   const banner = document.getElementById('upload-banner');
   if (!banner) return;
   banner.classList.add('hidden');
-  banner.classList.remove('uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying', 'local');
+  banner.classList.remove('uploading', 'done', 'error', 'assembling', 'cancelled', 'verifying');
 }
 
 function showUploadWarnings(issues) {
