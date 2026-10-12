@@ -1119,6 +1119,13 @@ async function _awaitAssemblyAndVerify() {
   _assemblyView = { progress: null, jobs: [], slow: false };
   showUploadBanner('assembling');
   const started = Date.now();
+  // A guest's banner is about their own recording — scoped to it, they
+  // aren't held on 'processing' by other participants' (much longer) video
+  // transcodes. The host waits on the whole session, since its verify step
+  // checks everyone's files.
+  const statusUrl = IS_HOST
+    ? `/api/session/${SESSION_ID}/assembly-status`
+    : `/api/session/${SESSION_ID}/assembly-status?${new URLSearchParams({ participant: displayName, identity })}`;
   let finished = false;
   while (Date.now() - started < ASSEMBLY_GIVE_UP_MS) {
     const slow = Date.now() - started >= ASSEMBLY_PATIENCE_MS;
@@ -1128,11 +1135,17 @@ async function _awaitAssemblyAndVerify() {
     }
     await new Promise(r => setTimeout(r, slow ? ASSEMBLY_SLOW_POLL_MS : ASSEMBLY_POLL_MS));
     try {
-      const r = await fetch(`/api/session/${SESSION_ID}/assembly-status`);
+      const r = await fetch(statusUrl);
       if (!r.ok) continue;
       const status = await r.json();
       if (!status.assembling) { finished = true; break; }
-      _assemblyView.progress = typeof status.progress === 'number' ? status.progress : null;
+      // Never move the bar backwards — e.g. on the host's session-wide view
+      // a participant whose upload finished late adds new jobs at 0%. A
+      // reading with an unknown length keeps the last known value rather
+      // than flipping a moving bar back to indeterminate.
+      if (typeof status.progress === 'number') {
+        _assemblyView.progress = Math.max(_assemblyView.progress ?? 0, status.progress);
+      }
       _assemblyView.jobs = Array.isArray(status.jobs) ? status.jobs : [];
       _refreshAssemblyBanner();
     } catch (e) {}
