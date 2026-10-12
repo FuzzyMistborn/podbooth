@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
-from app.routers.upload import recover_orphaned_chunks, is_merging
+from app.routers.upload import recover_orphaned_chunks, is_merging, has_assembly_task, _session_assembly_jobs
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.auth import CSRF_COOKIE, make_csrf_token, require_csrf, require_host, require_api_key
 from app.limiter import limiter
@@ -870,4 +870,18 @@ async def assembly_status_route(session_id: str):
         if is_merging(pdir):
             assembling = True
             break
-    return JSONResponse({"assembling": assembling})
+        # Between a track's transcode deleting its chunks and its A/V merge
+        # registering above, the task is still running ffprobe checks with
+        # neither signal visible — the client polled straight through that
+        # gap and showed '✓ Recordings ready' with the merge still to come
+        # (found by scripts/soak-upload.mjs). The task itself spans it.
+        if has_assembly_task(pdir):
+            assembling = True
+            break
+    # Per-job progress for the client's processing meter. `progress` is the
+    # mean across jobs, or None if any job's length is unknown (or none have
+    # started yet — e.g. another participant is still uploading).
+    jobs = _session_assembly_jobs(session_path)
+    fractions = [j["fraction"] for j in jobs]
+    progress = (sum(fractions) / len(fractions)) if fractions and None not in fractions else None
+    return JSONResponse({"assembling": assembling, "progress": progress, "jobs": jobs})

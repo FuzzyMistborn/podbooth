@@ -428,6 +428,12 @@ function formatUploadSpeed(bps) {
   return `${Math.round(bps / 1024)} KB/s`;
 }
 
+// Bytes sent so far by attempts still in flight — with uploadStats.bytesDone
+// (whole chunks confirmed by the server) this drives the byte-based progress
+// bar, so it moves while a multi-MB chunk is mid-transfer instead of only
+// jumping when each one completes.
+let _uploadInFlightBytes = 0;
+
 // XHR (not fetch) because only XHR exposes upload progress events — fetch's
 // request streaming has no equivalent, so there's no way to distinguish
 // "still sending, just slow" from "completely stalled" with fetch alone.
@@ -443,6 +449,10 @@ function _xhrUploadChunk(form, cancelSignal) {
       clearTimeout(stallTimer);
       clearTimeout(hardCapTimer);
       if (cancelSignal) cancelSignal.removeEventListener('abort', onCancel);
+      // This attempt's partial bytes stop counting toward the progress bar
+      // either way: a success is counted whole via uploadStats.bytesDone, a
+      // failure will be resent from zero.
+      _uploadInFlightBytes = Math.max(0, _uploadInFlightBytes - lastLoaded);
     };
     const finish = (fn, arg) => {
       if (settled) return;
@@ -460,6 +470,7 @@ function _xhrUploadChunk(form, cancelSignal) {
     xhr.upload.addEventListener('progress', resetStallTimer);
     xhr.upload.addEventListener('progress', (event) => {
       _recordUploadBytes(event.loaded - lastLoaded);
+      _uploadInFlightBytes += event.loaded - lastLoaded;
       lastLoaded = event.loaded;
     });
     xhr.addEventListener('loadstart', resetStallTimer);
@@ -573,6 +584,7 @@ async function uploadChunkWithRetry(blob, trackType, index, ext, epoch, meta = {
       const { ok: httpOk, status } = await _xhrUploadChunk(form, cancelSignal);
       if (httpOk) {
         recLog('uploadChunk: %s #%d ok', trackType, index);
+        uploadStats.bytesDone = (uploadStats.bytesDone || 0) + blob.size;
         uploadStruggling.delete(key);
         if (uploadStruggling.size === 0) uploadHasError = false;
         return true;
@@ -677,6 +689,13 @@ let _localOnlyTrackCount = 0;
 // fsaOpenPromises/pendingFinalizeMeta, since a retake's startLocalRecording
 // resets both. Spans takes: one click uploads them all.
 
+function _resetUploadProgress() {
+  uploadStats.queued = 0;
+  uploadStats.completed = 0;
+  uploadStats.bytesTotal = 0;
+  uploadStats.bytesDone = 0;
+}
+
 function hasPendingLocalUploads() {
   return _pendingLocalUploads.length > 0;
 }
@@ -708,8 +727,7 @@ function uploadLocalRecordings() {
 }
 
 async function _doUploadLocalRecordings() {
-  uploadStats.queued = 0;
-  uploadStats.completed = 0;
+  _resetUploadProgress();
   uploadHasError = false;
   uploadCancelled = false;
   showUploadBanner('uploading');
@@ -736,12 +754,15 @@ async function _doUploadLocalRecordings() {
 
     if (uploadCancelled) { showUploadBanner('cancelled'); return; }
     if (uploadHasError) { showUploadBanner('error'); return; }
-    const verified = await _awaitAssemblyAndVerify();
-    if (verified) {
+    // Everything's on the server — closing the tab can no longer lose
+    // anything, so stop guarding it (and let a session-ended guest go)
+    // rather than holding them through server-side processing.
+    window.removeEventListener('beforeunload', _unloadGuard);
+    if (!hasPendingLocalUploads() && typeof onLocalUploadsDrained === 'function') onLocalUploadsDrained();
+    if (await _awaitAssemblyAndVerify()) {
       showUploadBanner('done');
       setTimeout(() => hideUploadBanner(), 8000);
     }
-    if (!hasPendingLocalUploads() && typeof onLocalUploadsDrained === 'function') onLocalUploadsDrained();
   } catch (e) {
     showUploadBanner('error');
   } finally {
@@ -816,6 +837,7 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
   }
 
   uploadStats.queued = mine.length;
+  uploadStats.bytesTotal = (uploadStats.bytesTotal || 0) + mine.reduce((n, c) => n + (c.size || 0), 0);
   uploadStats.completed = 0;
   if (mine.length > 0) _ensureUploadingBanner();
   refreshUploadBanner();
@@ -928,6 +950,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
       // indices 0..N right on top of them). Slicing is reserved for a clean
       // FSA track, which never has trailing IndexedDB chunks.
       uploadStats.queued++;
+      uploadStats.bytesTotal = (uploadStats.bytesTotal || 0) + file.size;
       refreshUploadBanner();
       const wholeMeta = { subsumes_chunks: failedTrack.chunksWritten };
       ok = await uploadChunkWithRetry(file, trackType, 0, localTrack.ext, epoch, wholeMeta, SESSION_ID, identity, displayName, abortController.signal);
@@ -936,6 +959,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
     } else {
       const totalSlices = Math.max(1, Math.ceil(file.size / FSA_UPLOAD_SLICE_BYTES));
       uploadStats.queued += totalSlices;
+      uploadStats.bytesTotal = (uploadStats.bytesTotal || 0) + file.size;
       refreshUploadBanner();
       const sliceIndices = Array.from({ length: totalSlices }, (_, i) => i);
       ok = await _uploadPoolRun(sliceIndices, async (i) => {
@@ -1016,8 +1040,7 @@ async function waitForUploads() {
   // banner's first paint, or "Uploading N/M chunks" flashes that leftover
   // write-through count for a frame before _doUploadAllRecordedChunks
   // overwrites it with the real (much smaller) upload count moments later.
-  uploadStats.queued = 0;
-  uploadStats.completed = 0;
+  _resetUploadProgress();
   // Local-disk recorders may not upload anything at all — let the pass
   // decide (_ensureUploadingBanner) rather than flashing 'Uploading…'.
   if (!fsaDirHandle) showUploadBanner('uploading');
@@ -1050,6 +1073,9 @@ async function waitForUploads() {
       return;
     }
 
+    // Everything's on the server — closing the tab can no longer lose
+    // anything, so stop guarding it through server-side processing.
+    window.removeEventListener('beforeunload', _unloadGuard);
     if (!(await _awaitAssemblyAndVerify())) return;
 
     if (_localOnlyTrackCount > 0) {
@@ -1067,17 +1093,55 @@ async function waitForUploads() {
   }
 }
 
-// Waits for server-side assembly, then (host only) runs verify-recordings.
-// Returns false if verify found issues and already put up its warnings
-// banner, so the caller shouldn't overwrite it with 'done'.
+// Server-side assembly (concatenate + ffmpeg transcode + A/V merge) of a
+// 45–60 minute take routinely runs for many minutes. This used to give up
+// after ~2 minutes of polling and fall through to verify and a green
+// '✓ Recordings ready' while the server was still mid-transcode — so the
+// banner was claiming success for files that didn't exist yet. Now 'done'
+// only ever follows an explicit assembling:false from the server (a failed
+// poll never counts as finished). Past ASSEMBLY_PATIENCE_MS the banner says
+// the upload itself is complete and it's safe to close the tab, while
+// polling continues (less often) to show the meter.
+const ASSEMBLY_POLL_MS = 2000;
+const ASSEMBLY_SLOW_POLL_MS = 10000;
+const ASSEMBLY_PATIENCE_MS = 2 * 60 * 1000;
+// Matches the server's default ffmpeg_timeout_s — past this the job is dead
+// or wedged; stop polling but still never claim it finished.
+const ASSEMBLY_GIVE_UP_MS = 4 * 60 * 60 * 1000;
+
+// What the 'assembling' banner shows — refreshed on every poll.
+let _assemblyView = { progress: null, jobs: [], slow: false };
+
+// Returns false if assembly never reported finishing (banner left saying
+// it's still processing) or verify found issues (warnings banner up), so
+// the caller shouldn't overwrite either with 'done'.
 async function _awaitAssemblyAndVerify() {
+  _assemblyView = { progress: null, jobs: [], slow: false };
   showUploadBanner('assembling');
-  for (let i = 0; i < 60; i++) {
-    await new Promise(r => setTimeout(r, 2000));
+  const started = Date.now();
+  let finished = false;
+  while (Date.now() - started < ASSEMBLY_GIVE_UP_MS) {
+    const slow = Date.now() - started >= ASSEMBLY_PATIENCE_MS;
+    if (slow && !_assemblyView.slow) {
+      _assemblyView.slow = true;
+      _refreshAssemblyBanner();
+    }
+    await new Promise(r => setTimeout(r, slow ? ASSEMBLY_SLOW_POLL_MS : ASSEMBLY_POLL_MS));
     try {
       const r = await fetch(`/api/session/${SESSION_ID}/assembly-status`);
-      if (r.ok && !(await r.json()).assembling) break;
+      if (!r.ok) continue;
+      const status = await r.json();
+      if (!status.assembling) { finished = true; break; }
+      _assemblyView.progress = typeof status.progress === 'number' ? status.progress : null;
+      _assemblyView.jobs = Array.isArray(status.jobs) ? status.jobs : [];
+      _refreshAssemblyBanner();
     } catch (e) {}
+  }
+  if (!finished) {
+    console.error('_awaitAssemblyAndVerify: server still reports assembling after %ds — leaving the "still processing" banner up', Math.round(ASSEMBLY_GIVE_UP_MS / 1000));
+    _assemblyView.slow = true;
+    _refreshAssemblyBanner();
+    return false;
   }
 
   if (IS_HOST) {
@@ -1093,6 +1157,56 @@ async function _awaitAssemblyAndVerify() {
   return true;
 }
 
+function _refreshAssemblyBanner() {
+  const banner = document.getElementById('upload-banner');
+  if (!banner || !banner.classList.contains('assembling')) return;
+  _buildUploadBanner(banner, 'assembling');
+}
+
+const _ASSEMBLY_STAGE_LABELS = { combining: 'Combining', converting: 'Converting', merging: 'Merging audio + video for' };
+
+// "Converting video — Alice" for the first job still running, or '' if none.
+function _assemblyJobLabel(jobs) {
+  const job = jobs.find(j => j.stage !== 'done' && j.stage !== 'failed');
+  if (!job) return '';
+  const stage = _ASSEMBLY_STAGE_LABELS[job.stage] || job.stage;
+  return job.job === 'merge' ? `${stage} ${job.participant}` : `${stage} ${job.job} — ${job.participant}`;
+}
+
+function formatBytes(b) {
+  if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(1)} GB`;
+  if (b >= 1024 ** 2) return `${Math.round(b / 1024 ** 2)} MB`;
+  return `${Math.max(0, Math.round(b / 1024))} KB`;
+}
+
+function formatEta(seconds) {
+  if (!isFinite(seconds) || seconds <= 0) return '';
+  if (seconds < 60) return 'less than a minute left';
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `about ${m} min left`;
+  return `about ${Math.floor(m / 60)}h ${m % 60}m left`;
+}
+
+// Byte-based upload progress: whole chunks confirmed by the server plus
+// whatever in-flight attempts have sent so far. Falls back to chunk counts
+// when sizes aren't known (bytesTotal 0).
+function _uploadProgress() {
+  const total = uploadStats.bytesTotal || 0;
+  if (total > 0) {
+    const done = Math.min(total, (uploadStats.bytesDone || 0) + _uploadInFlightBytes);
+    return { fraction: done / total, label: `Uploading ${formatBytes(done)} of ${formatBytes(total)}`, remaining: total - done };
+  }
+  const n = uploadStats.completed, t = uploadStats.queued;
+  return { fraction: t > 0 ? n / t : 0, label: t > 0 ? `Uploading ${n}/${t} chunks` : 'Uploading recordings…', remaining: null };
+}
+
+function _uploadSpeedText(remaining) {
+  const bps = currentUploadSpeedBps();
+  const parts = [formatUploadSpeed(bps)];
+  if (remaining != null && bps > 0) parts.push(formatEta(remaining / bps));
+  return parts.filter(Boolean).join(' · ');
+}
+
 // ── Upload banner ─────────────────────────────────────────────────────────────
 
 function _buildUploadBanner(banner, state) {
@@ -1104,20 +1218,20 @@ function _buildUploadBanner(banner, state) {
   lbl.className = 'upload-banner-label';
 
   if (state === 'uploading') {
-    const n = uploadStats.completed, t = uploadStats.queued;
-    lbl.textContent = t > 0 ? `Uploading ${n}/${t} chunks` : 'Uploading recordings…';
+    const p = _uploadProgress();
+    lbl.textContent = p.label;
     main.appendChild(lbl);
     const track = document.createElement('div');
     track.className = 'upload-progress-track';
     const fill = document.createElement('div');
     fill.className = 'upload-progress-fill';
-    fill.style.width = (t > 0 ? Math.round(n / t * 100) : 0) + '%';
+    fill.style.width = Math.round(p.fraction * 100) + '%';
     track.appendChild(fill);
     main.appendChild(track);
 
     const speedReadout = document.createElement('span');
     speedReadout.className = 'upload-speed-readout';
-    speedReadout.textContent = formatUploadSpeed(currentUploadSpeedBps());
+    speedReadout.textContent = _uploadSpeedText(p.remaining);
     main.appendChild(speedReadout);
 
     const speedSelect = document.createElement('select');
@@ -1144,11 +1258,27 @@ function _buildUploadBanner(banner, state) {
     cancelBtn.addEventListener('click', cancelUpload);
     main.appendChild(cancelBtn);
   } else if (state === 'assembling') {
-    lbl.textContent = 'Assembling recordings…';
+    const { progress, jobs, slow } = _assemblyView;
+    lbl.textContent = slow
+      ? '✓ Upload complete — the server is still processing it. Safe to close this tab.'
+      : 'Processing recordings on the server…';
     main.appendChild(lbl);
-    const spin = document.createElement('span');
-    spin.className = 'upload-spinner';
-    main.appendChild(spin);
+    const track = document.createElement('div');
+    track.className = 'upload-progress-track';
+    const fill = document.createElement('div');
+    if (progress == null) {
+      fill.className = 'upload-progress-fill indeterminate';
+    } else {
+      fill.className = 'upload-progress-fill';
+      fill.style.width = Math.round(progress * 100) + '%';
+    }
+    track.appendChild(fill);
+    main.appendChild(track);
+    const detail = document.createElement('span');
+    detail.className = 'upload-speed-readout';
+    detail.textContent = [progress == null ? '' : `${Math.round(progress * 100)}%`, _assemblyJobLabel(jobs)]
+      .filter(Boolean).join(' · ');
+    main.appendChild(detail);
   } else if (state === 'verifying') {
     lbl.textContent = 'Verifying recordings…';
     main.appendChild(lbl);
@@ -1204,10 +1334,10 @@ function refreshUploadBanner() {
   const fill = banner.querySelector('.upload-progress-fill');
   const lbl  = banner.querySelector('.upload-banner-label');
   const speedReadout = banner.querySelector('.upload-speed-readout');
-  const { completed: n, queued: t } = uploadStats;
-  if (fill && t > 0) fill.style.width = Math.round(n / t * 100) + '%';
-  if (lbl)  lbl.textContent = t > 0 ? `Uploading ${n}/${t} chunks` : 'Uploading recordings…';
-  if (speedReadout) speedReadout.textContent = formatUploadSpeed(currentUploadSpeedBps());
+  const p = _uploadProgress();
+  if (fill) fill.style.width = Math.round(p.fraction * 100) + '%';
+  if (lbl)  lbl.textContent = p.label;
+  if (speedReadout) speedReadout.textContent = _uploadSpeedText(p.remaining);
 }
 
 function hideUploadBanner() {
