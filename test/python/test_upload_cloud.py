@@ -115,7 +115,29 @@ def test_start_is_refused_when_direct_upload_is_off(client, session, bucket, mon
 def test_start_returns_a_session_scoped_key(client, session, bucket):
     r = _start(client)
     assert r.status_code == 200, r.text
-    assert r.json() == {"key": KEY, "upload_id": "up-1", "part_size": upload.CLOUD_UPLOAD_PART_BYTES}
+    body = r.json()
+    assert (body["key"], body["upload_id"], body["part_size"]) == (KEY, "up-1", upload.CLOUD_UPLOAD_PART_BYTES)
+
+
+def test_start_presigns_every_part_up_front(client, session, bucket, monkeypatch):
+    # Once started, the browser shouldn't need this server again until it
+    # completes — a guest with a flaky route to the server had a whole
+    # upload stall on per-part URL requests that never came back.
+    signed = []
+    monkeypatch.setattr(s3, "generate_part_upload_url",
+                        lambda key, upload_id, n, expires_in=3600: signed.append(expires_in) or f"https://bucket/{key}?partNumber={n}")
+    part = upload.CLOUD_UPLOAD_PART_BYTES
+
+    body = _start(client, total_size=2 * part + 1).json()
+
+    assert body["part_urls"] == [f"https://bucket/{KEY}?partNumber={n}" for n in (1, 2, 3)]
+    assert set(signed) == {upload.CLOUD_PART_URL_EXPIRY_S}
+
+
+def test_start_refuses_more_parts_than_s3_allows(client, session, bucket, monkeypatch):
+    monkeypatch.setattr(settings, "max_participant_upload_gb", 0)
+    too_big = (upload._S3_MAX_PARTS + 1) * upload.CLOUD_UPLOAD_PART_BYTES
+    assert _start(client, total_size=too_big).status_code == 413
 
 
 def test_start_requires_a_joined_participant(client, session, bucket):

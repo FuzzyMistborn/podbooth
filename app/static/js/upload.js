@@ -682,8 +682,36 @@ function _directCloudUploadEnabled() {
   return typeof DIRECT_CLOUD_UPLOAD !== 'undefined' && DIRECT_CLOUD_UPLOAD === true;
 }
 
+// Requests to the PodBooth server get a timeout. A guest whose route to the
+// server is flaky — exactly who direct-to-cloud upload is for — otherwise had
+// a whole upload hang on one request that never answered; now it errors and
+// the caller's retry takes over. `signal` (e.g. the upload's cancel) still
+// aborts it early.
+const SERVER_REQUEST_TIMEOUT_MS = 30 * 1000;
+
+async function _fetchWithTimeout(url, init = {}, timeoutMs = SERVER_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const outer = init.signal;
+  const onAbort = () => controller.abort();
+  if (outer) {
+    if (outer.aborted) controller.abort();
+    outer.addEventListener('abort', onAbort, { once: true });
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (timedOut) throw new Error(`${url} timed out after ${Math.round(timeoutMs / 1000)}s`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    if (outer) outer.removeEventListener('abort', onAbort);
+  }
+}
+
 async function _postJson(url, body, signal) {
-  const r = await fetch(url, {
+  const r = await _fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -711,9 +739,10 @@ async function _blobFromChunks(groupChunks) {
   return new Blob(blobs);
 }
 
-// One part, with its own retry budget. A fresh presigned URL every attempt
-// (they expire, and a stale one's 403 is just retried). Before any part of
-// this upload has landed, two network-level failures in a row mean the
+// One part, with its own retry budget. Uses the URL /cloud/start presigned
+// for it, so the upload needs nothing from the PodBooth server while parts
+// are going up; only a 403 from the bucket (most likely that URL expired)
+// fetches a fresh one. Before any part of this upload has landed, two network-level failures in a row mean the
 // bucket isn't reachable from this browser at all — most often a missing
 // CORS rule — so give up fast and let the caller fall back, rather than
 // spending the whole retry budget on something that can't work.
@@ -723,15 +752,19 @@ async function _putPartWithRetry(cloud, partNumber, piece, signal, uploadIsProve
   const deadline = Date.now() + budget;
   let attempt = 0;
   let networkFailures = 0;
+  let url = (cloud.partUrls && cloud.partUrls[partNumber - 1]) || null;
   while (true) {
     if (signal.aborted) return false;
     attempt++;
     try {
-      const { url } = await _postJson('/api/upload/cloud/part-url', {
-        session_id: SESSION_ID, key: cloud.key, upload_id: cloud.uploadId, part_number: partNumber,
-      }, signal);
+      if (!url) {
+        ({ url } = await _postJson('/api/upload/cloud/part-url', {
+          session_id: SESSION_ID, key: cloud.key, upload_id: cloud.uploadId, part_number: partNumber,
+        }, signal));
+      }
       const { ok, status } = await _xhrPutPart(url, piece, signal);
       if (ok) return true;
+      if (status === 403) url = null;
       throw Object.assign(new Error(`HTTP ${status}`), { status });
     } catch (e) {
       if (signal.aborted) return false;
@@ -780,7 +813,10 @@ async function _uploadTrackDirectToCloud(trackType, epoch, source, ext, meta, ab
       session_id: SESSION_ID, participant: displayName, identity,
       track_type: trackType, epoch: epoch || '', ext, total_size: source.size,
     }, signal);
-    cloud = { key: started.key, uploadId: started.upload_id, partSize: started.part_size };
+    cloud = {
+      key: started.key, uploadId: started.upload_id, partSize: started.part_size,
+      partUrls: Array.isArray(started.part_urls) ? started.part_urls : null,
+    };
   } catch (e) {
     if (signal.aborted) return 'cancelled';
     recLog('cloud upload: start failed for %s (%s) — uploading through the server instead', trackType, e.message);
@@ -1354,7 +1390,7 @@ async function _awaitAssemblyAndVerify() {
     }
     await new Promise(r => setTimeout(r, slow ? ASSEMBLY_SLOW_POLL_MS : ASSEMBLY_POLL_MS));
     try {
-      const r = await fetch(statusUrl);
+      const r = await _fetchWithTimeout(statusUrl);
       if (!r.ok) continue;
       const status = await r.json();
       if (!status.assembling) { finished = true; break; }
@@ -1379,7 +1415,7 @@ async function _awaitAssemblyAndVerify() {
   if (IS_HOST) {
     showUploadBanner('verifying');
     try {
-      const vr = await fetch(`/api/session/${SESSION_ID}/verify-recordings`);
+      const vr = await _fetchWithTimeout(`/api/session/${SESSION_ID}/verify-recordings`);
       if (vr.ok) {
         const { issues } = await vr.json();
         if (issues && issues.length > 0) { showUploadWarnings(issues); return false; }

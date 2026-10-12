@@ -204,3 +204,77 @@ describe('direct-to-cloud upload', () => {
     expect(calls.serverChunks).toEqual([0]);
   });
 });
+
+describe('direct-to-cloud upload: not depending on the PodBooth server mid-upload', () => {
+  const startWithUrls = (partCount) => ({
+    ok: true, status: 200,
+    json: async () => ({
+      key: 'raw/k', upload_id: 'up1', part_size: 1000,
+      part_urls: Array.from({ length: partCount }, (_, i) => `https://bucket.example/presigned/${i + 1}`),
+    }),
+  });
+
+  it('uses the part URLs presigned at start — no per-part requests to the server', async () => {
+    stubCloud({ start: () => startWithUrls(3) });
+    const putUrls = [];
+    const realPut = globalThis._xhrPutPart;
+    globalThis._xhrPutPart = async (url, blob) => { putUrls.push(url); return realPut(url, blob); };
+    const epoch = nextEpoch();
+    await putChunks(epoch, 'video', 'webm', [1000, 1000, 500]);
+    pendingFinalizeMeta[`video::${epoch}`] = { format: 'container' };
+
+    await _uploadAllRecordedChunks(epoch);
+
+    expect(calls.partUrl).toBe(0);
+    expect(putUrls.sort()).toEqual([1, 2, 3].map(n => `https://bucket.example/presigned/${n}`));
+    expect(calls.complete).toHaveLength(1);
+  });
+
+  it('refreshes just the one part URL the bucket rejects as expired (403)', async () => {
+    let rejected = false;
+    stubCloud({
+      start: () => startWithUrls(2),
+      putPart: async (url) => {
+        if (url.endsWith('/presigned/2') && !rejected) { rejected = true; return { ok: false, status: 403 }; }
+        return { ok: true, status: 200 };
+      },
+    });
+    const epoch = nextEpoch();
+    await putChunks(epoch, 'video', 'webm', [1000, 1000]);
+    pendingFinalizeMeta[`video::${epoch}`] = { format: 'container' };
+
+    await _uploadAllRecordedChunks(epoch);
+
+    expect(calls.partUrl).toBe(1); // only part 2's, after the 403
+    expect(calls.complete).toHaveLength(1);
+    expect(calls.serverChunks).toEqual([]);
+  });
+
+  it('a request to the server that never answers times out instead of hanging the upload', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      globalThis.fetch = vi.fn((url, init) => new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      }));
+
+      const result = _postJson('/api/upload/cloud/part-url', {}).then(() => 'resolved', (e) => e.message);
+      await vi.advanceTimersByTimeAsync(30_000 + 1); // SERVER_REQUEST_TIMEOUT_MS
+
+      expect(await result).toMatch(/timed out after 30s/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a cancel still aborts a server request immediately, not after the timeout', async () => {
+    globalThis.fetch = vi.fn((url, init) => new Promise((_, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    }));
+    const controller = new AbortController();
+
+    const result = _postJson('/api/upload/cloud/start', {}, controller.signal).then(() => 'resolved', (e) => e.name);
+    controller.abort();
+
+    expect(await result).toBe('AbortError');
+  });
+});
