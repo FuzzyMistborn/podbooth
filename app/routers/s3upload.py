@@ -123,6 +123,8 @@ def _file_source(key: str) -> str:
             return "production_speakers"
         if sub == "video":
             return "production_video"
+        if sub == "bonus":
+            return "production_bonus"
         return "production"
     if "local" in parts:
         return "local"

@@ -297,7 +297,7 @@ The `cloudflare/` directory in this repo is a self-contained Cloudflare Pages ap
 - Bind an R2 bucket to it as `R2_BUCKET` (the same bucket configured via `R2_*` above).
 - Set `window.PORTAL_CONFIG.R2_BASE_URL` in `cloudflare/config.js` to your R2 public custom domain.
 
-Once deployed, the portal lets an editor download session files (per the manifest) and upload finished production files back into R2, sorted into three folders under `production/`: `full` (full mix), `speakers` (individual speaker tracks), and `video` (finished video) — each shows up in PodBooth's file listing grouped accordingly.
+Once deployed, the portal lets an editor download session files (per the manifest) and upload finished production files back into R2, sorted into four folders under `production/`: `full` (full mix), `speakers` (individual speaker tracks), `video` (finished video), and `bonus` (bonus / post-show content) — each shows up in PodBooth's file listing grouped accordingly.
 
 An editor upload can also notify a Discord channel, independently of the "editor link ready" notification below — set on the **Cloudflare Pages project**, not in PodBooth's `.env`:
 

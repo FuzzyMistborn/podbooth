@@ -35,7 +35,7 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // in index.html — a folder added here needs the same addition in both, or
 // its files silently land in index.html's "other" bucket / show an
 // unlabeled Discord notification.
-const ALLOWED_FOLDERS  = new Set(['full', 'speakers', 'video']);
+const ALLOWED_FOLDERS  = new Set(['full', 'speakers', 'video', 'bonus']);
 // Workers are stateless per-request, so there's no cheap way to track a
 // multipart upload's running total across separate 'part' calls. Instead,
 // bound the worst case indirectly: cap each part's size and cap the part
@@ -103,6 +103,7 @@ const FOLDER_SOURCES = {
   full: 'production_full',
   speakers: 'production_speakers',
   video: 'production_video',
+  bonus: 'production_bonus',
 };
 
 // Adds (or replaces, keyed on R2 object key) this upload's entry in the
@@ -141,7 +142,7 @@ export async function onRequestPost({ request, env, params, waitUntil }) {
   const action    = url.searchParams.get('action') || '';
 
   if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) return err(400, 'Invalid token format');
-  if (!ALLOWED_FOLDERS.has(folder)) return err(400, 'folder must be "full", "speakers", or "video"');
+  if (!ALLOWED_FOLDERS.has(folder)) return err(400, 'folder must be "full", "speakers", "video", or "bonus"');
 
   const manifestKey  = `sessions/${sessionId}/manifest.json`;
   const manifestObj = await env.R2_BUCKET.get(manifestKey);

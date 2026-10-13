@@ -541,6 +541,15 @@
       <div class="upload-progress-list" id="upload-progress-list-video"></div>
     </div>
 
+    <div class="upload-section">
+      <label class="upload-dropzone" id="upload-dropzone-bonus" for="upload-input-bonus">
+        <div>Drop bonus / post-show content here, or click to upload</div>
+        <div class="upload-hint">Optional — extra content that isn't part of the main episode. Uploaded to production/bonus</div>
+        <input type="file" id="upload-input-bonus" multiple />
+      </label>
+      <div class="upload-progress-list" id="upload-progress-list-bonus"></div>
+    </div>
+
     <div class="portal-footer">
       <span class="footer-warning">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
@@ -793,7 +802,7 @@
   // source: R2 source label used only for the group's aria-label (no longer routes through the ZIP endpoint)
   // Tracks whether the #group-production anchor has already been placed on
   // this render pass, so a session with multiple production-* subgroups
-  // (full/speakers/video) only tags the first one — duplicate ids aren't
+  // (full/speakers/video/bonus) only tags the first one — duplicate ids aren't
   // valid HTML and the browser only honors the first match anyway.
   var productionAnchorPlaced = false;
 
@@ -843,13 +852,14 @@
     // Keep in sync with ALLOWED_FOLDERS in functions/api/upload/[sessionId].js
     // and FOLDER_LABELS in functions/_discord.js (production_* entries here
     // correspond to those folder names) — an unlisted source falls into "other".
-    var knownSources     = ["podbooth", "local", "exports", "production", "production_full", "production_speakers", "production_video"];
+    var knownSources     = ["podbooth", "local", "exports", "production", "production_full", "production_speakers", "production_video", "production_bonus"];
     var podbooth         = files.filter(function (f) { return f.source === "podbooth"; });
     var local            = files.filter(function (f) { return f.source === "local"; });
     var exports          = files.filter(function (f) { return f.source === "exports"; });
     var productionFull   = files.filter(function (f) { return f.source === "production_full"; });
     var productionTracks = files.filter(function (f) { return f.source === "production_speakers"; });
     var productionVideo  = files.filter(function (f) { return f.source === "production_video"; });
+    var productionBonus  = files.filter(function (f) { return f.source === "production_bonus"; });
     var production       = files.filter(function (f) { return f.source === "production"; });
     var other            = files.filter(function (f) { return knownSources.indexOf(f.source) === -1; });
 
@@ -876,6 +886,10 @@
     if (productionVideo.length > 0) {
       list.appendChild(makeGroupHeader("Production — Video", productionVideo, "production_video"));
       productionVideo.forEach(function (f) { list.appendChild(makeFileRow(f)); });
+    }
+    if (productionBonus.length > 0) {
+      list.appendChild(makeGroupHeader("Production — Bonus / Post-Show", productionBonus, "production_bonus"));
+      productionBonus.forEach(function (f) { list.appendChild(makeFileRow(f)); });
     }
     if (production.length > 0) {
       list.appendChild(makeGroupHeader("Production Files", production, "production"));
@@ -1134,6 +1148,7 @@
     initUploadZone("upload-dropzone-full", "upload-input-full", "upload-progress-list-full", "full");
     initUploadZone("upload-dropzone-speakers", "upload-input-speakers", "upload-progress-list-speakers", "speakers");
     initUploadZone("upload-dropzone-video", "upload-input-video", "upload-progress-list-video", "video");
+    initUploadZone("upload-dropzone-bonus", "upload-input-bonus", "upload-progress-list-bonus", "bonus");
   }
 
   // ── Main ───────────────────────────────────────────────────────────────────
