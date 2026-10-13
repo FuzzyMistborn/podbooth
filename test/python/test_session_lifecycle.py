@@ -254,3 +254,49 @@ def test_list_sessions_does_not_include_deleted_session(client, recordings_dir):
     assert r.status_code == 200
     ids = {s["id"] for s in r.json()["sessions"]}
     assert created["id"] not in ids
+
+
+def test_delete_is_refused_while_a_track_is_still_assembling(client, recordings_dir):
+    # rmtree under a running ffmpeg/download just fails those jobs and
+    # discards the upload — the host has to mean it.
+    from app.routers import upload
+    from pathlib import Path
+    created = _create_session(client, recordings_dir)
+    session_id, host_token = created["id"], created["host_token"]
+    from app.models import get_session
+    pdir = Path(recordings_dir) / get_session(session_id).dir_name / "Alice"
+    pdir.mkdir(parents=True)
+    key = (str(pdir), "audio", "ep1")
+    upload._assembly_in_progress.add(key)
+    try:
+        r = client.post(f"/api/session/{session_id}/delete", json={"host_token": host_token})
+        assert r.status_code == 409
+        assert client.get(f"/api/session/{session_id}/status").status_code == 200
+
+        r = client.delete(f"/api/session/{session_id}", headers={"X-API-Key": "test-api-key"})
+        assert r.status_code == 409
+
+        r = client.post(f"/api/session/{session_id}/delete", json={"host_token": host_token, "force": True})
+        assert r.status_code == 200
+    finally:
+        upload._assembly_in_progress.discard(key)
+    assert client.get(f"/api/session/{session_id}/status").status_code == 404
+
+
+def test_delete_clears_raw_cloud_uploads_even_without_an_editor_link(client, recordings_dir, monkeypatch):
+    # The delete routes only cleaned the bucket for sessions with an editor
+    # link / R2 files, so a raw upload kept after a failed pull outlived a
+    # plain session forever. Must not touch the editor-delivery prefix.
+    from app import s3
+    created = _create_session(client, recordings_dir)
+    session_id, host_token = created["id"], created["host_token"]
+    cleared = []
+    monkeypatch.setattr(s3, "s3_upload_configured", lambda: True)
+    monkeypatch.setattr(s3, "delete_raw_uploads", lambda sid: cleared.append(sid) or 1)
+    monkeypatch.setattr(s3, "delete_session_objects",
+                        lambda *a, **k: pytest.fail("editor-delivery files have their own expiry"))
+
+    r = client.post(f"/api/session/{session_id}/delete", json={"host_token": host_token})
+
+    assert r.status_code == 200
+    assert cleared == [session_id]

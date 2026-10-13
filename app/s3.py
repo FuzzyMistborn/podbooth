@@ -263,7 +263,14 @@ def delete_object(key: str) -> None:
         logger.warning("S3 delete_object failed for %s: %s", key, e)
 
 
-def delete_session_objects(session_id: str, extra_prefixes: list[str] | None = None) -> int:
+def delete_raw_uploads(session_id: str) -> int:
+    """Delete only this session's direct-to-cloud raw uploads — not its
+    editor-delivery files under sessions/{id}/, which have their own expiry.
+    For when a session is deleted (or expires) locally."""
+    return delete_session_objects(session_id, raw_only=True)
+
+
+def delete_session_objects(session_id: str, extra_prefixes: list[str] | None = None, raw_only: bool = False) -> int:
     """Delete all objects under sessions/{session_id}/, the session's raw
     direct-to-cloud uploads, and any extra_prefixes. Returns count deleted."""
     from botocore.exceptions import BotoCoreError, ClientError
@@ -274,7 +281,7 @@ def delete_session_objects(session_id: str, extra_prefixes: list[str] | None = N
     # it doesn't outlive its session.
     prefix = upload_prefix()
     raw = f"{prefix}/raw-uploads/{session_id}/" if prefix else f"raw-uploads/{session_id}/"
-    prefixes = [f"sessions/{session_id}/", raw] + (extra_prefixes or [])
+    prefixes = [raw] if raw_only else [f"sessions/{session_id}/", raw] + (extra_prefixes or [])
     deleted = 0
     try:
         paginator = s3.get_paginator("list_objects_v2")

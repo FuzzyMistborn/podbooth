@@ -694,11 +694,15 @@ document.getElementById('delete-modal-confirm').addEventListener('click', async 
   document.removeEventListener('keydown', _deleteModalEsc);
   _pendingDelete = null;
 
-  const r = await fetch(`/api/session/${sessionId}/delete`, {
+  const sendDelete = (force) => fetch(`/api/session/${sessionId}/delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host_token: hostToken, delete_cloud: deleteCloud }),
+    body: JSON.stringify({ host_token: hostToken, delete_cloud: deleteCloud, force }),
   });
+  let r = await sendDelete(false);
+  if (r.status === 409 && confirm('This session\'s recordings are still being processed. Deleting now will discard them. Delete anyway?')) {
+    r = await sendDelete(true);
+  }
   if (r.ok) {
     const data = await r.json().catch(() => ({}));
     if (data.cloud_errors?.length) {

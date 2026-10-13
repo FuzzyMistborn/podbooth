@@ -198,6 +198,16 @@ async def delete_session(session_id: str):
         # pattern already used for the s3 import in purge_expired_r2 below).
         from app.routers.upload import purge_session_state
         purge_session_state(recordings_dir)
+        # A raw direct-to-cloud upload is kept in the bucket when its pull
+        # failed or was interrupted. The delete routes only clean the bucket
+        # for sessions with an editor link / R2 files, and retention purge
+        # never did — so clear these here, for every way a session goes.
+        from app import s3
+        if s3.s3_upload_configured():
+            try:
+                await asyncio.to_thread(s3.delete_raw_uploads, session.id)
+            except Exception as e:
+                logger.warning("delete_session: raw upload cleanup failed for %s: %s", session.id, e)
 
 
 async def purge_expired() -> list[str]:
