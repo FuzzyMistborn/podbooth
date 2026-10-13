@@ -37,6 +37,8 @@ def client(app):
 @pytest.mark.parametrize("key,expected", [
     ("PodBooth/MySlug/production/full/Alice_video.mp4", "production_full"),
     ("PodBooth/MySlug/production/speakers/Alice_video.mp4", "production_speakers"),
+    ("PodBooth/MySlug/production/video/Final.mp4", "production_video"),
+    ("PodBooth/MySlug/production/bonus/PostShow.mp3", "production_bonus"),
     # "production" is the last path segment before the filename itself —
     # there's no sub-folder component to classify as full/speakers.
     ("PodBooth/MySlug/production/Alice_video.mp4", "production"),

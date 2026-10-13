@@ -24,6 +24,7 @@ const FOLDER_LABELS = {
   full: 'Full Mix',
   speakers: 'Speaker Tracks',
   video: 'Video',
+  bonus: 'Bonus / Post-Show',
 };
 
 function formatBytes(n) {
