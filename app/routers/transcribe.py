@@ -143,30 +143,35 @@ async def _split_mp3_chunks(src: Path, chunk_secs: int = 600) -> list[Path] | No
 
 
 async def _post_to_whisperx(client: httpx.AsyncClient, audio_path: Path) -> dict | None:
-    """POST one audio file to WhisperX and return verbose_json or None on error."""
-    try:
-        with audio_path.open("rb") as f:
-            form: dict = {
-                "model": settings.whisperx_model,
-                "response_format": "verbose_json",
-                "diarize": "false",
-                "align": "true",
-            }
-            if settings.whisperx_language:
-                form["language"] = settings.whisperx_language
-            mime = "audio/mpeg" if audio_path.suffix == ".mp3" else "audio/wav"
-            r = await client.post(
-                f"{settings.whisperx_api_url.rstrip('/')}/v1/audio/transcriptions",
-                files={"file": (audio_path.name, f, mime)},
-                data=form,
-            )
-        if r.status_code != 200:
-            logger.error("WhisperX %d (%s): %s", r.status_code, audio_path.name, r.text[:500])
-            return None
-        return r.json()
-    except Exception as e:
-        logger.error("WhisperX request failed (%s): %s", audio_path.name, e)
-        return None
+    """POST one audio file to WhisperX and return verbose_json, or None if every
+    configured instance failed. Instances are tried in order; the next is used
+    only when the previous errored or returned a non-200."""
+    form: dict = {
+        "model": settings.whisperx_model,
+        "response_format": "verbose_json",
+        "diarize": "false",
+        "align": "true",
+    }
+    if settings.whisperx_language:
+        form["language"] = settings.whisperx_language
+    mime = "audio/mpeg" if audio_path.suffix == ".mp3" else "audio/wav"
+    urls = settings.whisperx_urls
+    for i, base in enumerate(urls):
+        more = " — trying next instance" if i < len(urls) - 1 else ""
+        try:
+            # Reopen per attempt so each instance gets the file from the start.
+            with audio_path.open("rb") as f:
+                r = await client.post(
+                    f"{base}/v1/audio/transcriptions",
+                    files={"file": (audio_path.name, f, mime)},
+                    data=form,
+                )
+            if r.status_code == 200:
+                return r.json()
+            logger.error("WhisperX %s %d (%s): %s%s", base, r.status_code, audio_path.name, r.text[:500], more)
+        except Exception as e:
+            logger.error("WhisperX %s request failed (%s): %s%s", base, audio_path.name, e, more)
+    return None
 
 
 async def _transcribe_chunked(

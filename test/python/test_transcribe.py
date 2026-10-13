@@ -161,3 +161,58 @@ def test_retranscribe_requires_correct_host_token(transcribe_client, session, re
         json={"host_token": "wrong"},
     )
     assert r.status_code == 403
+
+
+class _FakeResp:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = "err"
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """Maps base URL -> response or exception; records the order URLs were hit."""
+
+    def __init__(self, by_base):
+        self.by_base = by_base
+        self.calls = []
+
+    async def post(self, url, files=None, data=None):
+        base = url.rsplit("/v1/audio/transcriptions", 1)[0]
+        self.calls.append(base)
+        out = self.by_base[base]
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+
+@pytest.mark.asyncio
+async def test_whisperx_falls_back_to_next_instance(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "whisperx_api_url", "http://a:8000/, http://b:8000 ,http://c:8000")
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+    client = _FakeClient({
+        "http://a:8000": ConnectionError("down"),
+        "http://b:8000": _FakeResp(500),
+        "http://c:8000": _FakeResp(200, {"segments": [{"start": 0, "text": "hi"}]}),
+    })
+    result = await transcribe._post_to_whisperx(client, audio)
+    assert result == {"segments": [{"start": 0, "text": "hi"}]}
+    assert client.calls == ["http://a:8000", "http://b:8000", "http://c:8000"]
+
+
+@pytest.mark.asyncio
+async def test_whisperx_stops_at_first_success_and_none_when_all_fail(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "whisperx_api_url", "http://a:8000,http://b:8000")
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"x")
+    ok = _FakeClient({"http://a:8000": _FakeResp(200, {"segments": []}), "http://b:8000": _FakeResp(500)})
+    assert await transcribe._post_to_whisperx(ok, audio) == {"segments": []}
+    assert ok.calls == ["http://a:8000"]
+
+    bad = _FakeClient({"http://a:8000": _FakeResp(503), "http://b:8000": RuntimeError("x")})
+    assert await transcribe._post_to_whisperx(bad, audio) is None
+    assert bad.calls == ["http://a:8000", "http://b:8000"]
