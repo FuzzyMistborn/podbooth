@@ -15,7 +15,7 @@ from livekit.api import AccessToken, VideoGrants
 
 from app.models import create_session, get_session, end_session, delete_session, touch, title_in_use, list_sessions
 from app.routers.upload import (
-    recover_orphaned_chunks, is_merging, has_assembly_task, direct_cloud_upload_enabled,
+    recover_orphaned_chunks, is_merging, has_assembly_task, session_has_assembly_task, direct_cloud_upload_enabled,
     _session_assembly_jobs, _assembly_progress_fraction, _resolve_participant_dir,
 )
 from app.config import settings, ASSET_VERSION, APP_VERSION
@@ -55,6 +55,15 @@ def _kick_recovery(session) -> None:
     task = asyncio.ensure_future(_run())
     _recovery_tasks.add(task)
     task.add_done_callback(_recovery_tasks.discard)
+
+
+def _refuse_delete_while_assembling(session, force: bool) -> None:
+    """Deleting the recordings directory under a running ffmpeg/download just
+    fails those jobs and throws the uploads away — make it a deliberate act."""
+    if force:
+        return
+    if session_has_assembly_task(Path(settings.recordings_dir) / session.dir_name):
+        raise HTTPException(status_code=409, detail="Recordings are still being processed")
 
 
 def _get_or_create_csrf(request: Request) -> tuple[str, bool]:
@@ -167,11 +176,13 @@ async def list_sessions_route(_: None = Depends(require_api_key)):
 
 
 @router.delete("/api/session/{session_id}")
-async def delete_session_api_route(session_id: str, _: None = Depends(require_api_key)):
-    """Machine-to-machine session deletion, gated by X-API-Key."""
+async def delete_session_api_route(session_id: str, force: bool = False, _: None = Depends(require_api_key)):
+    """Machine-to-machine session deletion, gated by X-API-Key. Refused with
+    409 while uploads are still being processed, unless force=true."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _refuse_delete_while_assembling(session, force)
 
     if session.editor_token_hash or session.r2_files:
         try:
@@ -418,6 +429,7 @@ async def delete_session_route(session_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Session not found")
     if not _is_host(host_token, session):
         raise HTTPException(status_code=403, detail="Not authorized")
+    _refuse_delete_while_assembling(session, bool(data.get("force")))
 
     slug = _session_slug(session.title)
 

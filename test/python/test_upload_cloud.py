@@ -274,8 +274,160 @@ def test_deleting_a_session_also_clears_its_leftover_raw_uploads(monkeypatch):
     assert "PodBooth/raw-uploads/sess-9/" in listed
 
 
+def _marker(directory):
+    return directory / "audio_ep1_cloudpull.json"
+
+
+def test_complete_leaves_a_marker_so_a_restart_can_resume_the_pull(client, session, recordings_dir, bucket, monkeypatch):
+    # The pull is an in-memory task with no chunk files on disk — without a
+    # persisted record, a restart mid-download would strand the bucket copy.
+    bucket.parts = {1: 1000, 2: 1000, 3: 1000}
+
+    async def never_runs(f, key, ext):
+        return None
+
+    monkeypatch.setattr(upload, "_pull_cloud_source_and_assemble", never_runs)
+
+    assert client.post("/api/upload/cloud/complete", json=_complete_body()).status_code == 200
+
+    marker = _marker(recordings_dir / session.dir_name / "Alice")
+    assert json.loads(marker.read_text()) == {
+        "key": KEY, "ext": "raw", "fmt": "pcm", "sample_rate": 48000, "channels": 2,
+        "participant": "Alice", "expected_duration_s": 60.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_marker_is_cleared_once_the_transcode_ran_even_if_it_failed(session, recordings_dir, bucket, monkeypatch):
+    # A handled failure keeps the bucket copy but must not be retried on every
+    # recovery scan (the host's recordings poll triggers one every few seconds).
+    directory = recordings_dir / session.dir_name / "Alice"
+    directory.mkdir(parents=True)
+    bucket.objects[KEY] = b"\x01" * 3000
+    f = _finalize(directory)
+    upload._write_cloudpull_marker(f, KEY, "raw")
+
+    async def failing_assemble(*a, **k):
+        return False
+
+    monkeypatch.setattr(upload, "assemble_from_source", failing_assemble)
+    await upload._pull_cloud_source_and_assemble(f, KEY, "raw")
+
+    assert not _marker(directory).exists()
+    assert bucket.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_marker_survives_a_shutdown_cancellation(session, recordings_dir, bucket, monkeypatch):
+    directory = recordings_dir / session.dir_name / "Alice"
+    directory.mkdir(parents=True)
+    bucket.objects[KEY] = b"\x01" * 3000
+    f = _finalize(directory)
+    upload._write_cloudpull_marker(f, KEY, "raw")
+    started = asyncio.Event()
+
+    async def hangs(*a, **k):
+        started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(upload, "assemble_from_source", hangs)
+    task = asyncio.create_task(upload._pull_cloud_source_and_assemble(f, KEY, "raw"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _marker(directory).exists()
+
+
+@pytest.mark.asyncio
+async def test_recovery_requeues_an_interrupted_pull_from_its_marker(session, recordings_dir, bucket, monkeypatch):
+    directory = recordings_dir / session.dir_name / "Alice"
+    directory.mkdir(parents=True)
+    bucket.objects[KEY] = b"\x01" * 3000
+    upload._write_cloudpull_marker(_finalize(directory), KEY, "raw")
+    # What the dead process left behind: a half-written download.
+    (directory / "audio_ep1_source.raw").write_bytes(b"\x01" * 10)
+    upload._assembly_in_progress.clear()
+    transcoded = []
+
+    async def fake_assemble(directory, track_type, fmt, sample_rate, channels, source, epoch, participant, dur):
+        transcoded.append((track_type, fmt, sample_rate, channels, source.stat().st_size, epoch, participant, dur))
+        return True
+
+    monkeypatch.setattr(upload, "assemble_from_source", fake_assemble)
+
+    queued = await upload.recover_orphaned_chunks(session)
+    await asyncio.gather(*upload._tasks)
+
+    assert queued == 1
+    assert transcoded == [("audio", "pcm", 48000, 2, 3000, "ep1", "Alice", 60.0)]
+    assert bucket.deleted == [KEY]
+    assert not _marker(directory).exists()
+    # …and a second scan has nothing left to do.
+    assert await upload.recover_orphaned_chunks(session) == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_skips_a_pull_that_is_already_running(session, recordings_dir, bucket, monkeypatch):
+    directory = recordings_dir / session.dir_name / "Alice"
+    directory.mkdir(parents=True)
+    upload._write_cloudpull_marker(_finalize(directory), KEY, "raw")
+    upload._assembly_in_progress.clear()
+    upload._assembly_in_progress.add((str(directory), "audio", "ep1"))
+    try:
+        assert await upload.recover_orphaned_chunks(session) == 0
+    finally:
+        upload._assembly_in_progress.clear()
+    assert _marker(directory).exists()
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_markers_while_the_bucket_is_not_configured(session, recordings_dir, bucket, monkeypatch):
+    directory = recordings_dir / session.dir_name / "Alice"
+    directory.mkdir(parents=True)
+    upload._write_cloudpull_marker(_finalize(directory), KEY, "raw")
+    upload._assembly_in_progress.clear()
+    monkeypatch.setattr(settings, "direct_cloud_upload", False)
+
+    assert await upload.recover_orphaned_chunks(session) == 0
+    assert _marker(directory).exists()
+
+
+@pytest.mark.asyncio
+async def test_recovery_ignores_a_marker_for_another_sessions_key(session, recordings_dir, bucket):
+    directory = recordings_dir / session.dir_name / "Alice"
+    directory.mkdir(parents=True)
+    upload._write_cloudpull_marker(_finalize(directory), "PodBooth/raw-uploads/other-session/Alice/audio_ep1.raw", "raw")
+    upload._assembly_in_progress.clear()
+
+    assert await upload.recover_orphaned_chunks(session) == 0
+    assert bucket.deleted == []
+
+
 def test_direct_upload_is_opt_in(client, session, bucket, monkeypatch):
     # It needs a CORS rule on the bucket, so a bucket configured only for
     # editor delivery mustn't start sending every browser to it by default.
     from app.config import Settings
     assert Settings.model_fields["direct_cloud_upload"].default is False
+
+
+def test_delete_raw_uploads_leaves_the_editor_delivery_files_alone(monkeypatch):
+    listed = []
+
+    class FakePaginator:
+        def paginate(self, Bucket, Prefix):
+            listed.append(Prefix)
+            return []
+
+    class FakeClient:
+        def get_paginator(self, name):
+            return FakePaginator()
+
+    monkeypatch.setattr(s3, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(s3, "_bucket", lambda: "bucket")
+    monkeypatch.setattr(s3, "upload_prefix", lambda: "PodBooth")
+
+    s3.delete_raw_uploads("sess-9")
+
+    assert listed == ["PodBooth/raw-uploads/sess-9/"]

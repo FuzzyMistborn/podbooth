@@ -109,6 +109,13 @@ def has_assembly_task(directory: Path) -> bool:
     return any(key[0] == d for key in _assembly_in_progress)
 
 
+def session_has_assembly_task(session_dir: Path) -> bool:
+    """True while any participant directory under session_dir has a running
+    assembly task (see has_assembly_task)."""
+    prefix = str(session_dir) + "/"
+    return any(key[0].startswith(prefix) for key in _assembly_in_progress)
+
+
 def purge_session_state(session_dir: Path) -> None:
     """Drop every _merge_locks/_epoch_take_map/_dir_take_counter entry under
     session_dir — called from delete_session once a session (and its
@@ -741,13 +748,44 @@ def _cloud_raw_key(session_id: str, directory: Path, track_type: str, epoch: str
     return f"{dirpart}raw-uploads/{session_id}/{directory.name}/{track_type}_{epoch}.{ext}"
 
 
+def _cloud_key_in_session(key, session_id: str) -> bool:
+    prefix = s3.upload_prefix()
+    dirpart = f"{prefix}/" if prefix else ""
+    return isinstance(key, str) and key.startswith(f"{dirpart}raw-uploads/{session_id}/")
+
+
 def _require_cloud_key_in_session(key: str, session_id: str) -> None:
     """The part-url/abort/complete calls carry a key+upload_id the client got
     from /cloud/start — refuse one that wasn't minted for this session."""
-    prefix = s3.upload_prefix()
-    dirpart = f"{prefix}/" if prefix else ""
-    if not isinstance(key, str) or not key.startswith(f"{dirpart}raw-uploads/{session_id}/"):
+    if not _cloud_key_in_session(key, session_id):
         raise HTTPException(status_code=403, detail="Key does not belong to this session")
+
+
+# A cloud pull (download + transcode) runs as an in-memory task, so a server
+# restart mid-pull would otherwise lose it: the bucket copy is still there but
+# nothing on disk says it was ever queued (it leaves no chunk files for
+# recover_orphaned_chunks to find). /cloud/complete therefore drops this marker
+# next to the track; recover_orphaned_chunks re-queues any marker without a
+# live task. It's removed once the pull has run to an outcome — success or a
+# handled failure (which keeps the bucket copy, and must not be retried on
+# every recovery scan) — but not when the task is cancelled by a shutdown.
+_CLOUDPULL_RE = re.compile(r'^(audio|video|screen)(?:_([A-Za-z0-9-]+))?_cloudpull\.json$')
+
+
+def _cloudpull_marker(directory: Path, track_type: str, epoch: str) -> Path:
+    epoch_tag = f"_{epoch}" if epoch else ""
+    return directory / f"{track_type}{epoch_tag}_cloudpull.json"
+
+
+def _write_cloudpull_marker(f: "_Finalize", key: str, ext: str) -> None:
+    try:
+        _cloudpull_marker(f.directory, f.track_type, f.epoch).write_text(json.dumps({
+            "key": key, "ext": ext, "fmt": f.fmt, "sample_rate": f.sample_rate, "channels": f.channels,
+            "participant": f.participant, "expected_duration_s": f.expected_duration_s,
+        }))
+    except OSError as e:
+        # Only costs restart-recovery of this pull; the pull itself proceeds.
+        logger.warning("could not write cloud-pull marker for %s/%s: %s", f.track_type, f.participant, e)
 
 
 @router.post("/cloud/start")
@@ -909,6 +947,7 @@ async def cloud_upload_complete(request: Request):
         raise HTTPException(status_code=503, detail="Could not complete cloud upload")
 
     in_progress_key = (str(f.directory), f.track_type, f.epoch)
+    _write_cloudpull_marker(f, key, ext)
     if in_progress_key not in _assembly_in_progress:
         _assembly_in_progress.add(in_progress_key)
         _report_progress(f.directory, f.track_type, f.epoch, "downloading", 0.0)
@@ -928,6 +967,7 @@ async def _pull_cloud_source_and_assemble(f: _Finalize, key: str, ext: str) -> N
     complete copy anywhere but the participant's own browser."""
     epoch_tag = f"_{f.epoch}" if f.epoch else ""
     source = f.directory / f"{f.track_type}{epoch_tag}_source.{ext}"
+    marker = _cloudpull_marker(f.directory, f.track_type, f.epoch)
 
     def on_progress(fraction: float) -> None:
         _report_progress(f.directory, f.track_type, f.epoch, "downloading", _COMBINE_SHARE * fraction)
@@ -939,16 +979,21 @@ async def _pull_cloud_source_and_assemble(f: _Finalize, key: str, ext: str) -> N
         logger.error("cloud pull: download failed for %s (left in bucket): %s", key, e)
         source.unlink(missing_ok=True)
         _report_progress(f.directory, f.track_type, f.epoch, "failed", 1.0)
+        marker.unlink(missing_ok=True)
         return
     if size <= 0:
         logger.error("cloud pull: %s downloaded empty (left in bucket)", key)
         source.unlink(missing_ok=True)
         _report_progress(f.directory, f.track_type, f.epoch, "failed", 1.0)
+        marker.unlink(missing_ok=True)
         return
     logger.info("cloud pull: %s → %s (%d bytes in %.1fs)", key, source.name, size, time.monotonic() - started)
 
     ok = await assemble_from_source(f.directory, f.track_type, f.fmt, f.sample_rate, f.channels, source,
                                     f.epoch, f.participant, f.expected_duration_s)
+    # Cleared before the bucket delete: a crash in between must not re-run a
+    # transcode that already produced the final file (a duplicate take).
+    marker.unlink(missing_ok=True)
     if ok:
         await asyncio.to_thread(s3.delete_object, key)
     else:
@@ -1421,6 +1466,49 @@ async def recover_orphaned_chunks(session) -> int:
             task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
             queued += 1
 
+        queued += _recover_cloud_pulls(session, pdir)
+
+    return queued
+
+
+def _recover_cloud_pulls(session, pdir: Path) -> int:
+    """Re-queue direct-to-cloud pulls that were interrupted by a restart —
+    see _write_cloudpull_marker. Returns the number queued."""
+    queued = 0
+    if not direct_cloud_upload_enabled():
+        return 0  # no bucket access right now — keep the markers for when there is
+    for marker in pdir.glob("*_cloudpull.json"):
+        m = _CLOUDPULL_RE.match(marker.name)
+        if not m:
+            continue
+        track_type, epoch = m.group(1), m.group(2) or ""
+        in_progress_key = (str(pdir), track_type, epoch)
+        if in_progress_key in _assembly_in_progress:
+            continue
+        epoch_tag = f"_{epoch}" if epoch else ""
+        if any(pdir.glob(f"{track_type}{epoch_tag}_source*.failed")):
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            meta = json.loads(marker.read_text())
+            key, ext = meta["key"], meta["ext"]
+            if ext not in _CLOUD_CONTENT_TYPES or not _cloud_key_in_session(key, session.id):
+                raise ValueError("key/ext not valid for this session")
+            f = _Finalize(session.id, str(meta.get("participant") or ""), track_type, str(meta["fmt"]), epoch,
+                          int(meta["sample_rate"]), int(meta["channels"]), meta.get("expected_duration_s"),
+                          None, pdir)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            logger.warning("ignoring unreadable cloud-pull marker %s/%s: %s", pdir.name, marker.name, e)
+            continue
+        logger.info("Recovering interrupted cloud pull of %s in %s/%s (epoch=%r)",
+                    track_type, session.dir_name, pdir.name, epoch)
+        _assembly_in_progress.add(in_progress_key)
+        _report_progress(pdir, track_type, epoch, "downloading", 0.0)
+        task = asyncio.create_task(_pull_cloud_source_and_assemble(f, key, ext))
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        task.add_done_callback(lambda _t, k=in_progress_key: _assembly_in_progress.discard(k))
+        queued += 1
     return queued
 
 
