@@ -492,6 +492,7 @@ function attachRoomEvents() {
       showToast('Host disconnected — recording stopped');
       await stopLocalRecording();
       setRecordingUI(false);
+      showLocalUploadButton();
       await waitForUploads();
     }
   });
@@ -749,6 +750,7 @@ function pollSessionStatus() {
         } else if (isRecording) {
           await stopLocalRecording();
           setRecordingUI(false);
+          showLocalUploadButton();
           await waitForUploads();
         }
         // Timer state is push-only over the data channel — a dropped message,
@@ -963,6 +965,18 @@ function renderWaitroomPanel(guests) {
     li.appendChild(actions);
     list.appendChild(li);
   });
+}
+
+// ── Local upload (host + guest) ───────────────────────────────────────────────
+
+function showLocalUploadButton() {
+  const btn = document.getElementById('btn-local-upload');
+  if (btn) btn.style.display = '';
+}
+
+function openLocalUpload() {
+  const params = new URLSearchParams({ token: UPLOAD_TOKEN, participant: displayName });
+  window.open(`/local-upload/${SESSION_ID}?${params}`, '_blank', 'noopener');
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

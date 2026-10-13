@@ -405,6 +405,9 @@
           </div>
         </div>
       </div>
+      {% if cloud_upload_enabled %}
+      <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">Upload Local Recording</button>
+      {% endif %}
       <div class="notes-btn-wrap">
         <button class="btn-share" id="btn-notes" style="display:none" onclick="toggleNotesPanel()">Notes</button>
         <div class="notes-panel" id="notes-panel">
@@ -429,6 +432,9 @@
       </div>
       <button class="btn-danger" id="btn-end">End Session</button>
       {% else %}
+      {% if cloud_upload_enabled %}
+      <button class="btn-share" id="btn-local-upload" style="display:none" onclick="openLocalUpload()">Upload Local Recording</button>
+      {% endif %}
       <button class="btn-danger" id="btn-leave">Leave</button>
       {% endif %}
     </div>
