@@ -168,7 +168,7 @@ The app runs on port `8000`. Put Caddy or nginx in front for TLS — browsers re
 
 | Variable | Required | Description |
 |---|---|---|
-| `WHISPERX_API_URL` | No | Base URL of a [whisperx-api](https://github.com/macnow/whisperx-api) server (e.g. `http://whisperx:8000`). Leave unset to disable transcription |
+| `WHISPERX_API_URL` | No | Base URL of a [whisperx-api](https://github.com/macnow/whisperx-api) server (e.g. `http://whisperx:8000`). Comma-separate several URLs to fall back to the next instance if one fails (tried in order, per request). Leave unset to disable transcription |
 | `WHISPERX_MODEL` | No | Faster-Whisper model to use. Default: `large-v3-turbo` |
 | `WHISPERX_LANGUAGE` | No | Force a language code (e.g. `en`, `fr`). Leave unset for automatic detection |
 

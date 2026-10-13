@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     whisperx_model: str = "large-v3-turbo"
     whisperx_language: str = ""
 
+    @property
+    def whisperx_urls(self) -> list[str]:
+        """WHISPERX_API_URL may hold several comma-separated base URLs, tried in order."""
+        return [u.strip().rstrip("/") for u in self.whisperx_api_url.split(",") if u.strip()]
+
     # Nextcloud upload (WebDAV)
     nextcloud_url: str = ""
     nextcloud_user: str = ""
