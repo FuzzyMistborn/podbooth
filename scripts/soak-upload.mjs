@@ -284,6 +284,15 @@ async function orchestrate(args) {
   console.log('\n══════════════ Soak report ══════════════');
   console.log(`Session:   ${args.url}/studio/${sessionId}  (${title})`);
   console.log(`Upload:    ${fmtDur(uploadMs)} wall clock for all participants`);
+  // A participant that crashed (null result) or ended on anything but the
+  // 'done' banner is a failed run — don't let the clean-looking assembly and
+  // verify lines below hide that.
+  const failures = [];
+  results.forEach((r, i) => {
+    if (!r) failures.push(`${participants[i].displayName}: process crashed or exited with no summary`);
+    else if (r.finalBanner !== 'done') failures.push(`${r.displayName}: final banner "${r.finalBanner}"`);
+    else if (r.lostChunks.length) failures.push(`${r.displayName}: ${r.lostChunks.length} lost chunk(s)`);
+  });
   for (const r of results) {
     if (!r) continue;
     console.log(`  ${r.displayName.padEnd(14)} final banner: ${String(r.finalBanner).padEnd(10)} ` +
@@ -310,6 +319,12 @@ async function orchestrate(args) {
     console.log(`Verify:    ${issues.length ? `${issues.length} issue(s)` : 'no issues'}`);
     for (const i of issues) console.log(`  - ${i.participant}/${i.file}: ${i.issue}`);
   }
+  if (issues && issues.length) failures.push(`verify-recordings reported ${issues.length} issue(s)`);
+  if (assemblyMs == null) failures.push('server assembly never finished');
+  console.log(failures.length
+    ? `RESULT:    FAILED\n${failures.map(f => `  ✗ ${f}`).join('\n')}`
+    : 'RESULT:    PASSED');
+  if (failures.length) process.exitCode = 1;
   console.log(`Details:   ${outDir}`);
 
   if (args.cleanup) {
@@ -339,10 +354,10 @@ function runChild(args, spec) {
     };
     pipe(child.stdout, console.log);
     pipe(child.stderr, console.error);
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       const summaryPath = path.join(spec.outDir, `${spec.identity}.summary.json`);
       if (code !== 0 || !fs.existsSync(summaryPath)) {
-        console.error(`${prefix} exited with code ${code} and no summary`);
+        console.error(`${prefix} exited with code ${code}${signal ? ` (signal ${signal})` : ''} and no summary`);
         resolve(null);
         return;
       }
