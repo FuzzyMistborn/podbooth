@@ -851,6 +851,7 @@ function onBeforeUnload(e) {
 
 let _waitroomTimer = null;
 let _waitroomKnown = new Set(); // identities we've already shown a toast for
+let _waitroomDismissed = new Set(); // identities the host hid from the panel (still pending server-side)
 
 function playAdmitChime() {
   try {
@@ -879,7 +880,10 @@ async function pollPendingGuests() {
   try {
     const r = await fetch(`/api/session/${SESSION_ID}/pending-guests`, { headers: { 'X-Host-Token': HOST_TOKEN } });
     if (!r.ok) return;
-    const { guests } = await r.json();
+    const { guests: allGuests } = await r.json();
+    const pendingIds = new Set(allGuests.map(g => g.identity));
+    _waitroomDismissed.forEach(id => { if (!pendingIds.has(id)) _waitroomDismissed.delete(id); });
+    const guests = allGuests.filter(g => !_waitroomDismissed.has(g.identity));
     renderWaitroomPanel(guests);
     // toast for newly-arrived guests
     guests.forEach(g => {
@@ -957,10 +961,27 @@ function renderWaitroomPanel(guests) {
         if (btnW) btnW.style.display = 'none';
       }
     });
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'waitroom-dismiss';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.title = 'Hide for now — the guest keeps waiting';
+    dismissBtn.addEventListener('click', () => {
+      _waitroomDismissed.add(g.identity);
+      li.remove();
+      const remaining = list.querySelectorAll('.waitroom-item').length;
+      if (badge) badge.textContent = remaining || '';
+      if (remaining === 0) {
+        const panel = document.getElementById('waitroom-panel');
+        if (panel) panel.style.display = 'none';
+        const btnW = document.getElementById('btn-waitroom');
+        if (btnW) btnW.style.display = 'none';
+      }
+    });
     const actions = document.createElement('div');
     actions.style.cssText = 'display:flex;gap:6px;flex-shrink:0';
     actions.appendChild(admitBtn);
     actions.appendChild(denyBtn);
+    actions.appendChild(dismissBtn);
     li.appendChild(name);
     li.appendChild(actions);
     list.appendChild(li);
