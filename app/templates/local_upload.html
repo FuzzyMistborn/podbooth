@@ -281,6 +281,7 @@
   <script>
     const SESSION_ID      = {{ session.id | tojson }};
     const UPLOAD_TOKEN    = {{ upload_token | tojson }};
+    const DIRECT_CLOUD    = {{ direct_cloud | tojson }};
     const PARTICIPANT_PRE = {{ participant | tojson }}; // pre-filled from URL; may be empty
 
     const dropZone   = document.getElementById('drop-zone');
@@ -407,24 +408,41 @@
       const bar   = itemEl.querySelector('[data-bar]');
       const msg   = itemEl.querySelector('[data-msg]');
 
-      // Phase 1: send to server
+      // Phase 1: get the file off this machine. Straight to the bucket when
+      // the instance supports it (the PodBooth server then only finishes it),
+      // otherwise — or if that fails — through the PodBooth server.
       setBadge(badge, 'sending', 'Uploading…');
-      msg.textContent = 'Sending to server…';
+      msg.textContent = DIRECT_CLOUD ? 'Sending to cloud storage…' : 'Sending to server…';
       msg.className = 'file-message';
 
-      let uploadId;
-      try {
-        uploadId = await sendToServer(file, (pct) => {
-          bar.style.width = `${Math.round(pct * 0.6)}%`; // 0-60% for server phase
-          msg.textContent = `Uploading… ${Math.round(pct)}%`;
-        });
-      } catch (e) {
-        setBadge(badge, 'error', 'Error');
-        bar.style.width = '100%';
-        bar.className = 'progress-bar error';
-        msg.textContent = `Failed to send: ${e.message}`;
-        msg.className = 'file-message error';
-        return;
+      const onProgress = (pct) => {
+        bar.style.width = `${Math.round(pct * 0.6)}%`; // 0-60% for the send phase
+        msg.textContent = `Uploading… ${Math.round(pct)}%`;
+      };
+
+      let uploadId = null;
+      if (DIRECT_CLOUD) {
+        try {
+          uploadId = await sendDirectToCloud(file, onProgress);
+        } catch (e) {
+          console.warn('direct cloud upload failed, using the server:', e);
+        }
+        if (!uploadId) {
+          bar.style.width = '0%';
+          msg.textContent = 'Sending to server…';
+        }
+      }
+      if (!uploadId) {
+        try {
+          uploadId = await sendToServer(file, onProgress);
+        } catch (e) {
+          setBadge(badge, 'error', 'Error');
+          bar.style.width = '100%';
+          bar.className = 'progress-bar error';
+          msg.textContent = `Failed to send: ${e.message}`;
+          msg.className = 'file-message error';
+          return;
+        }
       }
 
       // Phase 2: cloud sync
@@ -433,11 +451,11 @@
       msg.textContent = 'Syncing to cloud…';
 
       try {
-        await pollCloudStatus(uploadId, bar, msg);
+        const warning = await pollCloudStatus(uploadId, bar, msg);
         setBadge(badge, 'done', 'Done');
         bar.style.width = '100%';
         bar.className = 'progress-bar done';
-        msg.textContent = 'Uploaded successfully';
+        msg.textContent = warning ? `Uploaded. Note: ${warning}` : 'Uploaded successfully';
         msg.className = 'file-message';
       } catch (e) {
         setBadge(badge, 'error', 'Error');
@@ -445,6 +463,101 @@
         bar.className = 'progress-bar error';
         msg.textContent = e.message;
         msg.className = 'file-message error';
+      }
+    }
+
+    async function cloudPost(path, body) {
+      const r = await fetch(`/api/session/${SESSION_ID}/local-upload/cloud/${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Upload-Token': UPLOAD_TOKEN,
+          'X-Participant': resolvedParticipant(),
+        },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        let detail = `HTTP ${r.status}`;
+        try { detail = (await r.json()).detail || detail; } catch {}
+        const err = new Error(detail);
+        err.status = r.status;
+        throw err;
+      }
+      return r.json();
+    }
+
+    // PUT one part to its presigned URL, reporting bytes as they go.
+    function putPart(url, blob, onBytes) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url);
+        xhr.upload.onprogress = e => { if (e.lengthComputable) onBytes(e.loaded); };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) return resolve();
+          const err = new Error(`part upload HTTP ${xhr.status}`);
+          err.status = xhr.status;
+          reject(err);
+        };
+        xhr.onerror = () => reject(new Error('network error'));
+        xhr.ontimeout = () => reject(new Error('timeout'));
+        xhr.timeout = 10 * 60 * 1000;
+        xhr.send(blob);
+      });
+    }
+
+    // Upload `file` straight to the bucket in presigned parts, then ask the
+    // server to finish it. Resolves to the status-poll id, or throws (after
+    // aborting the bucket upload) so the caller can fall back to the server.
+    async function sendDirectToCloud(file, onProgress) {
+      const contentType = file.type || 'application/octet-stream';
+      const started = await cloudPost('start', {
+        filename: file.name, content_type: contentType, total_size: file.size,
+      });
+      const { key, upload_id: cloudUploadId, part_size: partSize, part_urls: urls } = started;
+      const partCount = Math.max(1, Math.ceil(file.size / partSize));
+      const sent = new Array(partCount).fill(0);
+      const report = () => onProgress((sent.reduce((a, b) => a + b, 0) / file.size) * 100);
+
+      let next = 0, failed = null;
+      async function sendPart(n) {
+        const blob = file.slice(n * partSize, (n + 1) * partSize);
+        let url = urls[n];
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try {
+            await putPart(url, blob, b => { sent[n] = b; report(); });
+            sent[n] = blob.size;
+            report();
+            return;
+          } catch (e) {
+            sent[n] = 0;
+            if (attempt === 3) throw e;
+            if (e.status === 403) {
+              url = (await cloudPost('part-url', { key, upload_id: cloudUploadId, part_number: n + 1 })).url;
+            } else {
+              await sleep(1000 * (attempt + 1));
+            }
+          }
+        }
+      }
+      async function worker() {
+        while (!failed && next < partCount) {
+          const n = next++;
+          try { await sendPart(n); } catch (e) { failed = e; }
+        }
+      }
+      // A few parts at once to fill the connection; each part is 16 MB.
+      await Promise.all(Array.from({ length: Math.min(4, partCount) }, worker));
+
+      try {
+        if (failed) throw failed;
+        const done = await cloudPost('complete', {
+          key, upload_id: cloudUploadId, part_count: partCount, total_size: file.size,
+          content_type: contentType,
+        });
+        return done.upload_id;
+      } catch (e) {
+        cloudPost('abort', { key, upload_id: cloudUploadId }).catch(() => {});
+        throw e;
       }
     }
 
@@ -484,14 +597,17 @@
     async function pollCloudStatus(uploadId, bar, msg) {
       const url = `/api/session/${SESSION_ID}/local-upload/${uploadId}/status`;
       const headers = { 'X-Upload-Token': UPLOAD_TOKEN };
-      for (let attempt = 0; attempt < 600; attempt++) {
+      // A big file can take a while to pull down and copy on to other
+      // backends, so allow two hours rather than ten minutes.
+      const deadline = Date.now() + 2 * 60 * 60 * 1000;
+      while (Date.now() < deadline) {
         await sleep(1000);
         const r = await fetch(url, { headers });
         if (!r.ok) throw new Error(`Status poll failed: HTTP ${r.status}`);
         const data = await r.json();
 
         if (data.status === 'done') {
-          return;
+          return data.warning || '';
         }
         if (data.status === 'error') {
           throw new Error(data.message || 'Cloud upload failed');
