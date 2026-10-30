@@ -1510,6 +1510,20 @@ body.no-mirror .participant-tile.local video { transform: none; }
   transition: background 0.12s, color 0.12s;
 }
 .waitroom-deny:hover { background: var(--red); color: #fff; }
+.waitroom-dismiss {
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border, currentColor);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.waitroom-dismiss:hover { color: var(--text); border-color: var(--text-2); }
 
 /* ── Lobby waiting page ──────────────────────────────────────── */
 .lobby-spinner {
