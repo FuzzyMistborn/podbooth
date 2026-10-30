@@ -33,7 +33,9 @@ def _xml_escape(value: str) -> str:
 _FFMPEG_TIME_RE = re.compile(r'time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)')
 
 
-async def _probe_duration_s(path: Path) -> float:
+async def _probe_duration_fast(path: Path | str) -> float:
+    """Duration from the container header only (0.0 if it has none) — cheap
+    even over HTTP, unlike _probe_duration_slow."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
@@ -45,9 +47,13 @@ async def _probe_duration_s(path: Path) -> float:
         )
         stdout, _ = await proc.communicate()
         val = stdout.decode().strip()
-        dur = float(val) if val else 0.0
+        return float(val) if val else 0.0
     except Exception:
-        dur = 0.0
+        return 0.0
+
+
+async def _probe_duration_s(path: Path) -> float:
+    dur = await _probe_duration_fast(path)
     if dur > 0:
         return dur
     return await _probe_duration_slow(path)

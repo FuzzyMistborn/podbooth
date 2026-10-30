@@ -91,6 +91,8 @@ def bucket(monkeypatch):
         return 12.5
 
     monkeypatch.setattr(localupload, "_probe_duration_s", fake_probe)
+    monkeypatch.setattr(localupload, "_probe_duration_fast", fake_probe)
+    localupload._direct_jobs.clear()
     b.probed = probed
     registered = []
 
@@ -219,8 +221,37 @@ def test_complete_with_only_the_bucket_never_downloads_and_records_the_file(clie
     assert bucket.registered == [("Alice", "audio", "clip.wav", 12.5)]
 
 
+def test_a_transient_listing_error_is_not_mistaken_for_an_already_completed_upload(client, session, bucket, monkeypatch):
+    bucket.objects[KEY] = b"stale object from an earlier upload"
+
+    def throttled(key, upload_id):
+        raise RuntimeError("SlowDown: please reduce your request rate")
+
+    monkeypatch.setattr(s3, "list_uploaded_parts", throttled)
+    assert _post(client, session, "complete", _complete_body()).status_code == 503
+    assert session.r2_files == []
+
+
+def test_a_parts_mismatch_aborts_the_bucket_upload(client, session, bucket):
+    bucket.parts = {1: 3000}
+    assert _post(client, session, "complete", _complete_body(total_size=10)).status_code == 409
+    assert bucket.aborted == [KEY]
+
+
+def test_a_failure_registering_the_file_is_a_warning_not_an_error(client, session, bucket, monkeypatch):
+    bucket.parts = {1: 3000}
+
+    async def broken(*a, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(localupload, "_record_local_upload", broken)
+    r = _post(client, session, "complete", _complete_body())
+    st = _wait_for(client, session, r.json()["upload_id"])
+    assert st["status"] == "done" and "disk full" in st["warning"]
+
+
 def test_complete_retry_after_a_previous_attempt_already_completed_it(client, session, bucket):
-    bucket.list_raises = True
+    bucket.list_raises = True  # RuntimeError("NoSuchUpload") in the fake
     bucket.objects[KEY] = b"x" * 3000
     r = _post(client, session, "complete", _complete_body())
     assert r.status_code == 200
@@ -287,6 +318,36 @@ def test_a_failed_pull_down_still_records_the_bucket_copy_with_a_warning(client,
     st = _wait_for(client, session, r.json()["upload_id"])
     assert st["status"] == "done" and "download broke" in st["warning"]
     assert [f["key"] for f in session.r2_files] == [KEY]
+
+
+def test_no_duration_header_falls_back_to_downloading_for_a_full_probe(client, session, bucket, monkeypatch):
+    bucket.parts = {1: 3000}
+    full = []
+
+    async def no_header(path):
+        return 0.0
+
+    async def full_probe(path):
+        full.append(str(path))
+        return 7.0
+
+    monkeypatch.setattr(localupload, "_probe_duration_fast", no_header)
+    monkeypatch.setattr(localupload, "_probe_duration_s", full_probe)
+    r = _post(client, session, "complete", _complete_body())
+    assert _wait_for(client, session, r.json()["upload_id"])["status"] == "done"
+    assert bucket.downloads == [KEY]
+    assert len(full) == 1 and not Path(full[0]).exists()  # temp file cleaned up
+    assert bucket.registered == [("Alice", "audio", "clip.wav", 7.0)]
+
+
+def test_a_repeated_complete_joins_the_same_job_instead_of_registering_twice(client, session, bucket):
+    bucket.parts = {1: 3000}
+    first = _post(client, session, "complete", _complete_body()).json()["upload_id"]
+    bucket.list_raises = True  # the upload_id is spent after the first complete
+    second = _post(client, session, "complete", _complete_body())
+    assert second.status_code == 200 and second.json()["upload_id"] == first
+    _wait_for(client, session, first)
+    assert len(bucket.registered) == 1
 
 
 def test_abort_aborts_the_bucket_upload(client, session, bucket):

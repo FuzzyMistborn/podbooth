@@ -269,6 +269,7 @@
 
     <div class="actions">
       <button class="btn btn-primary" id="btn-upload" disabled>Upload</button>
+      <button class="btn" id="btn-cancel" style="display:none">Cancel upload</button>
       <span class="file-count" id="file-count"></span>
     </div>
 
@@ -287,6 +288,7 @@
     const dropZone   = document.getElementById('drop-zone');
     const fileInput  = document.getElementById('file-input');
     const btnUpload  = document.getElementById('btn-upload');
+    const btnCancel  = document.getElementById('btn-cancel');
     const fileCount  = document.getElementById('file-count');
     const fileList   = document.getElementById('file-list');
     const allDone    = document.getElementById('all-done-banner');
@@ -368,13 +370,46 @@
     // ── Upload ─────────────────────────────────────────────────────────────────
     btnUpload.addEventListener('click', startUploads);
 
+    // Cancel stops anything still being sent (in-flight requests are aborted,
+    // a direct upload's partial parts are discarded, files not yet started are
+    // skipped). A file already past sending, and so safe in cloud storage and
+    // just being finished by the server, isn't touched.
+    class Cancelled extends Error {}
+    let cancelled = false;
+    const activeXhrs = new Set();
+    btnCancel.addEventListener('click', () => {
+      cancelled = true;
+      btnCancel.disabled = true;
+      btnCancel.textContent = 'Cancelling…';
+      for (const x of [...activeXhrs]) x.abort();
+    });
+    function trackXhr(xhr, reject) {
+      if (cancelled) { reject(new Cancelled('Cancelled')); return false; }
+      activeXhrs.add(xhr);
+      xhr.onabort = () => { activeXhrs.delete(xhr); reject(new Cancelled('Cancelled')); };
+      return true;
+    }
+    function markCancelled(itemEl) {
+      const badge = itemEl.querySelector('[data-badge]');
+      const bar   = itemEl.querySelector('[data-bar]');
+      const msg   = itemEl.querySelector('[data-msg]');
+      setBadge(badge, 'error', 'Cancelled');
+      bar.style.width = '0%';
+      msg.textContent = 'Cancelled — nothing was kept. Press Upload to try again.';
+      msg.className = 'file-message';
+    }
+
     async function startUploads() {
       if (!resolvedParticipant()) {
         const el = document.getElementById('input-name');
         if (el) { el.focus(); el.style.borderColor = 'var(--red)'; }
         return;
       }
+      cancelled = false;
       btnUpload.disabled = true;
+      btnCancel.style.display = '';
+      btnCancel.disabled = false;
+      btnCancel.textContent = 'Cancel upload';
       if (document.getElementById('input-name')) document.getElementById('input-name').disabled = true;
       fileInput.disabled = true;
       allDone.style.display = 'none';
@@ -382,6 +417,8 @@
       const items = [...fileList.querySelectorAll('.file-item')];
       const queue = [];
       for (let i = 0; i < selectedFiles.length; i++) {
+        const st = items[i].querySelector('[data-badge]').dataset.state;
+        if (st === 'done') continue; // finished on an earlier run (before a cancel)
         if (validateFile(selectedFiles[i])) continue; // rejected pre-flight — badge already shows why
         queue.push(i);
       }
@@ -395,11 +432,19 @@
       async function worker() {
         while (next < queue.length) {
           const i = queue[next++];
+          if (cancelled) { markCancelled(items[i]); continue; }
           await uploadFile(selectedFiles[i], items[i]);
         }
       }
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
 
+      btnCancel.style.display = 'none';
+      if (cancelled) {
+        // Hand the page back so the unfinished files can be retried.
+        btnUpload.disabled = false;
+        if (document.getElementById('input-name')) document.getElementById('input-name').disabled = false;
+        fileInput.disabled = false;
+      }
       checkAllDone();
     }
 
@@ -415,27 +460,32 @@
       msg.textContent = DIRECT_CLOUD ? 'Sending to cloud storage…' : 'Sending to server…';
       msg.className = 'file-message';
 
+      let note = '';  // why the direct path was abandoned, kept visible while the fallback runs
       const onProgress = (pct) => {
         bar.style.width = `${Math.round(pct * 0.6)}%`; // 0-60% for the send phase
-        msg.textContent = `Uploading… ${Math.round(pct)}%`;
+        msg.textContent = `${note}Uploading… ${Math.round(pct)}%`;
       };
 
-      let uploadId = null;
+      let uploadId = null, directError = '';
       if (DIRECT_CLOUD) {
         try {
           uploadId = await sendDirectToCloud(file, onProgress);
         } catch (e) {
+          if (e instanceof Cancelled) { markCancelled(itemEl); return; }
           console.warn('direct cloud upload failed, using the server:', e);
+          directError = e.message || String(e);
         }
         if (!uploadId) {
           bar.style.width = '0%';
-          msg.textContent = 'Sending to server…';
+          note = `Direct upload unavailable${directError ? ` (${directError})` : ''}; using the server. `;
+          msg.textContent = `${note}Sending to server…`;
         }
       }
       if (!uploadId) {
         try {
           uploadId = await sendToServer(file, onProgress);
         } catch (e) {
+          if (e instanceof Cancelled) { markCancelled(itemEl); return; }
           setBadge(badge, 'error', 'Error');
           bar.style.width = '100%';
           bar.className = 'progress-bar error';
@@ -478,7 +528,7 @@
       });
       if (!r.ok) {
         let detail = `HTTP ${r.status}`;
-        try { detail = (await r.json()).detail || detail; } catch {}
+        try { const d = (await r.json()).detail; if (d) detail = typeof d === 'string' ? d : JSON.stringify(d); } catch {}
         const err = new Error(detail);
         err.status = r.status;
         throw err;
@@ -490,16 +540,18 @@
     function putPart(url, blob, onBytes) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
+        if (!trackXhr(xhr, reject)) return;
         xhr.open('PUT', url);
         xhr.upload.onprogress = e => { if (e.lengthComputable) onBytes(e.loaded); };
         xhr.onload = () => {
+          activeXhrs.delete(xhr);
           if (xhr.status >= 200 && xhr.status < 300) return resolve();
           const err = new Error(`part upload HTTP ${xhr.status}`);
           err.status = xhr.status;
           reject(err);
         };
-        xhr.onerror = () => reject(new Error('network error'));
-        xhr.ontimeout = () => reject(new Error('timeout'));
+        xhr.onerror = () => { activeXhrs.delete(xhr); reject(new Error('network error')); };
+        xhr.ontimeout = () => { activeXhrs.delete(xhr); reject(new Error('timeout')); };
         xhr.timeout = 10 * 60 * 1000;
         xhr.send(blob);
       });
@@ -530,6 +582,7 @@
             return;
           } catch (e) {
             sent[n] = 0;
+            if (e instanceof Cancelled || cancelled) throw (e instanceof Cancelled ? e : new Cancelled('Cancelled'));
             if (attempt === 3) throw e;
             if (e.status === 403) {
               url = (await cloudPost('part-url', { key, upload_id: cloudUploadId, part_number: n + 1 })).url;
@@ -550,11 +603,24 @@
 
       try {
         if (failed) throw failed;
-        const done = await cloudPost('complete', {
-          key, upload_id: cloudUploadId, part_count: partCount, total_size: file.size,
-          content_type: contentType,
-        });
-        return done.upload_id;
+        if (cancelled) throw new Cancelled('Cancelled');
+        // A repeat of "complete" is harmless server-side (it returns the same
+        // job), so retry a dropped response rather than re-sending the file.
+        let lastErr;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const done = await cloudPost('complete', {
+              key, upload_id: cloudUploadId, part_count: partCount, total_size: file.size,
+              content_type: contentType,
+            });
+            return done.upload_id;
+          } catch (e) {
+            lastErr = e;
+            if (e.status) break;  // the server answered: retrying won't change it
+            await sleep(2000 * (attempt + 1));
+          }
+        }
+        throw lastErr;
       } catch (e) {
         cloudPost('abort', { key, upload_id: cloudUploadId }).catch(() => {});
         throw e;
@@ -567,6 +633,7 @@
         fd.append('file', file);
 
         const xhr = new XMLHttpRequest();
+        if (!trackXhr(xhr, reject)) return;
         xhr.open('POST', `/api/session/${SESSION_ID}/local-upload`);
         xhr.setRequestHeader('X-Upload-Token', UPLOAD_TOKEN);
         xhr.setRequestHeader('X-Participant', resolvedParticipant());
@@ -576,6 +643,7 @@
         };
 
         xhr.onload = () => {
+          activeXhrs.delete(xhr);
           if (xhr.status === 200) {
             try {
               const data = JSON.parse(xhr.responseText);
@@ -584,12 +652,12 @@
               reject(new Error('Invalid server response'));
             }
           } else {
-            let detail = xhr.statusText;
-            try { detail = JSON.parse(xhr.responseText).detail || detail; } catch {}
+            let detail = xhr.statusText || `HTTP ${xhr.status}`;
+            try { const d = JSON.parse(xhr.responseText).detail; if (d) detail = typeof d === 'string' ? d : JSON.stringify(d); } catch {}
             reject(new Error(detail));
           }
         };
-        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onerror = () => { activeXhrs.delete(xhr); reject(new Error('Network error')); };
         xhr.send(fd);
       });
     }
@@ -600,12 +668,19 @@
       // A big file can take a while to pull down and copy on to other
       // backends, so allow two hours rather than ten minutes.
       const deadline = Date.now() + 2 * 60 * 60 * 1000;
+      let pending = 0;
       while (Date.now() < deadline) {
         await sleep(1000);
         const r = await fetch(url, { headers });
         if (!r.ok) throw new Error(`Status poll failed: HTTP ${r.status}`);
         const data = await r.json();
 
+        // The server registers the job before replying, so "pending" for
+        // this long means it lost track (e.g. it restarted mid-processing).
+        pending = data.status === 'pending' ? pending + 1 : 0;
+        if (pending > 120) {
+          throw new Error('Lost track of this upload (the server may have restarted). The file may already be in cloud storage - ask your host to check.');
+        }
         if (data.status === 'done') {
           return data.warning || '';
         }
