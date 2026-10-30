@@ -48,7 +48,7 @@ from app.routers.cloudsync import (
     cloud_upload_enabled,
     run_upload,
 )
-from app.routers.export import _probe_duration_s
+from app.routers.export import _probe_duration_fast, _probe_duration_s
 from app.routers.upload import (
     CLOUD_PART_URL_EXPIRY_S,
     CLOUD_UPLOAD_PART_BYTES,
@@ -84,6 +84,10 @@ _SAFE_FILENAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 ._-]{0,253}[A-Za-z0-9]$|
 
 _local_upload_status: dict[str, dict] = {}
 _local_upload_task_refs: set[asyncio.Task] = set()
+# (key, multipart upload_id) -> job id, so a repeated /cloud/complete (the
+# client retries when a response is dropped) joins the job already running
+# instead of starting a second one that would register the file twice.
+_direct_jobs: dict[tuple[str, str], str] = {}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -530,11 +534,22 @@ async def local_cloud_complete(
     content_type = data.get("content_type") or ""
     track_type = "video" if content_type.startswith("video/") else "audio"
 
+    if total_size > MAX_UPLOAD_BYTES:
+        await asyncio.to_thread(s3.abort_multipart_upload, key, upload_id)
+        raise HTTPException(status_code=413, detail="File exceeds maximum allowed size")
+
     completed = False
     try:
         parts = await asyncio.to_thread(s3.list_uploaded_parts, key, upload_id)
-    except Exception:
-        parts = None  # the upload_id is gone once completed — see the retry case below
+    except Exception as e:
+        # The upload_id is gone once completed — see the retry case below. Any
+        # other listing error (throttling, a network blip) must not be read as
+        # "already completed": a stale object from an earlier upload of the same
+        # filename would then pass the object_exists check below.
+        if "NoSuchUpload" not in f"{getattr(e, 'response', '')}{e}":
+            logger.warning("local cloud complete: listing parts for %s failed: %s", key, e)
+            raise HTTPException(status_code=503, detail="Could not verify the upload — please retry")
+        parts = None
     if parts is not None:
         landed = sorted(p["part_number"] for p in parts)
         if landed != list(range(1, part_count + 1)) or sum(p["size"] for p in parts) != total_size:
@@ -542,6 +557,8 @@ async def local_cloud_complete(
             # the file through the server, which has every byte locally.
             logger.error("local cloud complete: %s parts don't match (%d landed, expected %d)",
                          key, len(landed), part_count)
+            # Don't leave the parts behind as billable storage.
+            await asyncio.to_thread(s3.abort_multipart_upload, key, upload_id)
             raise HTTPException(status_code=409, detail="Uploaded parts don't match — falling back")
         try:
             await asyncio.to_thread(s3.complete_multipart_upload, key, upload_id, parts)
@@ -551,7 +568,13 @@ async def local_cloud_complete(
     if not completed and not await asyncio.to_thread(s3.object_exists, key):
         raise HTTPException(status_code=503, detail="Could not complete cloud upload")
 
+    existing_job = _direct_jobs.get((key, upload_id))
+    if existing_job and existing_job in _local_upload_status:
+        return JSONResponse({"upload_id": existing_job, "filename": filename})
+    for k in [k for k, j in _direct_jobs.items() if j not in _local_upload_status]:
+        del _direct_jobs[k]  # status entries expire; drop their mappings too
     job_id = str(uuid.uuid4())
+    _direct_jobs[(key, upload_id)] = job_id
     _local_upload_status[job_id] = {
         "status": "uploading", "message": "Processing…", "uploaded": 0, "total": 1, "ts": time.time(),
     }
@@ -598,12 +621,28 @@ async def _process_direct_upload(
             # Nothing else to feed: read the duration straight off the bucket
             # copy (ffprobe range-reads over HTTPS) rather than downloading it.
             url = await asyncio.to_thread(s3.generate_download_url, key, 3600)
-            duration_s = await _probe_duration_s(url)
+            duration_s = await _probe_duration_fast(url)
+            if duration_s <= 0:
+                # No duration in the header (raw MediaRecorder WebM): the full
+                # decode needs the whole file, so pull it down once rather than
+                # stream it through ffmpeg over HTTPS.
+                _local_upload_status[job_id]["message"] = "Downloading…"
+                fd, tmp_name = tempfile.mkstemp(suffix=Path(filename).suffix, prefix="pb_local_")
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+                await asyncio.to_thread(s3.download_object_to_path, key, tmp_path)
+                duration_s = await _probe_duration_s(tmp_path)
+                tmp_path.unlink(missing_ok=True)
+                tmp_path = None
 
         # Record the bucket copy now, before the slower pushes to other backends.
-        await _record_local_upload(
-            session_id, session, safe_participant, filename, track_type, file_size, duration_s, [key],
-        )
+        try:
+            await _record_local_upload(
+                session_id, session, safe_participant, filename, track_type, file_size, duration_s, [key],
+            )
+        except Exception as e:
+            logger.error("local cloud upload %s: could not record it: %s", key, e)
+            warning = f"Saved to cloud storage, but it could not be registered for editor delivery: {e}"
 
         if others and tmp_path:
             _local_upload_status[job_id]["message"] = "Copying to other backends…"
@@ -617,7 +656,7 @@ async def _process_direct_upload(
                     await _record_local_upload(
                         session_id, session, safe_participant, filename, track_type, file_size, 0, extra,
                     )
-            else:
+            elif not warning:
                 warning = f"Saved to cloud storage, but not copied everywhere: {result.get('message', 'unknown error')}"
         if warning:
             logger.warning("local cloud upload %s: %s", key, warning)
