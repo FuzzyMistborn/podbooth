@@ -97,12 +97,15 @@ def get_client():
     if _client is None:
         _, region, endpoint_url, access_key_id, secret_access_key, _ = _active_backend()
         import boto3
+        from botocore.config import Config
         _client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name=region,
+            # Shared by concurrent uploads/transfers; default pool is 10.
+            config=Config(max_pool_connections=50),
         )
     return _client
 

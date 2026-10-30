@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ from fastapi import APIRouter, File, Header, HTTPException, Query, Request, Uplo
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from app import s3
 from app.config import settings, ASSET_VERSION, APP_VERSION
 from app.limiter import limiter
 from app import models
@@ -47,7 +49,14 @@ from app.routers.cloudsync import (
     run_upload,
 )
 from app.routers.export import _probe_duration_s
-from app.routers.upload import _metadata_lock, _save_run_metadata
+from app.routers.upload import (
+    CLOUD_PART_URL_EXPIRY_S,
+    CLOUD_UPLOAD_PART_BYTES,
+    _S3_MAX_PARTS,
+    _metadata_lock,
+    _save_run_metadata,
+    direct_cloud_upload_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +178,60 @@ async def _register_local_upload_run(
     )
 
 
+async def _record_local_upload(
+    session_id: str, session, safe_participant: str, filename: str, track_type: str,
+    file_size: int, duration_s: float, s3_keys: list[str],
+) -> None:
+    """After a local upload reached the bucket: record its keys in
+    session.r2_files (needed for editor delivery), register its run for export
+    generation, and refresh the editor manifest."""
+    s = get_session(session_id)
+    if not s:
+        return
+    existing = {f["key"] for f in s.r2_files}
+    for key in s3_keys:
+        if key not in existing:
+            s.r2_files.append({
+                "key": key,
+                "filename": filename,
+                "size_bytes": file_size,
+                "uploaded_at": datetime.now(tz=timezone.utc).isoformat(),
+                "uploader": safe_participant or "local-upload",
+            })
+    await models.touch(session_id)
+    if duration_s > 0:
+        await _register_local_upload_run(
+            session, safe_participant or "guest", track_type, filename, duration_s,
+        )
+    from app.routers.s3upload import schedule_manifest_auto_refresh
+    schedule_manifest_auto_refresh(session_id)
+
+
+def _safe_participant(header: str) -> str:
+    return "".join(c if c.isalnum() or c in "- _" else "_" for c in header).strip()
+
+
+def _remote_path(session, participant: str, filename: str) -> str:
+    slug = _session_slug(session.title)
+    if participant:
+        return f"{slug}/local/{participant}/{filename}"
+    return f"{slug}/local/{filename}"
+
+
+def _bucket_key(remote_path: str) -> str:
+    prefix = s3.upload_prefix()
+    return f"{prefix}/{remote_path}" if prefix else remote_path
+
+
+def _is_active_bucket(backend) -> bool:
+    """Whether an S3Backend is the bucket app.s3 (and so a direct browser
+    upload) writes to."""
+    if not isinstance(backend, S3Backend):
+        return False
+    bucket, _, endpoint, *_ = s3._active_backend()
+    return backend._bucket == bucket and (backend._endpoint_url or None) == endpoint
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @router.get("/local-upload/{session_id}", response_class=HTMLResponse)
@@ -195,6 +258,7 @@ async def local_upload_page(
             "upload_token": token,
             "participant": safe_participant,
             "cloud_upload_enabled": cloud_upload_enabled(),
+            "direct_cloud": direct_cloud_upload_enabled(),
         },
     )
 
@@ -281,25 +345,10 @@ async def start_local_upload(
             await run_upload(upload_id, _local_upload_status, [item], backends)
             result = _local_upload_status.get(upload_id, {})
             if result.get("status") == "done" and s3_keys:
-                s = get_session(session_id)
-                if s:
-                    existing = {f["key"] for f in s.r2_files}
-                    for key in s3_keys:
-                        if key not in existing:
-                            s.r2_files.append({
-                                "key": key,
-                                "filename": filename,
-                                "size_bytes": file_size,
-                                "uploaded_at": datetime.now(tz=timezone.utc).isoformat(),
-                                "uploader": safe_participant or "local-upload",
-                            })
-                    await models.touch(session_id)
-                    if duration_s > 0:
-                        await _register_local_upload_run(
-                            session, safe_participant or "guest", track_type, filename, duration_s,
-                        )
-                    from app.routers.s3upload import schedule_manifest_auto_refresh
-                    schedule_manifest_auto_refresh(session_id)
+                await _record_local_upload(
+                    session_id, session, safe_participant, filename, track_type,
+                    file_size, duration_s, s3_keys,
+                )
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -332,3 +381,264 @@ async def local_upload_status(
     if not status:
         return JSONResponse({"status": "pending"})
     return JSONResponse(status)
+
+
+# ── Direct-to-cloud upload ─────────────────────────────────────────────────────
+# Like the post-stop recording upload (upload.py /cloud/*): the browser PUTs
+# the file to the bucket in parts via presigned URLs, straight to the file's
+# final key, so it never crosses this server's link on the way in. /complete
+# then finishes the upload and returns at once; in the background the server
+# reads the duration off the bucket copy and — only if other backends
+# (Nextcloud, FileBrowser, a second bucket) are configured — pulls the file down
+# to push it to them. The page polls the same status endpoint as before.
+
+
+def _require_local_key(session, key) -> None:
+    """part-url/abort/complete carry a key from /cloud/start — refuse one
+    outside this session's local-upload folder."""
+    prefix = _bucket_key(f"{_session_slug(session.title)}/local/")
+    if not isinstance(key, str) or not key.startswith(prefix):
+        raise HTTPException(status_code=403, detail="Key does not belong to this session")
+
+
+def _direct_or_503() -> None:
+    if not direct_cloud_upload_enabled():
+        raise HTTPException(status_code=503, detail="Direct-to-cloud upload is not configured")
+
+
+@router.post("/api/session/{session_id}/local-upload/cloud/start")
+@limiter.limit("30/minute")
+async def local_cloud_start(
+    request: Request,
+    session_id: str,
+    x_upload_token: str = Header(default=""),
+    x_participant: str = Header(default=""),
+):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _verify_upload_token(session, x_upload_token)
+    _direct_or_503()
+
+    data = await request.json()
+    filename = _validate_filename(data.get("filename") or "")
+    content_type = data.get("content_type") or ""
+    _validate_content_type(content_type, filename)
+    try:
+        total_size = int(data.get("total_size", 0))
+    except (TypeError, ValueError):
+        total_size = 0
+    if total_size <= 0:
+        raise HTTPException(status_code=400, detail="Invalid total_size")
+    if total_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds maximum allowed size ({MAX_UPLOAD_BYTES // (1024**3)} GB)",
+        )
+    part_count = -(-total_size // CLOUD_UPLOAD_PART_BYTES)
+    if part_count > _S3_MAX_PARTS:
+        raise HTTPException(status_code=413, detail="File too large for a cloud upload")
+
+    key = _bucket_key(_remote_path(session, _safe_participant(x_participant), filename))
+    try:
+        upload_id = await asyncio.to_thread(
+            s3.create_multipart_upload, key, content_type.split(";")[0].strip() or "application/octet-stream",
+        )
+        part_urls = await asyncio.to_thread(lambda: [
+            s3.generate_part_upload_url(key, upload_id, n, CLOUD_PART_URL_EXPIRY_S)
+            for n in range(1, part_count + 1)
+        ])
+    except Exception as e:
+        logger.error("local cloud start: could not start %s: %s", key, e)
+        raise HTTPException(status_code=503, detail="Could not start cloud upload")
+    logger.info("local cloud start: session=%s key=%s size=%d parts=%d", session_id, key, total_size, part_count)
+    return JSONResponse({
+        "key": key, "upload_id": upload_id, "part_size": CLOUD_UPLOAD_PART_BYTES, "part_urls": part_urls,
+    })
+
+
+@router.post("/api/session/{session_id}/local-upload/cloud/part-url")
+@limiter.limit("600/minute")
+async def local_cloud_part_url(
+    request: Request, session_id: str, x_upload_token: str = Header(default=""),
+):
+    """Fresh presigned URL for one part, if its up-front URL was refused."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _verify_upload_token(session, x_upload_token)
+    _direct_or_503()
+    data = await request.json()
+    key, upload_id = data.get("key"), data.get("upload_id")
+    try:
+        part_number = int(data.get("part_number"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid part_number")
+    if not key or not upload_id or not (1 <= part_number <= _S3_MAX_PARTS):
+        raise HTTPException(status_code=400, detail="Missing key/upload_id/part_number")
+    _require_local_key(session, key)
+    try:
+        url = await asyncio.to_thread(s3.generate_part_upload_url, key, upload_id, part_number)
+    except Exception as e:
+        logger.error("local cloud part-url: failed for %s part %d: %s", key, part_number, e)
+        raise HTTPException(status_code=503, detail="Could not generate part upload URL")
+    return JSONResponse({"url": url})
+
+
+@router.post("/api/session/{session_id}/local-upload/cloud/abort")
+@limiter.limit("60/minute")
+async def local_cloud_abort(
+    request: Request, session_id: str, x_upload_token: str = Header(default=""),
+):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _verify_upload_token(session, x_upload_token)
+    data = await request.json()
+    key, upload_id = data.get("key"), data.get("upload_id")
+    if not key or not upload_id:
+        raise HTTPException(status_code=400, detail="Missing key/upload_id")
+    _require_local_key(session, key)
+    await asyncio.to_thread(s3.abort_multipart_upload, key, upload_id)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/api/session/{session_id}/local-upload/cloud/complete")
+@limiter.limit("60/minute")
+async def local_cloud_complete(
+    request: Request,
+    session_id: str,
+    x_upload_token: str = Header(default=""),
+    x_participant: str = Header(default=""),
+):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _verify_upload_token(session, x_upload_token)
+    _direct_or_503()
+    data = await request.json()
+    key, upload_id = data.get("key"), data.get("upload_id")
+    try:
+        part_count = int(data.get("part_count"))
+        total_size = int(data.get("total_size"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid part_count/total_size")
+    if not key or not upload_id:
+        raise HTTPException(status_code=400, detail="Missing key/upload_id")
+    _require_local_key(session, key)
+    filename = _validate_filename(key.rsplit("/", 1)[-1])
+    content_type = data.get("content_type") or ""
+    track_type = "video" if content_type.startswith("video/") else "audio"
+
+    completed = False
+    try:
+        parts = await asyncio.to_thread(s3.list_uploaded_parts, key, upload_id)
+    except Exception:
+        parts = None  # the upload_id is gone once completed — see the retry case below
+    if parts is not None:
+        landed = sorted(p["part_number"] for p in parts)
+        if landed != list(range(1, part_count + 1)) or sum(p["size"] for p in parts) != total_size:
+            # Never complete a partial upload; the page falls back to sending
+            # the file through the server, which has every byte locally.
+            logger.error("local cloud complete: %s parts don't match (%d landed, expected %d)",
+                         key, len(landed), part_count)
+            raise HTTPException(status_code=409, detail="Uploaded parts don't match — falling back")
+        try:
+            await asyncio.to_thread(s3.complete_multipart_upload, key, upload_id, parts)
+            completed = True
+        except Exception as e:
+            logger.warning("local cloud complete: complete_multipart_upload failed for %s: %s", key, e)
+    if not completed and not await asyncio.to_thread(s3.object_exists, key):
+        raise HTTPException(status_code=503, detail="Could not complete cloud upload")
+
+    job_id = str(uuid.uuid4())
+    _local_upload_status[job_id] = {
+        "status": "uploading", "message": "Processing…", "uploaded": 0, "total": 1, "ts": time.time(),
+    }
+    task = asyncio.create_task(_process_direct_upload(
+        job_id, session_id, key, filename, track_type, _safe_participant(x_participant), total_size,
+    ))
+    _local_upload_task_refs.add(task)
+    task.add_done_callback(_local_upload_task_refs.discard)
+    logger.info("local cloud complete: session=%s key=%s (%d bytes)", session_id, key, total_size)
+    return JSONResponse({"upload_id": job_id, "filename": filename})
+
+
+async def _process_direct_upload(
+    job_id: str, session_id: str, key: str, filename: str, track_type: str,
+    safe_participant: str, file_size: int,
+) -> None:
+    """Background half of a direct upload: probe the duration, record the file
+    (it's already safe in the bucket), then copy it to any other backends.
+    A failure after the bucket has the file is reported as a warning on a
+    "done" status rather than an error — the upload itself succeeded."""
+    session = get_session(session_id)
+    tmp_path: Path | None = None
+    warning = ""
+    try:
+        others = [b for b in _get_backends() if not _is_active_bucket(b)]
+        duration_s = 0.0
+        if others:
+            # Nextcloud/FileBrowser/a second bucket can't be written by the
+            # browser, so this server pulls the file down once and pushes it on.
+            _local_upload_status[job_id]["message"] = "Downloading…"
+            fd, tmp_name = tempfile.mkstemp(suffix=Path(filename).suffix, prefix="pb_local_")
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            try:
+                await asyncio.to_thread(s3.download_object_to_path, key, tmp_path)
+                duration_s = await _probe_duration_s(tmp_path)
+            except Exception as e:
+                logger.error("local cloud upload %s: pull-down failed: %s", key, e)
+                warning = f"Saved to cloud storage, but copying to other backends failed: {e}"
+                tmp_path.unlink(missing_ok=True)
+                tmp_path = None
+                others = []
+        else:
+            # Nothing else to feed: read the duration straight off the bucket
+            # copy (ffprobe range-reads over HTTPS) rather than downloading it.
+            url = await asyncio.to_thread(s3.generate_download_url, key, 3600)
+            duration_s = await _probe_duration_s(url)
+
+        # Record the bucket copy now, before the slower pushes to other backends.
+        await _record_local_upload(
+            session_id, session, safe_participant, filename, track_type, file_size, duration_s, [key],
+        )
+
+        if others and tmp_path:
+            _local_upload_status[job_id]["message"] = "Copying to other backends…"
+            item = UploadItem(local_path=tmp_path, remote_path=_remote_path(session, safe_participant, filename))
+            await run_upload(job_id, _local_upload_status, [item], others)
+            result = _local_upload_status.get(job_id, {})
+            if result.get("status") == "done":
+                extra = [_bucket_key_for(b, session, safe_participant, filename)
+                         for b in others if isinstance(b, S3Backend)]
+                if extra:  # duration 0: the run was already registered above
+                    await _record_local_upload(
+                        session_id, session, safe_participant, filename, track_type, file_size, 0, extra,
+                    )
+            else:
+                warning = f"Saved to cloud storage, but not copied everywhere: {result.get('message', 'unknown error')}"
+        if warning:
+            logger.warning("local cloud upload %s: %s", key, warning)
+            _local_upload_status[job_id] = {
+                "status": "done", "message": "Uploaded 1 file(s)", "warning": warning,
+                "uploaded": 1, "total": 1, "ts": time.time(),
+            }
+        elif _local_upload_status.get(job_id, {}).get("status") != "done":
+            _local_upload_status[job_id] = {
+                "status": "done", "message": "Uploaded 1 file(s)", "uploaded": 1, "total": 1, "ts": time.time(),
+            }
+    except Exception as e:
+        logger.error("local cloud upload %s failed after reaching the bucket: %s", key, e)
+        _local_upload_status[job_id] = {
+            "status": "error", "message": f"Processing failed: {e}", "uploaded": 0, "total": 1, "ts": time.time(),
+        }
+    finally:
+        if tmp_path:
+            tmp_path.unlink(missing_ok=True)
+
+
+def _bucket_key_for(backend: S3Backend, session, participant: str, filename: str) -> str:
+    path = _remote_path(session, participant, filename)
+    return f"{backend._upload_path}/{path}" if backend._upload_path else path

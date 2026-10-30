@@ -337,6 +337,7 @@ class S3Backend(CloudBackend):
     async def upload(self, items: list[UploadItem]) -> tuple[int, str]:
         try:
             import boto3
+            from botocore.config import Config as BotoConfig
             from botocore.exceptions import BotoCoreError, ClientError
         except ImportError:
             return 0, f"{self._name}: boto3 is required for S3-compatible uploads (pip install boto3)"
@@ -344,12 +345,15 @@ class S3Backend(CloudBackend):
         def _do_upload() -> tuple[int, str]:
             # boto3 clients are thread-safe for making requests, so a single
             # client can be shared across the pool below.
+            # Up to 4 files at once, each with boto3's default 10 transfer
+            # threads — the default pool of 10 connections overflows.
             s3 = boto3.client(
                 "s3",
                 endpoint_url=self._endpoint_url,
                 aws_access_key_id=self._access_key_id,
                 aws_secret_access_key=self._access_key_secret,
                 region_name=self._region,
+                config=BotoConfig(max_pool_connections=50),
             )
             to_upload = [i for i in items if i.local_path.is_file()]
             errors: list[str] = []
