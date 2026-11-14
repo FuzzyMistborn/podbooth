@@ -316,6 +316,16 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
   display: block;
   transform: scaleX(-1);
 }
+.preview-wrap video.no-mirror { transform: none; }
+.mirror-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-1, inherit);
+  cursor: pointer;
+}
+.mirror-toggle .mirror-hint { color: var(--text-3); font-size: 12px; }
 .preview-overlay {
   position: absolute;
   inset: 0;
