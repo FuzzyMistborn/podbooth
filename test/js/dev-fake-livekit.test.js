@@ -15,20 +15,23 @@ const node = () => { const n = { frequency: {}, gain: {}, offset: {}, connect: x
 
 let LK;
 beforeAll(() => {
-  globalThis.window = globalThis;
-  globalThis.addEventListener ??= () => {};
-  globalThis.location = { search: '' };
-  globalThis.navigator = {};
-  globalThis.MediaStream = class { constructor(t = []) { this.t = t; } getVideoTracks() { return this.t.filter(x => x.kind === 'video'); } getAudioTracks() { return this.t.filter(x => x.kind === 'audio'); } };
-  globalThis.AudioContext = class {
+  // defineProperty, not assignment: newer Node versions ship getter-only globals
+  // (navigator, ...) that a plain `globalThis.x = ...` throws on (see harness.js).
+  const def = (k, v) => Object.defineProperty(globalThis, k, { value: v, writable: true, configurable: true, enumerable: true });
+  def('window', globalThis);
+  if (typeof globalThis.addEventListener !== 'function') def('addEventListener', () => {});
+  def('location', { search: '' });
+  def('navigator', {});
+  def('MediaStream', class { constructor(t = []) { this.t = t; } getVideoTracks() { return this.t.filter(x => x.kind === 'video'); } getAudioTracks() { return this.t.filter(x => x.kind === 'audio'); } });
+  def('AudioContext', class {
     state = 'running';
     createOscillator = node; createGain = node; createConstantSource = node;
     createMediaStreamDestination() { return { stream: new MediaStream([track('audio')]) }; }
-  };
-  globalThis.document = {
+  });
+  def('document', {
     addEventListener() {},
     createElement: () => ({ width: 0, height: 0, getContext: () => noopCtx, captureStream: () => new MediaStream([track('video')]), play: () => Promise.resolve() }),
-  };
+  });
   (0, eval)(fs.readFileSync(FILE, 'utf8'));
   LK = globalThis.LivekitClient;
 });
