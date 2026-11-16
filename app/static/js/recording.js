@@ -34,12 +34,27 @@ function showCountdown() {
 
 // ── Recording control (host) ─────────────────────────────────────────────────
 
+// Bounded: stopRecording awaits this (and the broadcast) before it stops the
+// local recorder and starts the upload pass, so an unanswered request here
+// must not be able to hold the host's own upload hostage.
+const STOP_STEP_TIMEOUT_MS = 10 * 1000;
+
 async function _postRecordingAction(action) {
-  await fetch(`/api/session/${SESSION_ID}/recording`, {
+  await _fetchWithTimeout(`/api/session/${SESSION_ID}/recording`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ host_token: HOST_TOKEN, action }),
+  }, STOP_STEP_TIMEOUT_MS);
+}
+
+// Resolves/rejects with `promise`, or rejects after `ms` — for steps (like a
+// LiveKit data-channel publish) that have no timeout of their own.
+function _withTimeout(promise, ms, what) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)}s`)), ms);
   });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function startRecording() {
@@ -123,22 +138,32 @@ function _stopQuotaMonitor() {
 
 async function stopRecording() {
   if (btnStopRec) btnStopRec.disabled = true;
-  // Local capture must stop regardless of whether the server call or
-  // broadcast succeed — a network blip here must never leave this tab's
-  // recorder (and everyone else's, since they normally stop on receiving
-  // 'recording_stopped') running indefinitely just because the host's own
-  // "tell the server/everyone" step failed.
+  // Local capture and the upload pass must happen regardless of whether the
+  // server call or broadcast succeed (or hang — both are time-bounded) — a
+  // network blip here must never leave this tab's recorder running, or
+  // leave the host's own recording un-uploaded while guests' go up fine.
+  // Every step is logged so a missing upload can be traced afterwards.
+  recLog('stopRecording: begin (epoch=%s)', recordingEpoch);
   try {
     await _postRecordingAction('stop');
   } catch (e) {
+    recLog('stopRecording: server stop request failed: %s', e && e.message);
     console.warn('stopRecording: server stop request failed:', e);
   }
   try {
-    await broadcastData({ type: 'recording_stopped' });
+    await _withTimeout(broadcastData({ type: 'recording_stopped' }), STOP_STEP_TIMEOUT_MS, 'recording_stopped broadcast');
   } catch (e) {
+    recLog('stopRecording: broadcast failed: %s', e && e.message);
     console.warn('stopRecording: broadcast failed:', e);
   }
-  await stopLocalRecording();
+  try {
+    await stopLocalRecording();
+  } catch (e) {
+    // Still run the upload pass below: whatever chunks were persisted are
+    // worth sending even if shutting a recorder down threw.
+    recLog('stopRecording: stopLocalRecording threw: %s', e && e.message);
+    console.error('stopRecording: stopLocalRecording failed:', e);
+  }
   // Safe to flip the UI back to "Record" before the upload pass below
   // finishes: waitForUploads captures recordingEpoch at its own entry and
   // threads it through the whole pass, so a fast retake reassigning
@@ -151,8 +176,12 @@ async function stopRecording() {
   // hidden behind waitForUploads (chunk upload + up to ~2 minutes of
   // assembly polling) just because this call happens to run on the host.
   if (typeof showLocalUploadButton === 'function') showLocalUploadButton();
-  await waitForUploads();
-  if (btnStopRec) btnStopRec.disabled = false;
+  try {
+    recLog('stopRecording: starting upload pass');
+    await waitForUploads();
+  } finally {
+    if (btnStopRec) btnStopRec.disabled = false;
+  }
 }
 
 function setRecordingUI(recording) {
