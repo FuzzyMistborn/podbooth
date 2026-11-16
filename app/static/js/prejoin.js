@@ -7,6 +7,7 @@ const DEVICE_KEY_MIC  = 'podbooth:mic-device';
 const DEVICE_KEY_CAM  = 'podbooth:cam-device';
 const DEVICE_KEY_SPK  = 'podbooth:spk-device';
 const DEVICE_KEY_NAME = 'podbooth:participant-name';
+const MIRROR_KEY      = 'podbooth:mirror-cam'; // shared with studio (ui.js)
 
 let stream = null;
 let hasBlockingIssues = false;
@@ -26,6 +27,21 @@ const nameInput   = document.getElementById('participant-name');
 const joinBtn     = document.getElementById('join-btn');
 const overrideWrap = document.getElementById('preflight-override');
 const overrideCheck = document.getElementById('preflight-override-check');
+
+const mirrorCheck = document.getElementById('mirror-check');
+
+// Preview-only: flips how the participant sees themselves. What other
+// participants see and what is recorded is never affected.
+(function initMirror() {
+  let mirrorOff = false;
+  try { mirrorOff = localStorage.getItem(MIRROR_KEY) === 'false'; } catch (e) {}
+  mirrorCheck.checked = !mirrorOff;
+  preview.classList.toggle('no-mirror', mirrorOff);
+  mirrorCheck.addEventListener('change', () => {
+    preview.classList.toggle('no-mirror', !mirrorCheck.checked);
+    try { localStorage.setItem(MIRROR_KEY, String(mirrorCheck.checked)); } catch (e) {}
+  });
+})();
 
 function updateJoinButton() {
   joinBtn.disabled = nameInput.value.trim().length === 0 || (hasBlockingIssues && !preflightOverridden);

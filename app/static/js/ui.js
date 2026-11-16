@@ -670,7 +670,7 @@ async function openDeviceDropdown(kind) {
     check.className = 'check';
     check.textContent = mirrorOff ? '' : '✓';
     btn.appendChild(check);
-    btn.appendChild(document.createTextNode('Mirror my preview'));
+    btn.appendChild(document.createTextNode('Mirror my video (only for me)'));
     btn.addEventListener('click', e => {
       e.stopPropagation();
       toggleMirror();
