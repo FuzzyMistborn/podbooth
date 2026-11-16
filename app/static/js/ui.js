@@ -801,11 +801,31 @@ function setupControls() {
     applyFullscreenState(!!document.fullscreenElement);
   });
 
-  document.addEventListener('mousemove', () => {
+  // True while the user is typing in a text field (chat, share link, etc.) —
+  // the controls must stay visible so they can see what they're typing.
+  function isTypingInField() {
+    const el = document.activeElement;
+    if (!el) return false;
+    if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+    if (el.tagName !== 'INPUT') return false;
+    return !['button', 'checkbox', 'radio', 'range', 'submit', 'reset', 'file', 'color']
+      .includes((el.type || 'text').toLowerCase());
+  }
+
+  function peekControls() {
     if (!document.body.classList.contains('is-fullscreen')) return;
     document.body.classList.add('controls-peek');
     clearTimeout(fsHideTimer);
-    fsHideTimer = setTimeout(() => document.body.classList.remove('controls-peek'), 3000);
+    fsHideTimer = setTimeout(() => {
+      // Re-arm instead of hiding while a text field still has focus.
+      if (isTypingInField()) { peekControls(); return; }
+      document.body.classList.remove('controls-peek');
+    }, 3000);
+  }
+
+  document.addEventListener('mousemove', peekControls);
+  document.addEventListener('keydown', e => {
+    if (isTypingInField()) peekControls();
   });
 
   btnChat?.addEventListener('click', () => {
