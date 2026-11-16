@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timer — PodBooth</title>
+<style>
+  :root {
+    --bg:#111; --bg-2:#1a1a1a; --bg-3:#242424; --border:#2a2a2a;
+    --text:#f0f0f0; --text-2:#999; --accent:#e85d00;
+    --green:#22c55e; --yellow:#eab308; --red:#ef4444;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family: system-ui, sans-serif; font-size:14px; overflow:hidden; }
+  #app { height:100%; display:flex; flex-direction:column; }
+
+  /* ── Display ── */
+  #display { flex:none; text-align:center; padding:14px 16px 10px; transition:background .3s; }
+  #display.green  { background:rgba(34,197,94,.16); }
+  #display.yellow { background:rgba(234,179,8,.20); }
+  #display.red    { background:rgba(239,68,68,.22); }
+  #display.expired { animation: flash 1.4s ease-in-out infinite; }
+  @keyframes flash { 0%,100% { background:rgba(239,68,68,.16); } 50% { background:rgba(239,68,68,.40); } }
+  #topic { font-size:18px; opacity:.9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:1.3em; }
+  #count { font-size:64px; font-weight:700; line-height:1.1; font-variant-numeric:tabular-nums; }
+  #progress { height:4px; background:rgba(255,255,255,.08); border-radius:2px; margin-top:8px; overflow:hidden; }
+  #progress > div { height:100%; width:0; background:currentColor; transition:width 1s linear; }
+  #display.green #progress > div  { background:var(--green); }
+  #display.yellow #progress > div { background:var(--yellow); }
+  #display.red #progress > div    { background:var(--red); }
+
+  /* ── Controls ── */
+  #controls { flex:none; display:none; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); }
+  #controls.host { display:flex; }
+  .btn { flex:1; background:var(--bg-3); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:8px 0; font:inherit; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .btn:hover:not(:disabled) { background:#2e2e2e; }
+  .btn:disabled { opacity:.35; cursor:default; }
+  .btn.on { border-color:var(--accent); color:var(--accent); }
+  .btn svg { width:16px; height:16px; }
+
+  /* ── Scrolling body: notes + queue ── */
+  #scroll { flex:1 1 auto; min-height:0; overflow-y:auto; padding:10px 16px 16px; }
+  #notes { line-height:1.5; opacity:.88; margin-bottom:12px; }
+  #notes:empty { display:none; }
+  #notes strong { color:#fff; }
+  #notes ul { margin:4px 0; padding-left:20px; }
+  #notes p { margin:4px 0; }
+  .md-h2 { font-weight:700; font-size:1.05em; margin-top:6px; }
+  .md-h3 { font-weight:600; margin-top:4px; }
+
+  #hostArea { display:none; }
+  #hostArea.host { display:block; }
+  .section-title { display:flex; align-items:center; justify-content:space-between;
+    font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--text-2); margin:6px 0; }
+  .linkbtn { background:none; border:none; color:var(--text-2); cursor:pointer; font:inherit; font-size:12px; padding:0; }
+  .linkbtn:hover { color:var(--text); }
+
+  #queue { display:flex; flex-direction:column; gap:4px; }
+  .q-empty { color:var(--text-2); padding:8px 0; }
+  .q-row { display:flex; align-items:center; gap:8px; padding:6px 8px; background:var(--bg-2);
+    border:1px solid transparent; border-radius:6px; }
+  .q-row.jumpable { cursor:pointer; }
+  .q-row.jumpable:hover { border-color:var(--border); }
+  .q-row.active { border-color:var(--accent); background:rgba(232,93,0,.10); }
+  .q-row.editing { border-color:var(--yellow); }
+  .q-num { color:var(--text-2); width:1.6em; text-align:right; flex:none; }
+  .q-name { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .q-dur { color:var(--text-2); font-variant-numeric:tabular-nums; flex:none; }
+  .q-act { background:none; border:none; color:var(--text-2); cursor:pointer; font:inherit; padding:0 4px; flex:none; }
+  .q-act:hover { color:var(--text); }
+
+  #form, #thresholds { display:none; flex-direction:column; gap:6px; margin-top:8px; padding:10px;
+    background:var(--bg-2); border:1px solid var(--border); border-radius:6px; }
+  #form.open, #thresholds.open { display:flex; }
+  input, textarea { background:var(--bg); color:var(--text); border:1px solid var(--border);
+    border-radius:4px; padding:6px 8px; font:inherit; width:100%; }
+  textarea { resize:vertical; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row label { flex:1; color:var(--text-2); }
+  .row input { width:80px; flex:none; }
+  .form-actions { display:flex; gap:8px; justify-content:flex-end; }
+  .form-actions .btn { flex:none; padding:6px 14px; }
+  .btn.primary { background:var(--accent); border-color:var(--accent); }
+  .btn.primary:hover:not(:disabled) { background:#ff6a0d; }
+
+  #lost { display:none; padding:24px; text-align:center; color:var(--text-2); }
+  body.lost #app { display:none; }
+  body.lost #lost { display:block; }
+  #hint { flex:none; text-align:center; font-size:11px; color:var(--text-2); padding:4px 0 6px;
+    border-top:1px solid var(--border); display:none; }
+  #hint.host { display:block; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="display" class="green">
+    <div id="topic"></div>
+    <div id="count">--:--</div>
+    <div id="progress"><div></div></div>
+  </div>
+
+  <div id="controls">
+    <button class="btn" id="b-ss" title="Start / pause [P]"></button>
+    <button class="btn" id="b-p30" title="Add 30 seconds [+]">+30s</button>
+    <button class="btn" id="b-skip" title="Next topic [N]">
+      <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><rect x="17" y="4" width="3" height="16"/></svg>
+    </button>
+    <button class="btn" id="b-stop" title="Stop timer [0]">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
+    </button>
+  </div>
+
+  <div id="scroll">
+    <div id="notes"></div>
+
+    <div id="hostArea">
+      <div class="section-title">
+        <span>Queue</span>
+        <span>
+          <button class="linkbtn" id="b-thr">Thresholds</button>
+        </span>
+      </div>
+
+      <div id="thresholds">
+        <div class="row"><label for="t-yellow">Yellow at (s)</label><input id="t-yellow" type="number" min="1" max="3600"></div>
+        <div class="row"><label for="t-red">Red at (s)</label><input id="t-red" type="number" min="1" max="3600"></div>
+      </div>
+
+      <div id="queue"></div>
+
+      <button class="btn" id="b-add" style="margin-top:8px;width:100%">+ Add Topic</button>
+
+      <div id="form">
+        <input id="f-name" type="text" placeholder="Topic name" maxlength="60">
+        <input id="f-dur" type="number" placeholder="Duration (min)" min="0.5" step="0.5">
+        <textarea id="f-notes" rows="3" placeholder="Show notes (optional)" maxlength="500"></textarea>
+        <div class="form-actions">
+          <button class="btn" id="f-cancel">Cancel</button>
+          <button class="btn primary" id="f-save">Add Topic</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="hint">P start/pause · N next · + add 30s · 0 stop</div>
+</div>
+<div id="lost">The studio window was closed or reloaded.<br>Close this window and pop the timer out again.</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ICON_PLAY    = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
+const ICON_PAUSE   = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="4" width="5" height="16"/><rect x="14" y="4" width="5" height="16"/></svg>';
+const ICON_RESTART = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+
+let snap = null;
+let editIndex = -1;
+let autoOpened = false; // open the add form once for an empty queue
+let editOrig = null; // the topic as it was when editing began
+let queueKey = null;
+
+// The studio window owns all timer state; everything here goes through it.
+function studio() {
+  try {
+    const o = window.opener;
+    if (o && !o.closed && typeof o.timerStartStop === 'function') return o;
+  } catch (e) {}
+  return null;
+}
+function act(fn, ...args) {
+  const s = studio();
+  if (!s) { document.body.classList.add('lost'); return; }
+  s[fn](...args);
+}
+
+window.renderTimer = function (s) {
+  snap = s;
+  document.body.classList.remove('lost');
+
+  const display = $('display');
+  display.className = s.color + (s.expired ? ' expired' : '');
+  $('topic').textContent = s.active ? s.topic : (s.isHost ? 'Timer idle' : '');
+  $('count').textContent = s.active ? s.count : '--:--';
+  $('progress').firstElementChild.style.width = s.active && !s.expired ? s.progress + '%' : '0%';
+  const notesEl = $('notes');
+  if (notesEl.innerHTML !== s.notesHtml) notesEl.innerHTML = s.notesHtml;
+
+  $('controls').classList.toggle('host', s.isHost);
+  $('hostArea').classList.toggle('host', s.isHost);
+  $('hint').classList.toggle('host', s.isHost);
+  if (!s.isHost) return;
+
+  const ss = $('b-ss');
+  if (!s.active)        { ss.innerHTML = ICON_PLAY;    ss.title = 'Start [P]';         ss.classList.remove('on'); }
+  else if (s.expired)   { ss.innerHTML = ICON_RESTART; ss.title = 'Restart topic [P]'; ss.classList.remove('on'); }
+  else if (s.paused)    { ss.innerHTML = ICON_PLAY;    ss.title = 'Resume [P]';        ss.classList.add('on'); }
+  else                  { ss.innerHTML = ICON_PAUSE;   ss.title = 'Pause [P]';         ss.classList.add('on'); }
+  $('b-skip').classList.toggle('on', s.active && s.expired);
+  $('b-skip').disabled = !s.active;
+  $('b-stop').disabled = !s.active;
+  $('b-p30').disabled  = !s.active;
+
+  // The queue changed underneath an open edit (removed/edited elsewhere): the
+  // index may now point at a different topic, so abandon the edit.
+  if (editIndex >= 0 && JSON.stringify(pick(s.queue[editIndex])) !== editOrig) { closeForm(); return; }
+
+  // Don't clobber a threshold box while it's being typed in
+  for (const [id, v] of [['t-yellow', s.yellowAt], ['t-red', s.redAt]]) {
+    if (document.activeElement !== $(id)) $(id).value = v;
+  }
+
+  // The queue only rebuilds when it actually changes — rebuilding every tick
+  // would swallow clicks and reset scroll.
+  if (!autoOpened && !s.active && !s.queue.length) { autoOpened = true; $('b-add').click(); }
+  const key = JSON.stringify([s.queue, s.activeIndex, s.active, editIndex]);
+  if (key !== queueKey) { queueKey = key; renderQueue(); }
+};
+
+const pick = t => t && [t.name, t.duration, t.notes];
+
+function renderQueue() {
+  const el = $('queue');
+  el.innerHTML = '';
+  const s = snap;
+  if (!s.queue.length) {
+    el.innerHTML = '<div class="q-empty">No topics yet</div>';
+    return;
+  }
+  s.queue.forEach((t, i) => {
+    const isActive = s.active && s.activeIndex === i;
+    const row = document.createElement('div');
+    row.className = 'q-row' + (isActive ? ' active' : '') + (s.active ? ' jumpable' : '') + (editIndex === i ? ' editing' : '');
+    if (s.active) row.title = isActive ? 'Currently active' : 'Switch to this topic';
+
+    const num = Object.assign(document.createElement('span'), { className: 'q-num', textContent: (i + 1) + '.' });
+    const name = Object.assign(document.createElement('span'), { className: 'q-name', textContent: t.name });
+    const dur = Object.assign(document.createElement('span'), { className: 'q-dur', textContent: t.durLabel });
+    const edit = Object.assign(document.createElement('button'), { className: 'q-act', textContent: 'Edit', title: 'Edit' });
+    const rm = Object.assign(document.createElement('button'), { className: 'q-act', textContent: '×', title: 'Remove' });
+
+    if (s.active) row.addEventListener('click', e => {
+      if (e.target.closest('button') || isActive) return;
+      act('jumpToTopic', i);
+    });
+    edit.addEventListener('click', () => startEdit(i));
+    rm.addEventListener('click', () => {
+      const msg = isActive
+        ? `"${t.name}" is ${s.paused ? 'paused' : 'currently running'}. Remove it anyway?`
+        : `Remove "${t.name}" from the queue?`;
+      if (!confirm(msg)) return;
+      if (editIndex === i) closeForm();
+      act('timerRemoveTopic', i);
+    });
+    row.append(num, name, dur, edit, rm);
+    el.appendChild(row);
+  });
+}
+
+// ── Add / edit form ──
+function openForm() {
+  $('form').classList.add('open');
+  $('b-add').style.display = 'none';
+  $('f-name').focus();
+  $('form').scrollIntoView({ block: 'nearest' });
+}
+function closeForm() {
+  editIndex = -1;
+  queueKey = null;
+  $('form').classList.remove('open');
+  $('b-add').style.display = '';
+  $('f-name').value = $('f-dur').value = $('f-notes').value = '';
+  $('f-save').textContent = 'Add Topic';
+  if (snap) window.renderTimer(snap);
+}
+function startEdit(i) {
+  const t = snap.queue[i];
+  editIndex = i;
+  editOrig = JSON.stringify(pick(t));
+  queueKey = null;
+  $('f-name').value = t.name;
+  $('f-dur').value = String(t.duration / 60);
+  $('f-notes').value = t.notes;
+  $('f-save').textContent = 'Save Changes';
+  openForm();
+  window.renderTimer(snap);
+}
+function saveForm() {
+  const name = $('f-name').value.trim();
+  const mins = parseFloat($('f-dur').value);
+  if (!name || !mins || mins <= 0) { $('f-name').focus(); return; }
+  const adding = editIndex < 0;
+  act('timerUpsertTopic', editIndex, { name, duration: Math.round(mins * 60), notes: $('f-notes').value.trim() });
+  if (!adding) { closeForm(); return; }
+  // Adding: keep the form open so a whole run of topics can be typed in quickly
+  $('f-name').value = $('f-dur').value = $('f-notes').value = '';
+  $('f-name').focus();
+}
+
+$('b-ss').onclick   = () => act('timerStartStop');
+$('b-p30').onclick  = () => act('timerPlus30');
+$('b-skip').onclick = () => act('timerSkip');
+$('b-stop').onclick = () => act('timerStopAll');
+$('b-add').onclick  = () => { editIndex = -1; $('f-save').textContent = 'Add Topic'; openForm(); };
+$('f-cancel').onclick = closeForm;
+$('f-save').onclick = saveForm;
+for (const id of ['f-name', 'f-dur']) $(id).addEventListener('keydown', e => { if (e.key === 'Enter') saveForm(); });
+$('b-thr').onclick = () => $('thresholds').classList.toggle('open');
+for (const id of ['t-yellow', 't-red']) {
+  $(id).addEventListener('change', () => {
+    act('timerSetThresholds', parseInt($('t-yellow').value), parseInt($('t-red').value));
+    if (snap) { $('t-yellow').value = snap.yellowAt; $('t-red').value = snap.redAt; }
+  });
+}
+
+// Same shortcuts as the studio window, active whenever focus isn't in a field
+document.addEventListener('keydown', e => {
+  if (!snap?.isHost || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest('input, textarea')) return;
+  const map = { p: 'b-ss', n: 'b-skip', '+': 'b-p30', '=': 'b-p30', '0': 'b-stop' };
+  const id = map[e.key.toLowerCase()];
+  if (id && !$(id).disabled) { e.preventDefault(); $(id).click(); }
+});
+
+// Tell the studio window we're ready for state, and notice if it goes away
+window.addEventListener('load', () => {
+  const s = studio();
+  if (s) s.pushTimerPopoutState(); else document.body.classList.add('lost');
+});
+setInterval(() => { if (!studio()) document.body.classList.add('lost'); }, 1000);
+</script>
+</body>
+</html>

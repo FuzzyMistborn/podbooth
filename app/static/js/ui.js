@@ -1528,32 +1528,19 @@ function openTimerPopout() {
     timerPopoutWin.focus();
     return;
   }
-  timerPopoutWin = window.open('', 'podbooth-timer-popout', 'width=480,height=320,menubar=no,toolbar=no,location=no,status=no');
+  // A real same-origin page (not document.write into about:blank) so the
+  // popout has its own UI and can drive this window's timer functions via
+  // window.opener. All timer state stays here; the popout only renders
+  // snapshots and calls back in.
+  const size = IS_HOST ? 'width=460,height=720' : 'width=420,height=300';
+  timerPopoutWin = window.open('/static/timer-popout.html', 'podbooth-timer-popout', `${size},menubar=no,toolbar=no,location=no,status=no`);
   if (!timerPopoutWin) { showToast('Pop-out blocked — allow pop-ups for this site'); return; }
-  timerPopoutWin.document.write(`<!doctype html><html><head><title>Timer — PodBooth</title>
-<style>
-  html,body{margin:0;height:100%;background:#111;color:#fff;font-family:system-ui,sans-serif;overflow:hidden;}
-  body{display:flex;flex-direction:column;align-items:center;}
-  #wrap{text-align:center;padding:16px;width:100%;height:100%;box-sizing:border-box;transition:background .3s;display:flex;flex-direction:column;align-items:center;min-height:0;}
-  #topic{font-size:20px;opacity:.85;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%;flex:none;}
-  #count{font-size:64px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;flex:none;}
-  #notes{font-size:15px;line-height:1.5;opacity:.85;margin-top:10px;max-width:34em;width:100%;text-align:left;display:none;overflow-y:auto;min-height:0;box-sizing:border-box;}
-  #notes:not(:empty){display:block;flex:1 1 auto;}
-  #notes strong{color:#fff;}
-  .green{background:rgba(34,197,94,.18);}
-  .yellow{background:rgba(234,179,8,.20);}
-  .red{background:rgba(239,68,68,.22);}
-</style></head><body><div id="wrap"><div id="topic"></div><div id="count">--:--</div><div id="notes"></div></div></body></html>`);
-  timerPopoutWin.document.close();
-  pushTimerPopoutState();
 
   timerBar?.classList.add('popped-out');
   clearInterval(timerPopoutWatcher);
-  // window.open gives us no reliable cross-window "closed" event (unload on
-  // an about:blank-origin popup is not consistently observable from the
-  // opener), so poll for it instead — as soon as the user closes the pop-out,
-  // put the timer back in the main studio UI rather than leaving it hidden
-  // with no way to see it.
+  // window.open gives us no reliable cross-window "closed" event, so poll —
+  // as soon as the user closes the pop-out, put the timer back in the main
+  // studio UI rather than leaving it hidden with no way to see it.
   timerPopoutWatcher = setInterval(() => {
     if (!timerPopoutWin || timerPopoutWin.closed) {
       clearInterval(timerPopoutWatcher);
@@ -1564,27 +1551,100 @@ function openTimerPopout() {
   }, 500);
 }
 
+function timerPopoutSnapshot() {
+  const barHidden = !timerBar || timerBar.classList.contains('hidden');
+  const color = ['red', 'yellow', 'green'].find(c => timerBar?.classList.contains('timer-' + c)) || 'green';
+  const snap = {
+    isHost:    IS_HOST,
+    active:    !barHidden,
+    expired:   !!timerBar?.classList.contains('timer-expired'),
+    color,
+    topic:     timerTopicEl?.textContent || '',
+    count:     timerCountEl?.textContent || '',
+    progress:  parseFloat(timerProgressEl?.style.width) || 0,
+    notesHtml: barHidden ? '' : (timerNotesEl?.innerHTML || ''),
+    paused:    false,
+    queue:     [],
+    activeIndex: -1,
+    yellowAt:  timerThresholds.yellow,
+    redAt:     timerThresholds.red,
+  };
+  if (IS_HOST) {
+    snap.paused      = timerState.paused;
+    snap.activeIndex = timerState.active ? timerState.topicIndex : -1;
+    snap.queue       = timerQueue.map(t => ({ name: t.name, duration: t.duration, notes: t.notes, durLabel: fmtTime(t.duration) }));
+  }
+  return snap;
+}
+
 function pushTimerPopoutState() {
   if (!timerPopoutWin || timerPopoutWin.closed) return;
-  const doc = timerPopoutWin.document;
-  const wrap = doc?.getElementById('wrap');
-  const topicEl = doc?.getElementById('topic');
-  const countEl = doc?.getElementById('count');
-  const notesEl = doc?.getElementById('notes');
-  if (!wrap || !topicEl || !countEl || !notesEl) return;
+  // The page may still be loading; it calls back here once it has loaded.
+  if (typeof timerPopoutWin.renderTimer !== 'function') return;
+  try { timerPopoutWin.renderTimer(timerPopoutSnapshot()); } catch (e) {}
+}
 
-  if (!timerBar || timerBar.classList.contains('hidden')) {
-    topicEl.textContent = '';
-    countEl.textContent = '--:--';
-    notesEl.innerHTML = '';
-    wrap.className = '';
-    return;
+// ── Queue/threshold mutations used by the pop-out (host only) ──
+
+function timerUpsertTopic(index, topic) {
+  if (!IS_HOST) return;
+  const t = { name: String(topic.name || '').slice(0, 60), duration: Math.max(1, parseInt(topic.duration) || 60), notes: String(topic.notes || '').slice(0, 500) };
+  if (!t.name) return;
+  if (index >= 0 && index < timerQueue.length) {
+    // Editing the running topic's duration shifts the live countdown by the same amount
+    if (timerState.active && index === timerState.topicIndex && t.duration !== timerQueue[index].duration) {
+      const delta = t.duration - timerQueue[index].duration;
+      if (!timerState.expired) timerState.remaining = Math.max(1, timerState.remaining + delta);
+      timerState.total = t.duration;
+    }
+    timerQueue[index] = t;
+  } else timerQueue.push(t);
+  saveTimerQueue();
+  // A running topic's name/notes may have just changed
+  if (timerState.active) { updateTimerBar(); broadcastTimerState(); }
+  renderTimerQueue();
+}
+
+function timerRemoveTopic(i) {
+  if (!IS_HOST || i < 0 || i >= timerQueue.length) return;
+  let shifted = false;
+  if (timerState.active) {
+    if (i === timerState.topicIndex) timerStopAll();
+    else if (i < timerState.topicIndex) { timerState.topicIndex--; shifted = true; }
   }
-  const color = ['timer-red', 'timer-yellow', 'timer-green'].find(c => timerBar.classList.contains(c)) || 'timer-green';
-  notesEl.innerHTML = timerNotesEl?.innerHTML || '';
-  topicEl.textContent = timerTopicEl?.textContent || '';
-  countEl.textContent = timerCountEl?.textContent || '';
-  wrap.className = color.replace('timer-', '');
+  if (timerEditIndex === i) cancelEditTopic();
+  else if (timerEditIndex > i) timerEditIndex--;
+  timerQueue.splice(i, 1);
+  saveTimerQueue();
+  // The running topic is now at a new index — refresh the bar and guests only
+  // once the queue itself has changed, or they'd read the old array.
+  if (shifted) { updateTimerBar(); broadcastTimerState(); }
+  renderTimerQueue();
+}
+
+// Replace the whole queue (Outline sync). Persists it, and stops a running
+// timer first since its topic index would otherwise point into the new list.
+function replaceTimerQueue(topics) {
+  if (timerState.active) {
+    timerStopAll();
+    showToast('Timer stopped — the topic list was replaced');
+  }
+  if (timerEditIndex >= 0) cancelEditTopic();
+  timerQueue.splice(0, timerQueue.length, ...topics.map(t => ({
+    name: String(t.name || ''), duration: Math.max(1, parseInt(t.duration) || 60), notes: String(t.notes || ''),
+  })));
+  saveTimerQueue();
+  renderTimerQueue();
+}
+
+function timerSetThresholds(yellow, red) {
+  if (!IS_HOST) return;
+  // Invalid/blank input keeps the current value (the pop-out re-syncs its boxes)
+  timerThresholds.yellow = Math.max(1, yellow || timerThresholds.yellow);
+  timerThresholds.red    = Math.max(1, red    || timerThresholds.red);
+  if (timerYellowIn) timerYellowIn.value = timerThresholds.yellow;
+  if (timerRedIn)    timerRedIn.value    = timerThresholds.red;
+  updateTimerBar();
 }
 
 function setupTimerControls() {
@@ -1600,6 +1660,14 @@ function setupTimerControls() {
       timerPanel.style.display = 'none';
       btnTimerBtn?.classList.remove('active');
     }
+  });
+
+  // Lets the host open the pop-out (and enter topics there) before any timer
+  // is running — the bar's own pop-out button is hidden until one is.
+  btnTimerPopoutPanel?.addEventListener('click', e => {
+    e.stopPropagation();
+    closeAllPanels();
+    openTimerPopout();
   });
 
   btnTimerSettings?.addEventListener('click', e => {
@@ -1706,6 +1774,7 @@ function jumpToTopic(i) {
 }
 
 function renderTimerQueue() {
+  pushTimerPopoutState();
   if (!timerQueueEl) return;
   // If the topic being edited was removed, clean up the form
   if (timerEditIndex >= timerQueue.length) cancelEditTopic();
@@ -1802,10 +1871,7 @@ function renderTimerQueue() {
         ? `"${topic.name}" is ${timerState.paused ? 'paused' : 'currently running'}. Remove it anyway?`
         : `Remove "${topic.name}" from the queue?`;
       if (!confirm(msg)) return;
-      if (timerEditIndex === i) cancelEditTopic();
-      timerQueue.splice(i, 1);
-      saveTimerQueue();
-      renderTimerQueue();
+      timerRemoveTopic(i);
     });
 
     row.append(dragHandle, numEl, nameEl, durEl, editBtn, rmBtn);
@@ -1946,6 +2012,7 @@ function applyTimerUpdate(msg) {
 
   if (!msg.active) {
     timerBar?.classList.add('hidden');
+    setTimerNotes('');
     pushTimerPopoutState();
     return;
   }
@@ -2015,6 +2082,7 @@ function updateTimerBar() {
   const topic = timerState.active && i >= 0 && i < timerQueue.length ? timerQueue[i] : null;
   if (!timerState.active || !topic) {
     timerBar?.classList.add('hidden');
+    setTimerNotes('');
     pushTimerPopoutState();
     return;
   }

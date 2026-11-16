@@ -284,6 +284,7 @@ const timerProgressEl   = document.getElementById('timer-progress-fill');
 const btnTimerEye       = document.getElementById('btn-timer-eye');
 const btnTimerPos       = document.getElementById('btn-timer-pos');
 const btnTimerPopout    = document.getElementById('btn-timer-popout');
+const btnTimerPopoutPanel = document.getElementById('btn-timer-popout-panel');
 const btnTimerCollapse   = document.getElementById('btn-timer-collapse');
 const btnTimerBtn   = document.getElementById('btn-timer');
 const timerPanel    = document.getElementById('timer-panel');
