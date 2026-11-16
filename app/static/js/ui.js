@@ -1562,7 +1562,7 @@ function timerPopoutSnapshot() {
     topic:     timerTopicEl?.textContent || '',
     count:     timerCountEl?.textContent || '',
     progress:  parseFloat(timerProgressEl?.style.width) || 0,
-    notesHtml: timerNotesEl?.innerHTML || '',
+    notesHtml: barHidden ? '' : (timerNotesEl?.innerHTML || ''),
     paused:    false,
     queue:     [],
     activeIndex: -1,
@@ -1607,17 +1607,32 @@ function timerUpsertTopic(index, topic) {
 
 function timerRemoveTopic(i) {
   if (!IS_HOST || i < 0 || i >= timerQueue.length) return;
+  let shifted = false;
   if (timerState.active) {
     if (i === timerState.topicIndex) timerStopAll();
-    else if (i < timerState.topicIndex) {
-      timerState.topicIndex--;
-      broadcastTimerState();
-      updateTimerBar();
-    }
+    else if (i < timerState.topicIndex) { timerState.topicIndex--; shifted = true; }
   }
   if (timerEditIndex === i) cancelEditTopic();
   else if (timerEditIndex > i) timerEditIndex--;
   timerQueue.splice(i, 1);
+  saveTimerQueue();
+  // The running topic is now at a new index — refresh the bar and guests only
+  // once the queue itself has changed, or they'd read the old array.
+  if (shifted) { updateTimerBar(); broadcastTimerState(); }
+  renderTimerQueue();
+}
+
+// Replace the whole queue (Outline sync). Persists it, and stops a running
+// timer first since its topic index would otherwise point into the new list.
+function replaceTimerQueue(topics) {
+  if (timerState.active) {
+    timerStopAll();
+    showToast('Timer stopped — the topic list was replaced');
+  }
+  if (timerEditIndex >= 0) cancelEditTopic();
+  timerQueue.splice(0, timerQueue.length, ...topics.map(t => ({
+    name: String(t.name || ''), duration: Math.max(1, parseInt(t.duration) || 60), notes: String(t.notes || ''),
+  })));
   saveTimerQueue();
   renderTimerQueue();
 }
@@ -1645,6 +1660,14 @@ function setupTimerControls() {
       timerPanel.style.display = 'none';
       btnTimerBtn?.classList.remove('active');
     }
+  });
+
+  // Lets the host open the pop-out (and enter topics there) before any timer
+  // is running — the bar's own pop-out button is hidden until one is.
+  btnTimerPopoutPanel?.addEventListener('click', e => {
+    e.stopPropagation();
+    closeAllPanels();
+    openTimerPopout();
   });
 
   btnTimerSettings?.addEventListener('click', e => {
@@ -1989,6 +2012,7 @@ function applyTimerUpdate(msg) {
 
   if (!msg.active) {
     timerBar?.classList.add('hidden');
+    setTimerNotes('');
     pushTimerPopoutState();
     return;
   }
@@ -2058,6 +2082,7 @@ function updateTimerBar() {
   const topic = timerState.active && i >= 0 && i < timerQueue.length ? timerQueue[i] : null;
   if (!timerState.active || !topic) {
     timerBar?.classList.add('hidden');
+    setTimerNotes('');
     pushTimerPopoutState();
     return;
   }

@@ -165,6 +165,51 @@ export function loadRecordingModules() {
   recordingLoaded = true;
 }
 
+// ui.js on its own, for the timer logic. Everything it reads that studio.js
+// declares (timerState, timerQueue, the timer DOM refs, ...) comes from
+// installTimerGlobals below. Re-evaluating just redefines the same functions.
+export function loadTimerModule() {
+  loadScript('ui.js');
+}
+
+function fakeEl() {
+  const classes = new Set();
+  return {
+    textContent: '', innerHTML: '', style: {}, dataset: {}, value: '',
+    classList: {
+      add: (...c) => c.forEach(x => classes.add(x)),
+      remove: (...c) => c.forEach(x => classes.delete(x)),
+      contains: c => classes.has(c),
+      toggle: (c, on) => (on ?? !classes.has(c)) ? classes.add(c) : classes.delete(c),
+    },
+  };
+}
+
+// The timer globals studio.js declares, with a fake element for each DOM ref
+// the timer code writes to. Returns the broadcast log.
+export function installTimerGlobals(overrides = {}) {
+  const broadcasts = [];
+  installGlobals({
+    IS_HOST: true,
+    timerQueue: [],
+    timerState: { active: false, paused: false, expired: false, topicIndex: -1, remaining: 0, total: 0, overtime: 0 },
+    timerInterval: null,
+    timerThresholds: { yellow: 60, red: 30 },
+    timerEditIndex: -1,
+    timerPopoutWin: null,
+    TIMER_QUEUE_KEY: 'podbooth:timer-queue',
+    timerBar: fakeEl(), timerTopicEl: fakeEl(), timerCountEl: fakeEl(), timerNotesEl: fakeEl(),
+    timerProgressEl: fakeEl(), timerQueueEl: null, timerYellowIn: null, timerRedIn: null,
+    timerAddName: null, timerAddDur: null, timerAddNotes: null, timerAddFormEl: null,
+    btnTimerAdd: null, btnTimerCancel: null, btnTimerAddTrigger: null,
+    btnTimerSS: null, btnTimerSkip: null, btnTimerStop: null, btnTimerBtn: null,
+    createMarkerWithLabel: () => {},
+    broadcastData: async m => { broadcasts.push(m); },
+    ...overrides,
+  });
+  return broadcasts;
+}
+
 export function makeBlob(bytes = 1024) {
   return new Blob([new Uint8Array(bytes)]);
 }

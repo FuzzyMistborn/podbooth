@@ -155,6 +155,7 @@ const ICON_RESTART = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
 
 let snap = null;
 let editIndex = -1;
+let autoOpened = false; // open the add form once for an empty queue
 let editOrig = null; // the topic as it was when editing began
 let queueKey = null;
 
@@ -210,6 +211,7 @@ window.renderTimer = function (s) {
 
   // The queue only rebuilds when it actually changes — rebuilding every tick
   // would swallow clicks and reset scroll.
+  if (!autoOpened && !s.active && !s.queue.length) { autoOpened = true; $('b-add').click(); }
   const key = JSON.stringify([s.queue, s.activeIndex, s.active, editIndex]);
   if (key !== queueKey) { queueKey = key; renderQueue(); }
 };
@@ -286,8 +288,12 @@ function saveForm() {
   const name = $('f-name').value.trim();
   const mins = parseFloat($('f-dur').value);
   if (!name || !mins || mins <= 0) { $('f-name').focus(); return; }
+  const adding = editIndex < 0;
   act('timerUpsertTopic', editIndex, { name, duration: Math.round(mins * 60), notes: $('f-notes').value.trim() });
-  closeForm();
+  if (!adding) { closeForm(); return; }
+  // Adding: keep the form open so a whole run of topics can be typed in quickly
+  $('f-name').value = $('f-dur').value = $('f-notes').value = '';
+  $('f-name').focus();
 }
 
 $('b-ss').onclick   = () => act('timerStartStop');
@@ -297,7 +303,7 @@ $('b-stop').onclick = () => act('timerStopAll');
 $('b-add').onclick  = () => { editIndex = -1; $('f-save').textContent = 'Add Topic'; openForm(); };
 $('f-cancel').onclick = closeForm;
 $('f-save').onclick = saveForm;
-$('f-name').addEventListener('keydown', e => { if (e.key === 'Enter') saveForm(); });
+for (const id of ['f-name', 'f-dur']) $(id).addEventListener('keydown', e => { if (e.key === 'Enter') saveForm(); });
 $('b-thr').onclick = () => $('thresholds').classList.toggle('open');
 for (const id of ['t-yellow', 't-red']) {
   $(id).addEventListener('change', () => {

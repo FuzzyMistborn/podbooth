@@ -1749,6 +1749,7 @@ body.no-mirror .participant-tile.local video { transform: none; }
   padding: 10px 14px 8px;
   border-bottom: 1px solid var(--border);
 }
+.timer-panel-actions { display: flex; align-items: center; gap: 4px; }
 .timer-settings-toggle {
   flex-shrink: 0;
   background: none;
