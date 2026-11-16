@@ -532,6 +532,32 @@ The prebuilt image at `ghcr.io/fuzzymistborn/podbooth` tracks the `main` branch.
 
 ---
 
+## Previewing UI Changes
+
+`scripts/studio-demo.py` serves the full studio UI without a backend, a Docker build, a camera/mic or a LiveKit server — handy for trying CSS/JS/template changes on any machine with `python3` (and `jinja2`, already in `requirements.txt`).
+
+```
+python3 scripts/studio-demo.py                      # http://localhost:8100/
+python3 scripts/studio-demo.py --host 0.0.0.0       # reachable from other machines on your network
+```
+
+| URL | What you get |
+|---|---|
+| `/` | Studio as the **host** (timer, queue, recording controls, waiting room) |
+| `/?role=guest` | Studio as a **guest** |
+| add `?bots=3` | Three always-present fake participants |
+
+It renders the **real** `app/templates/studio.html` and serves the **real** `app/static` files, re-read on every request, so edits show up when you reload. Only two things are faked:
+
+- **LiveKit** — replaced by `scripts/studio-demo/fake-livekit.js`: a synthetic camera, mic and screen share, and tabs of the page see each other (join/leave, mute, chat, raised hands, timer, recording start/stop). Open a host tab and a guest tab to see both sides.
+- **`/api/*`** — small canned responses. Recordings are not uploaded or stored; chunks are accepted and discarded.
+
+Limits: no real WebRTC (the stats panel shows "unavailable"), server-side kick/force-mute do nothing, and over plain `http://<lan-ip>` the browser withholds AudioWorklet/Web Locks so the app takes its fallback paths (use `localhost`, or an SSH tunnel such as `ssh -L 8100:localhost:8100 <host>`, for full fidelity). It is a dev tool only — nothing under `app/` is changed, and it should not be exposed to the internet.
+
+The fake's cross-tab behaviour is covered by `test/js/dev-fake-livekit.test.js` (runs with `npm test`).
+
+---
+
 ## Testing
 
 Two test suites cover the recording/upload pipeline without needing a real browser or a real long recording session:
