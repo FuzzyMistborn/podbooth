@@ -957,11 +957,8 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
   // track without its tail, report a clean run, and then idbDeleteEpoch's
   // backstop sweep in waitForUploads would delete the unsent chunks for good.
   // (Each queue already swallows its own errors — see enqueueChunk.)
-  recLog('upload pass: draining persist queues');
   await Promise.all(Object.values(_persistQueues));
-  recLog('upload pass: reading chunk index from IndexedDB');
   const all = await idbGetAllChunks();
-  recLog('upload pass: %d chunk records in store', all.length);
   // Only screen chunks may belong to one of this pass's known sub-epochs —
   // audio/video must match the pass epoch exactly, so a fast retake's
   // in-progress chunks (a different epoch, from startLocalRecording) can
@@ -977,7 +974,6 @@ async function _doUploadAllRecordedChunks(epoch, screenEpochs = []) {
     chunksByGroup.get(key).push(rec);
   }
 
-  recLog('upload pass: %d chunks belong to this take in %d group(s)', mine.length, chunksByGroup.size);
   uploadStats.queued = mine.length;
   uploadStats.bytesTotal = (uploadStats.bytesTotal || 0) + mine.reduce((n, c) => n + (c.size || 0), 0);
   uploadStats.completed = 0;
@@ -1107,9 +1103,7 @@ async function _uploadOneTrack(trackType, fsaOpenPromises, fsaFailedTracks, grou
   }
   if (!fsaTrack) {
     if (!failedTrack && groupChunks.length > 0 && _directCloudUploadEnabled()) {
-      recLog('upload pass: assembling %s from %d chunks for direct upload', trackType, groupChunks.length);
       const source = await _blobFromChunks(groupChunks);
-      recLog('upload pass: %s source blob %s', trackType, source ? source.size + ' bytes' : 'unavailable (gap/missing) — using server path');
       if (source) {
         // The pass already counted these chunks for the server path; the
         // cloud path counts its own parts instead (restored on fallback).
@@ -1189,13 +1183,11 @@ async function waitForUploads() {
   // write-through count for a frame before _doUploadAllRecordedChunks
   // overwrites it with the real (much smaller) upload count moments later.
   _resetUploadProgress();
-  recLog('waitForUploads: begin (epoch=%s)', epoch);
   showUploadBanner('uploading');
   const _unloadGuard = e => { e.preventDefault(); e.returnValue = ''; };
   window.addEventListener('beforeunload', _unloadGuard);
   try {
     await _uploadAllRecordedChunks(epoch);
-    recLog('waitForUploads: upload pass finished (cancelled=%s error=%s)', uploadCancelled, uploadHasError);
     _clearEpochMarker(identity, epoch);
 
     if (uploadCancelled) {
@@ -1223,7 +1215,6 @@ async function waitForUploads() {
     showUploadBanner('done');
     setTimeout(() => hideUploadBanner(), 8000);
   } catch (e) {
-    console.error('waitForUploads failed:', e);
     showUploadBanner('error');
   } finally {
     window.removeEventListener('beforeunload', _unloadGuard);
