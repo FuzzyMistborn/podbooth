@@ -283,6 +283,12 @@ def test_other_backends_get_the_file_pulled_down_and_pushed(client, session, buc
     assert pushed == [[("Test Session/local/Alice/clip.wav", b"\x01" * 3000)]]
     # Both buckets' keys are recorded for editor delivery; the temp file is gone.
     assert [f["key"] for f in session.r2_files] == [KEY, "Other/Test Session/local/Alice/clip.wav"]
+    # run_upload marks the job "done" before the handler's finally block
+    # unlinks the temp file, so poll briefly instead of asserting immediately
+    # (this raced and failed CI intermittently).
+    deadline = time.monotonic() + 5
+    while Path(bucket.probed[0]).exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert not Path(bucket.probed[0]).exists()
 
 
