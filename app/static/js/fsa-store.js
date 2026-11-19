@@ -152,6 +152,19 @@ async function fsaNextTakeNumber(dirHandle, sessionTitle, participant) {
 // after a crash is capped at one flush interval's worth of chunks instead of
 // the entire recording.
 const FSA_FLUSH_THRESHOLD_BYTES = 8 * 1024 * 1024;
+// Each flush (close + reopen with keepExistingData) makes the browser copy the
+// WHOLE existing file into a new swap file, so a flat 8MB interval costs O(file
+// size) every couple of chunks: on a ~6GB video track one flush outlasted the
+// chunk interval, the write queue fell further behind all recording long, and
+// at stop the upload pass sat waiting on a huge backlog. Let the interval grow
+// with the file (10%) so total copying stays bounded, capped so a crash still
+// loses at most a few minutes.
+const FSA_FLUSH_FRACTION = 0.1;
+const FSA_FLUSH_MAX_BYTES = 256 * 1024 * 1024;
+
+function _fsaFlushThreshold(track) {
+  return Math.min(FSA_FLUSH_MAX_BYTES, Math.max(FSA_FLUSH_THRESHOLD_BYTES, track.flushedBytes * FSA_FLUSH_FRACTION));
+}
 
 // The 'raw' audio track is headerless interleaved 32-bit-float PCM (see
 // flushPcm in recording.js — always 2ch/48kHz). That's fine for the server,
@@ -221,7 +234,7 @@ async function fsaWriteChunk(track, blob) {
   // file already holds — the upload path passes it to the server as
   // subsumes_chunks so the gap check doesn't flag the folded indices missing.
   track.chunksWritten += 1;
-  if (track.bytesWritten - track.flushedBytes >= FSA_FLUSH_THRESHOLD_BYTES) {
+  if (track.bytesWritten - track.flushedBytes >= _fsaFlushThreshold(track)) {
     await fsaFlushTrackFile(track);
   }
 }
