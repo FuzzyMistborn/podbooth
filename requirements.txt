@@ -9,4 +9,4 @@ httpx==0.28.1
 pydantic==2.14.3
 pydantic-settings==2.16.2
 slowapi==0.1.10
-boto3==1.44.1
+boto3==1.44.6
