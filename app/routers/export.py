@@ -14,7 +14,7 @@ from fastapi.responses import Response
 from app.auth import require_host
 from app.config import settings
 from app.models import get_session
-from app.utils import _safe_name
+from app.utils import _safe_name, normalize_start_ms
 
 router = APIRouter()
 
@@ -209,7 +209,7 @@ async def _resolve_runs(session) -> list[dict]:
                 "participant": run["participant"],
                 "slug": run.get("slug", run["participant"]),
                 "take": run["take"],
-                "start_ms": run.get("start_ms", 0),
+                "start_ms": normalize_start_ms(run.get("start_ms", 0)),
                 "tracks": resolved_tracks,
             })
     return result
