@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import re
@@ -15,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from app.models import list_sessions, get_session
-from app.utils import _safe_name, _parse_take, _take_sort_key, run_subprocess, niced, video_encode_slot, x264_args
+from app.utils import _safe_name, _parse_take, _take_sort_key, run_subprocess, niced, video_encode_slot, x264_args, normalize_start_ms
 
 logger = logging.getLogger(__name__)
 from app.config import settings, ASSET_VERSION, APP_VERSION
@@ -62,15 +63,88 @@ def _collect_video_groups(session) -> list[list[Path]]:
     return groups
 
 
-async def _concat_takes(paths: list[Path]) -> Path:
-    """Stream-copy multiple mp4 takes into a single temp mp4 (no re-encode)."""
+# A disconnect shorter than this isn't padded: it's within the jitter between a
+# take's wall-clock start and when capture actually began.
+MIN_TAKE_GAP_S = 1.0
+
+
+async def _probe_av_params(path: Path) -> dict:
+    """Width/height and audio rate/channels of a take, for building a matching gap clip."""
+    params = {"width": 1920, "height": 1080, "sample_rate": 48000, "channels": 2}
+    try:
+        cmd = ["ffprobe", "-v", "error", "-show_entries",
+               "stream=codec_type,width,height,sample_rate,channels",
+               "-of", "json", str(path)]
+        _, stdout, _ = await run_subprocess(cmd, settings.ffmpeg_timeout_s, "probe_av_params")
+        for st in json.loads(stdout.decode() or "{}").get("streams", []):
+            if st.get("codec_type") == "video" and st.get("width") and st.get("height"):
+                params["width"], params["height"] = int(st["width"]), int(st["height"])
+            elif st.get("codec_type") == "audio":
+                params["sample_rate"] = int(st.get("sample_rate") or 48000)
+                params["channels"] = int(st.get("channels") or 2)
+    except Exception:
+        pass
+    return params
+
+
+async def _make_gap_clip(ref: Path, seconds: float) -> Path:
+    """Black video + silent audio matching `ref`'s geometry/audio format, so it
+    can be stream-copied between takes as a placeholder for time the
+    participant was disconnected."""
+    p = await _probe_av_params(ref)
+    fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="pb_gap_")
+    os.close(fd)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=black:s={p['width']}x{p['height']}:r=30:d={seconds:.3f}",
+        "-f", "lavfi", "-i", f"anullsrc=r={p['sample_rate']}:cl={'mono' if p['channels'] == 1 else 'stereo'}",
+        "-t", f"{seconds:.3f}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "64k",
+        out_path,
+    ]
+    returncode, _, stderr = await run_subprocess(niced(cmd), settings.ffmpeg_timeout_s, "gap_clip")
+    if returncode != 0:
+        Path(out_path).unlink(missing_ok=True)
+        raise RuntimeError(f"Gap clip failed: {stderr.decode()[-1000:]}")
+    return Path(out_path)
+
+
+def _take_start_times(group: list[Path]) -> list[float | None]:
+    """Wall-clock start (ms, client clock) of each take file, from the session's
+    recording_metadata.json. None where unknown."""
+    meta = group[0].parent.parent / "recording_metadata.json"
+    try:
+        runs = json.loads(meta.read_text()).get("runs", [])
+    except Exception:
+        return [None] * len(group)
+    by_file = {}
+    for r in runs:
+        fn = r.get("tracks", {}).get("video")
+        if fn and r.get("start_ms"):
+            by_file[(r.get("participant"), fn)] = normalize_start_ms(r["start_ms"])
+    return [by_file.get((p.parent.name, p.name)) for p in group]
+
+
+async def _concat_takes(paths: list[Path], gaps_s: list[float] | None = None) -> Path:
+    """Stream-copy multiple mp4 takes into a single temp mp4 (no re-encode).
+
+    gaps_s[i] > 0 inserts that many seconds of black/silence between take i and
+    i+1, so a participant who dropped and rejoined stays aligned with everyone
+    else instead of their later takes playing early."""
     list_fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="pb_concat_list_")
     out_fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="pb_concat_")
     os.close(out_fd)
+    gap_clips: list[Path] = []
     try:
         with os.fdopen(list_fd, "w") as f:
-            for p in paths:
+            for i, p in enumerate(paths):
                 f.write(f"file '{p}'\n")
+                gap = gaps_s[i] if gaps_s and i < len(gaps_s) else 0.0
+                if gap >= MIN_TAKE_GAP_S and i < len(paths) - 1:
+                    clip = await _make_gap_clip(p, gap)
+                    gap_clips.append(clip)
+                    f.write(f"file '{clip}'\n")
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -87,6 +161,23 @@ async def _concat_takes(paths: list[Path]) -> Path:
         raise
     finally:
         Path(list_path).unlink(missing_ok=True)
+        for c in gap_clips:
+            c.unlink(missing_ok=True)
+
+
+async def _take_gaps(group: list[Path]) -> list[float]:
+    """Seconds of disconnected time between consecutive takes of one participant.
+    Same client clock throughout, so unlike comparing across participants it
+    isn't affected by clock skew between machines."""
+    starts = _take_start_times(group)
+    gaps = []
+    for i in range(len(group) - 1):
+        if starts[i] is None or starts[i + 1] is None:
+            gaps.append(0.0)
+            continue
+        dur = await _probe_duration(group[i])
+        gaps.append(max(0.0, (starts[i + 1] - starts[i]) / 1000.0 - dur))
+    return gaps
 
 
 def _build_export_cmd(
@@ -128,6 +219,11 @@ def _build_export_cmd(
 
     fc = []
 
+    # Normalize timing first: browser recordings are variable-frame-rate
+    # (e.g. 29.26 fps avg vs 59.94 tbr), and xstack with mismatched/VFR inputs
+    # lets tiles drift apart. fps=30 makes every tile constant-rate and
+    # setpts/aresample re-zero each input and fill audio gaps so audio and
+    # video stay locked to the same clock.
     # Scale each real video into its cell, preserving aspect ratio with black
     # bars, then freeze its last frame for the remainder of max_duration so a
     # speaker who left early doesn't end the whole grid.
@@ -137,7 +233,7 @@ def _build_export_cmd(
         if dur > 0 and max_duration > dur:
             pad_clause = f",tpad=stop_mode=clone:stop_duration={max_duration - dur:.3f}"
         fc.append(
-            f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+            f"[{i}:v]fps=30,setpts=PTS-STARTPTS,scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
             f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black{pad_clause}[v{i}]"
         )
 
@@ -158,10 +254,14 @@ def _build_export_cmd(
     # Pad each speaker's audio up to max_duration before mixing/mapping, same
     # reasoning as the video tpad above.
     for i in range(n):
-        fc.append(f"[{i}:a]apad=whole_dur={max_duration:.3f}[a{i}]")
+        # asplit: a filter label can only be consumed once, and each padded
+        # track is used both in the mix and as its own output track.
+        fc.append(
+            f"[{i}:a]aresample=async=1:first_pts=0,apad=whole_dur={max_duration:.3f},asplit=2[a{i}][m{i}]"
+        )
 
     # Track 0: mixed audio from all speakers
-    audio_refs = "".join(f"[a{i}]" for i in range(n))
+    audio_refs = "".join(f"[m{i}]" for i in range(n))
     fc.append(f"{audio_refs}amix=inputs={n}:normalize=0[aout]")
 
     cmd += ["-filter_complex", ";".join(fc)]
@@ -210,7 +310,11 @@ async def _run_grid_export(session_id: str, video_groups: list[list[Path]], outp
                 resolved.append(group[0])
             else:
                 logger.info("Concatenating %d takes for %s", len(group), group[0].parent.name)
-                tmp = await _concat_takes(group)
+                gaps = await _take_gaps(group)
+                if any(g >= MIN_TAKE_GAP_S for g in gaps):
+                    logger.info("Padding take gaps for %s: %s", group[0].parent.name,
+                                [round(g, 1) for g in gaps])
+                tmp = await _concat_takes(group, gaps)
                 tmp_files.append(tmp)
                 resolved.append(tmp)
 

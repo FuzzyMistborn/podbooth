@@ -105,3 +105,28 @@ def _take_sort_key(filename: str):
     if len(parts) == 2 and parts[1].isdigit():
         return (parts[0], int(parts[1]))
     return (stem, -1)
+
+
+# recordingEpoch (recording.js) is Date.now() in base 36 (8 chars until 2059)
+# followed by up to 4 random base-36 chars to keep back-to-back takes unique.
+_EPOCH_TS_CHARS = 8
+_EPOCH_SUFFIX_SCALE = 36 ** 4
+_PLAUSIBLE_MAX_MS = 10 ** 14  # year ~5138; anything bigger isn't a real ms timestamp
+
+
+def epoch_to_ms(epoch: str) -> int | None:
+    """Decode a recording epoch to wall-clock ms, ignoring the random suffix.
+    None for anything that isn't a plain epoch (e.g. a screen-share sub-epoch)."""
+    try:
+        int(epoch, 36)
+        return int(epoch[:_EPOCH_TS_CHARS], 36)
+    except Exception:
+        return None
+
+
+def normalize_start_ms(value: float) -> float:
+    """Repair a start_ms written before epoch_to_ms existed, which decoded the
+    random suffix as part of the timestamp (value = ms * 36**4 + random)."""
+    if value and value > _PLAUSIBLE_MAX_MS:
+        return float(int(value) // _EPOCH_SUFFIX_SCALE)
+    return value

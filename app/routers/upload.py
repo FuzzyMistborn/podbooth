@@ -37,7 +37,7 @@ from datetime import datetime, timedelta
 from app import s3
 from app.config import settings
 from app.models import get_session
-from app.utils import _safe_name, niced, video_encode_slot, x264_args
+from app.utils import _safe_name, epoch_to_ms, niced, video_encode_slot, x264_args
 
 logger = logging.getLogger(__name__)
 
@@ -356,10 +356,7 @@ def _decode_epoch_ms(epoch: str) -> int | None:
     recording.js) isn't a real Date.now() value, so it's never decodable here —
     "-" is filename-safe but not a base-36 digit, and int() raises on it.
     """
-    try:
-        return int(epoch, 36)
-    except Exception:
-        return None
+    return epoch_to_ms(epoch)
 
 
 async def _save_run_metadata(
